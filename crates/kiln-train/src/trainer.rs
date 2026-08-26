@@ -31,17 +31,32 @@ use kiln_model::backend::{
     TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
-    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
-    StreamingPrefillExecutionPolicy, gdn_attention_in_projections, gdn_attention_input_norm,
+    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState,
+    StreamingPrefillExecutionPolicy, model_forward_kt_with_policy,
+    model_forward_no_head_with_policy, model_forward_paged_normed_hidden,
+    model_forward_segment_with_policy, rms_norm,
+};
+// GPU-feature kt-tape composites: consumed only by the cuda/metal/vulkan/rocm
+// forward paths (trainer/forward_backward.rs); trainer/tests/mod.rs imports its
+// own copies for the non-GPU test build, so this stays cfg-gated.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use kiln_model::forward::{model_forward_embed, model_forward_final_norm, model_forward_head};
+// Candle-era tape parts (gdn/gqa/mlp family) — known feature-gated pattern per
+// CLEANUP steering: retained, deletion reserved for the dead-code round.
+#[allow(unused_imports)]
+use kiln_model::forward::{
+    GqaAttentionPrepared, gdn_attention_in_projections, gdn_attention_input_norm,
     gdn_attention_residual_block, gdn_gated_norm_from_recurrent, gdn_out_proj_from_gated_norm,
     gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
     gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
     gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
-    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_embed,
-    model_forward_final_norm, model_forward_head, model_forward_kt_with_policy,
-    model_forward_no_head_with_policy, model_forward_paged_normed_hidden,
-    model_forward_segment_with_policy, rms_norm, swiglu_ffn, transformer_mlp_down_from_gated,
-    transformer_mlp_gated_hidden,
+    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, swiglu_ffn,
+    transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 use kiln_model::sampling::{greedy_sample, try_topk_on_device};

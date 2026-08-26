@@ -1,7 +1,8 @@
 use super::*;
 use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
-    GpuLinearAttentionWeights, model_forward_kt, model_forward_segment,
+    GpuLinearAttentionWeights, model_forward_embed, model_forward_head, model_forward_kt,
+    model_forward_segment,
 };
 
 #[cfg(feature = "cuda")]
