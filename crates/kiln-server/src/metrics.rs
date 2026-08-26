@@ -270,6 +270,12 @@ pub struct Metrics {
     pub openenv_environment_gates_inconclusive: AtomicU64,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Metrics {
     pub fn new() -> Self {
         Self {

@@ -211,14 +211,14 @@ fn plan_and_reserve_resize_with_replan<'a>(
         refreshed_staging_available_bytes,
         bytes_per_block,
     );
-    if let Some(plan) = replanned_plan {
-        if let Some(reservation) = governor.try_reserve_cached(plan.replacement_bytes) {
-            return Ok(ReservedKvResize {
-                plan,
-                _reservation: reservation,
-                replanned_after_contention: true,
-            });
-        }
+    if let Some(plan) = replanned_plan
+        && let Some(reservation) = governor.try_reserve_cached(plan.replacement_bytes)
+    {
+        return Ok(ReservedKvResize {
+            plan,
+            _reservation: reservation,
+            replanned_after_contention: true,
+        });
     }
 
     Err(KvResizeReservationFailure::Contended {

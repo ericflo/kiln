@@ -596,10 +596,10 @@ async fn drive_run(
 
     // Same non-destructive config merge as the embedded terminal, so
     // the spawned pi's `kiln-local` provider points at this server.
-    if let Some(url) = &params.kiln_url {
-        if let Err(e) = crate::cli::apply_pi_setup_quiet(url, Some(&params.model)) {
-            tracing::warn!(error = %e, "pi-setup merge failed; spawning pi with existing config");
-        }
+    if let Some(url) = &params.kiln_url
+        && let Err(e) = crate::cli::apply_pi_setup_quiet(url, Some(&params.model))
+    {
+        tracing::warn!(error = %e, "pi-setup merge failed; spawning pi with existing config");
     }
 
     // Per-run session dir: runs never share a directory, so the
@@ -825,10 +825,8 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
                     .map(|blocks| {
                         blocks
                             .iter()
-                            .filter_map(|b| {
-                                (b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                                    .then(|| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
-                            })
+                            .filter(|&b| (b.get("type").and_then(|t| t.as_str()) == Some("text")))
+                            .map(|b| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
                             .collect::<Vec<_>>()
                             .join("\n")
                     })
@@ -874,25 +872,25 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
             reg.update(id, |run| run.num_tool_calls += 1);
         }
         "response" => {
-            if value.get("command").and_then(|c| c.as_str()) == Some("get_state") {
-                if let Some(data) = value.get("data") {
-                    let session_id = data
-                        .get("sessionId")
-                        .and_then(|s| s.as_str())
-                        .map(str::to_string);
-                    let session_path = data
-                        .get("sessionFile")
-                        .and_then(|s| s.as_str())
-                        .map(str::to_string);
-                    reg.update(id, |run| {
-                        if run.session_id.is_none() {
-                            run.session_id = session_id;
-                        }
-                        if run.session_path.is_none() {
-                            run.session_path = session_path;
-                        }
-                    });
-                }
+            if value.get("command").and_then(|c| c.as_str()) == Some("get_state")
+                && let Some(data) = value.get("data")
+            {
+                let session_id = data
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+                let session_path = data
+                    .get("sessionFile")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+                reg.update(id, |run| {
+                    if run.session_id.is_none() {
+                        run.session_id = session_id;
+                    }
+                    if run.session_path.is_none() {
+                        run.session_path = session_path;
+                    }
+                });
             }
         }
         _ => {}

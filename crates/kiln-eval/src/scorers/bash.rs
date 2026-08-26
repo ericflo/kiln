@@ -67,12 +67,12 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             if c == '"' {
                 in_double = false;
             } else if c == '\\' {
-                if let Some(&next) = iter.peek() {
-                    if matches!(next, '"' | '\\' | '$' | '`' | '\n') {
-                        iter.next();
-                        buf.push(next);
-                        continue;
-                    }
+                if let Some(&next) = iter.peek()
+                    && matches!(next, '"' | '\\' | '$' | '`' | '\n')
+                {
+                    iter.next();
+                    buf.push(next);
+                    continue;
                 }
                 buf.push(c);
             } else {
@@ -226,7 +226,7 @@ pub fn introspect(command: &str) -> BashIntrospection {
 
     // Handle `uv run python ...` / `uv run python3 ...` by recursing into
     // the inner command.
-    if (program == "uv" || program == "uvx") && rest.first().map(|s| *s) == Some("run") {
+    if (program == "uv" || program == "uvx") && rest.first().copied() == Some("run") {
         let inner: String = rest[1..].join(" ");
         let mut inner_intro = introspect(&inner);
         inner_intro.is_pipeline = inner_intro.is_pipeline || is_pipeline;
@@ -240,19 +240,18 @@ pub fn introspect(command: &str) -> BashIntrospection {
         (None, rest.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     };
 
-    if inline_code.is_none() {
-        if let Some(lang) = runtime_language_for(&program) {
-            if let Some(code) = extract_heredoc_body(command) {
-                return BashIntrospection {
-                    program,
-                    inline_language: Some(lang.to_string()),
-                    inline_code: Some(code),
-                    tail,
-                    is_pipeline,
-                    ..Default::default()
-                };
-            }
-        }
+    if inline_code.is_none()
+        && let Some(lang) = runtime_language_for(&program)
+        && let Some(code) = extract_heredoc_body(command)
+    {
+        return BashIntrospection {
+            program,
+            inline_language: Some(lang.to_string()),
+            inline_code: Some(code),
+            tail,
+            is_pipeline,
+            ..Default::default()
+        };
     }
 
     let (script_language, script_path) = if inline_code.is_none() {
@@ -285,7 +284,7 @@ fn inline_language_for(program: &str, rest: &[&str]) -> Option<String> {
     let has_inline_flag = if is_shell_program(program) {
         rest.iter().any(|t| is_shell_c_flag(t))
     } else {
-        rest.iter().any(|t| *t == flag)
+        rest.contains(&flag)
     };
     if has_inline_flag {
         let lang = match program {
@@ -304,8 +303,8 @@ fn inline_language_for(program: &str, rest: &[&str]) -> Option<String> {
 }
 
 fn extract_inline_program(rest: &[&str], lang: &str) -> (Option<String>, Vec<String>) {
-    let mut iter = rest.iter().enumerate();
-    while let Some((i, tok)) = iter.next() {
+    let iter = rest.iter().enumerate();
+    for (i, tok) in iter {
         if is_inline_program_flag(lang, tok) && i + 1 < rest.len() {
             let code = rest[i + 1].to_string();
             let mut tail: Vec<String> = Vec::new();

@@ -78,10 +78,10 @@ fn detect_answer(text: &str, valid: &[String]) -> Option<String> {
             } else {
                 next_letter(tail, valid, true)
             };
-            if let Some(letter) = letter {
-                if marker_hit.as_ref().is_none_or(|(pos, _)| idx >= *pos) {
-                    marker_hit = Some((idx, letter));
-                }
+            if let Some(letter) = letter
+                && marker_hit.as_ref().is_none_or(|(pos, _)| idx >= *pos)
+            {
+                marker_hit = Some((idx, letter));
             }
         }
     }

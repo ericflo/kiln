@@ -653,7 +653,7 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "teacher_identity_probe_busy",
-            message: format!("Teacher identity verification is at its concurrency limit"),
+            message: "Teacher identity verification is at its concurrency limit".to_string(),
             hint: "Wait for an in-flight teacher registration to finish, then retry.",
             retry_after_seconds: Some(5),
         }

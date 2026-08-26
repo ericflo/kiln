@@ -344,7 +344,7 @@ pub(super) fn evict_composed_cache_lru(
     }
 
     // Oldest first.
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
+    entries.sort_by_key(|a| a.1);
 
     let mut total_entries = entries.len() as u64;
     let mut iter = entries.into_iter();

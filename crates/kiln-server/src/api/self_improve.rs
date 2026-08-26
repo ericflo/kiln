@@ -297,9 +297,11 @@ pub fn submit_self_improve(
     if let Some((requested, effective)) = crisp_top_k_adjustment {
         top_k_notes.push(format!("CRISP {requested}->{effective}"));
     }
-    let top_k_note = (!top_k_notes.is_empty())
-        .then(|| format!(" Effective top_k: {}.", top_k_notes.join(", ")))
-        .unwrap_or_default();
+    let top_k_note = if !top_k_notes.is_empty() {
+        format!(" Effective top_k: {}.", top_k_notes.join(", "))
+    } else {
+        Default::default()
+    };
 
     Ok(SelfImproveResponse {
         job_ids,

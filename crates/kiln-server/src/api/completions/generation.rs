@@ -1060,11 +1060,11 @@ pub(super) async fn generate_mock(
             } else {
                 *token
             };
-            if *rid == request_id {
-                if let Some(t) = accepted_token {
-                    first_token_at.get_or_insert_with(std::time::Instant::now);
-                    output_tokens.push(t);
-                }
+            if *rid == request_id
+                && let Some(t) = accepted_token
+            {
+                first_token_at.get_or_insert_with(std::time::Instant::now);
+                output_tokens.push(t);
             }
 
             let prefill_processed = step_output

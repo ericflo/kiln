@@ -696,14 +696,14 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             // gate eval ran, so without this re-save the verdict only lived
             // in memory and a restart showed the gated job verdict-less
             // (round-5 quick win).
-            if let Some(job) = snapshot {
-                if let Err(e) = crate::training_history::save(&state.adapter_dir, &job) {
-                    tracing::warn!(
-                        error = %e,
-                        training_job = %gate.training_job_id,
-                        "failed to persist gate verdict to training history"
-                    );
-                }
+            if let Some(job) = snapshot
+                && let Err(e) = crate::training_history::save(&state.adapter_dir, &job)
+            {
+                tracing::warn!(
+                    error = %e,
+                    training_job = %gate.training_job_id,
+                    "failed to persist gate verdict to training history"
+                );
             }
         };
 

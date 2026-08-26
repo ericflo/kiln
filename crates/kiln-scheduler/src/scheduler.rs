@@ -170,10 +170,10 @@ impl Scheduler {
                     self.block_manager.free_all(&req.block_ids[cached_count..]);
                 }
                 // Release the cached blocks back to the prefix cache
-                if cached_count > 0 {
-                    if let Some(ref mut pc) = self.prefix_cache {
-                        pc.release_blocks(&req.block_ids[..cached_count]);
-                    }
+                if cached_count > 0
+                    && let Some(ref mut pc) = self.prefix_cache
+                {
+                    pc.release_blocks(&req.block_ids[..cached_count]);
                 }
                 completed_ids.push(req.id);
                 tracing::debug!(
@@ -389,10 +389,10 @@ impl Scheduler {
 
             // Allocate a new block if needed
             let needed = req.blocks_needed(self.config.block_size);
-            if needed > req.block_ids.len() {
-                if let Ok(block) = self.block_manager.allocate_one() {
-                    req.block_ids.push(block);
-                }
+            if needed > req.block_ids.len()
+                && let Ok(block) = self.block_manager.allocate_one()
+            {
+                req.block_ids.push(block);
             }
         }
 

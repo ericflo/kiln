@@ -75,7 +75,7 @@ fn build_cuda() {
     for arch in cuda_archs.split(';') {
         let arch = arch.trim();
         if !arch.is_empty() {
-            build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            build.flag(format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
         }
     }
 
@@ -271,15 +271,15 @@ fn find_rocm_root() -> Option<PathBuf> {
     if default.join("bin").join("hipcc").exists() {
         return Some(default);
     }
-    if let Ok(output) = Command::new("which").arg("hipcc").output() {
-        if output.status.success() {
-            let hipcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let p = PathBuf::from(hipcc_path);
-            if let Some(bin_dir) = p.parent() {
-                if let Some(root) = bin_dir.parent() {
-                    return Some(root.to_path_buf());
-                }
-            }
+    if let Ok(output) = Command::new("which").arg("hipcc").output()
+        && output.status.success()
+    {
+        let hipcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let p = PathBuf::from(hipcc_path);
+        if let Some(bin_dir) = p.parent()
+            && let Some(root) = bin_dir.parent()
+        {
+            return Some(root.to_path_buf());
         }
     }
     None

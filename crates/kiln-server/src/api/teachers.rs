@@ -844,12 +844,7 @@ fn resolve_caps_for(spec: &TeacherSpec) -> Option<LogitSourceCaps> {
             tokenizer_hash: Some(identity.tokenizer_vocab_sha256().to_owned()),
         });
     }
-    if spec.max_top_k.is_none() {
-        // Local and fixture sources are constructed with the admitted request
-        // K when no bound was registered, so zero would be a false concrete
-        // capability. Report unknown until construction instead.
-        return None;
-    }
+    spec.max_top_k?;
     let configured_max_top_k = spec.max_top_k.unwrap_or(0);
     let configured_or_default_max_top_k = configured_max_top_k;
     let max_top_k = spec

@@ -482,9 +482,11 @@ async fn run_recipe(
              FIFO; each step's base_adapter chains to the previous output by \
              default.{}",
             job_ids.len(),
-            (!top_k_adjustments.is_empty())
-                .then(|| format!(" Effective top_k: {}.", top_k_adjustments.join(", ")))
-                .unwrap_or_default()
+            if !top_k_adjustments.is_empty() {
+                format!(" Effective top_k: {}.", top_k_adjustments.join(", "))
+            } else {
+                Default::default()
+            }
         ),
         job_ids,
         effective_seeds,

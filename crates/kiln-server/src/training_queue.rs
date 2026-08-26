@@ -195,7 +195,9 @@ pub enum QueuedJob {
 /// selectors and materialized JSONL sources must never be resolved for the
 /// first time after the worker has already reserved/reclaimed accelerator
 /// memory.
+#[derive(Default)]
 pub enum PreparedTrainingData {
+    #[default]
     None,
     /// Every SFT transport is reduced to one owned, tokenization-validated
     /// corpus at admission. The worker never reopens a mutable source path.
@@ -213,12 +215,6 @@ pub enum PreparedTrainingData {
     DistillRefreshPrompts(Vec<kiln_train::opd::OpdPrompt>),
     DistillMergePrompts(Vec<PreparedDistillMergeSource>),
     DistillPumpPrompts(Vec<kiln_train::opd::OpdPrompt>),
-}
-
-impl Default for PreparedTrainingData {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl PreparedTrainingData {
@@ -1111,6 +1107,12 @@ fn resolve_pinned_teacher_for_job(
 /// Thread-safe training queue.
 pub struct TrainingQueue {
     pub(crate) queue: VecDeque<QueueEntry>,
+}
+
+impl Default for TrainingQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrainingQueue {
@@ -2186,7 +2188,7 @@ fn run_opd(
                     ))
                 }
                 crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
-                    &spec,
+                    spec,
                     prompts,
                     tokenizer,
                     weights,
@@ -2397,7 +2399,7 @@ fn build_multi_tenant_merge_teacher(
         )?;
         // The source identity is the declared LoRA. Loading it is part of the
         // teacher contract, so failure cannot degrade to base-model scoring.
-        let device = weights.embed_tokens.device().clone();
+        let device = weights.embed_tokens.device();
         let teacher_lora = gpu_step_coordination
             .run_gpu_phase(&*backend, "OPD", "merge teacher adapter load", || {
                 load_declared_merge_source_lora(
@@ -2823,7 +2825,7 @@ fn build_local_teacher_for(
     let teacher_lora = match spec.adapter.as_deref() {
         Some(name) => {
             let dir = adapter_dir.join(name);
-            let device = weights.embed_tokens.device().clone();
+            let device = weights.embed_tokens.device();
             let pinned_adapter = pinned_identity.adapter().ok_or_else(|| {
                 format!(
                     "local teacher '{}' names adapter '{name}' but its pinned identity is the bare base model",
@@ -3091,7 +3093,7 @@ fn run_distill_refresh(
             ))
         }
         crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
-            &spec,
+            spec,
             &prompts,
             tokenizer,
             weights,
@@ -3475,7 +3477,7 @@ fn run_distill_pump(
             ))
         }
         crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
-            &spec,
+            spec,
             &prompts,
             tokenizer,
             weights,
@@ -4425,14 +4427,14 @@ fn stamp_gate_enqueue_error(state: &AppState, job_id: &str, verdict: String) {
             job.clone()
         })
     };
-    if let Some(job) = snapshot {
-        if let Err(error) = crate::training_history::save(&state.adapter_dir, &job) {
-            tracing::warn!(
-                job_id,
-                %error,
-                "failed to persist post-eval gate enqueue error"
-            );
-        }
+    if let Some(job) = snapshot
+        && let Err(error) = crate::training_history::save(&state.adapter_dir, &job)
+    {
+        tracing::warn!(
+            job_id,
+            %error,
+            "failed to persist post-eval gate enqueue error"
+        );
     }
 }
 
@@ -5041,8 +5043,8 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
             // produced adapter so dashboards land directly on the eval
             // result. Failures here are warnings — we still consider the
             // training itself successful.
-            if let Some(cfg) = post_eval.as_ref() {
-                if let Err(e) = enqueue_post_training_eval(
+            if let Some(cfg) = post_eval.as_ref()
+                && let Err(e) = enqueue_post_training_eval(
                     &state,
                     &job_id,
                     &adapter_name,
@@ -5050,19 +5052,19 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     auto_load && canary_ok,
                     None,
                     None,
-                ) {
-                    tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
-                    // The gate could not be installed — an auto_load that
-                    // was deferred to it would otherwise be lost silently.
-                    if promotion_gate_pending {
-                        stamp_gate_enqueue_error(
-                            &state,
-                            &job_id,
-                            format!(
-                                "post-eval gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
-                            ),
-                        );
-                    }
+                )
+            {
+                tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
+                // The gate could not be installed — an auto_load that
+                // was deferred to it would otherwise be lost silently.
+                if promotion_gate_pending {
+                    stamp_gate_enqueue_error(
+                        &state,
+                        &job_id,
+                        format!(
+                            "post-eval gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
+                        ),
+                    );
                 }
             }
 

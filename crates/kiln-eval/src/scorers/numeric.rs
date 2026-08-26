@@ -146,13 +146,12 @@ fn extract_numbers(text: &str) -> Vec<f64> {
                     break;
                 }
             }
-            if saw_digit {
-                if let Ok(val) = std::str::from_utf8(&bytes[start..i])
+            if saw_digit
+                && let Ok(val) = std::str::from_utf8(&bytes[start..i])
                     .unwrap_or("")
                     .parse::<f64>()
-                {
-                    found.push(val);
-                }
+            {
+                found.push(val);
             }
         } else {
             i += 1;

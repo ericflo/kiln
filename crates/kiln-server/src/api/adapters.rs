@@ -222,21 +222,21 @@ async fn load_adapter(
         .map_err(|error| adapter_swap_error(&state, error))?;
 
     let adapter_path = state.adapter_dir.join(&req.name);
-    let resolved_adapter_path = validate_loadable_adapter_dir(&adapter_path).map_err(|err| {
-        state
-            .adapter_load_errors
-            .write()
-            .unwrap()
-            .insert(req.name.clone(), err.message.clone());
-        tracing::warn!(
-            adapter = %req.name,
-            path = %adapter_path.display(),
-            reason = %err.message,
-            operation = "load",
-            "adapter load rejected"
-        );
-        err
-    })?;
+    let resolved_adapter_path =
+        validate_loadable_adapter_dir(&adapter_path).inspect_err(|err| {
+            state
+                .adapter_load_errors
+                .write()
+                .unwrap()
+                .insert(req.name.clone(), err.message.clone());
+            tracing::warn!(
+                adapter = %req.name,
+                path = %adapter_path.display(),
+                reason = %err.message,
+                operation = "load",
+                "adapter load rejected"
+            );
+        })?;
 
     let canary = read_adapter_canary_metadata(&resolved_adapter_path);
     if canary.is_quarantined() && !req.allow_quarantined {
@@ -527,7 +527,7 @@ async fn delete_adapter(
         return Err(ApiError::adapter_loaded(&name));
     }
 
-    std::fs::remove_dir_all(&adapter_path).map_err(|e| ApiError::adapter_delete_failed(e))?;
+    std::fs::remove_dir_all(&adapter_path).map_err(ApiError::adapter_delete_failed)?;
 
     // Clean up any checkpoint directories (e.g. "my-adapter-checkpoint-50")
     let checkpoint_prefix = format!("{name}-checkpoint-");
@@ -583,16 +583,16 @@ fn scan_adapter_dir(
 
             if let Ok(sub_entries) = std::fs::read_dir(&path) {
                 for sub in sub_entries.flatten() {
-                    if let Ok(meta) = sub.metadata() {
-                        if meta.is_file() {
-                            files.push(sub.file_name().to_string_lossy().to_string());
-                            size_bytes += meta.len();
-                            if let Ok(modified) = meta.modified() {
-                                latest_modified = Some(match latest_modified {
-                                    Some(prev) if prev >= modified => prev,
-                                    _ => modified,
-                                });
-                            }
+                    if let Ok(meta) = sub.metadata()
+                        && meta.is_file()
+                    {
+                        files.push(sub.file_name().to_string_lossy().to_string());
+                        size_bytes += meta.len();
+                        if let Ok(modified) = meta.modified() {
+                            latest_modified = Some(match latest_modified {
+                                Some(prev) if prev >= modified => prev,
+                                _ => modified,
+                            });
                         }
                     }
                 }
@@ -1767,15 +1767,15 @@ async fn adapter_detail(
     };
     {
         for entry in rd.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    let n = entry.file_name().to_string_lossy().to_string();
-                    files.push(AdapterFileEntry {
-                        name: n,
-                        size_bytes: meta.len(),
-                    });
-                    size_bytes += meta.len();
-                }
+            if let Ok(meta) = entry.metadata()
+                && meta.is_file()
+            {
+                let n = entry.file_name().to_string_lossy().to_string();
+                files.push(AdapterFileEntry {
+                    name: n,
+                    size_bytes: meta.len(),
+                });
+                size_bytes += meta.len();
             }
         }
     }
@@ -1867,7 +1867,7 @@ async fn adapter_receipt(
     }
     match kiln_train::AdapterReceipt::read_from_adapter_dir(&adapter_dir) {
         Ok(Some(r)) => Ok(Json(r)),
-        Ok(None) => Err(ApiError::adapter_not_found(&format!("{name}/receipt.json"))),
+        Ok(None) => Err(ApiError::adapter_not_found(format!("{name}/receipt.json"))),
         Err(e) => Err(ApiError::internal(format!(
             "failed to read adapter receipt for {name}: {e:#}"
         ))),

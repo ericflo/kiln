@@ -108,10 +108,12 @@ impl Default for Sampling {
 /// `EvalExample`s from a single `SftConversation`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SynthesisStrategy {
     /// Prompt = history up to the last user message; target = the very
     /// last assistant message in the conversation. Default — works well
     /// for single-shot Q&A AND as an end-to-end check for agent trajectories.
+    #[default]
     FinalAssistant,
     /// Prompt = system + first user; target = first assistant turn.
     FirstAssistantTurn,
@@ -134,21 +136,17 @@ pub enum SynthesisStrategy {
     EndOfTrajectoryAnswer,
 }
 
-impl Default for SynthesisStrategy {
-    fn default() -> Self {
-        SynthesisStrategy::FinalAssistant
-    }
-}
-
 /// Default scorer selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ScorerChoice {
     /// Pick a scorer per example based on the target's shape:
     /// numeric → numeric_tolerance, JSON-shaped → json_validity, MCQ-shaped
     /// (single letter A-D) → multiple_choice, otherwise → contains with
     /// extracted key phrases. The suite-level default scorer falls back to
     /// `exact_match` for safety.
+    #[default]
     AutoDetect,
     /// Use a single fixed scorer for every example. The named field keeps
     /// this enum's `kind=fixed` discriminator separate from the nested
@@ -159,12 +157,6 @@ pub enum ScorerChoice {
         #[serde(default)]
         judge_adapter: Option<String>,
     },
-}
-
-impl Default for ScorerChoice {
-    fn default() -> Self {
-        ScorerChoice::AutoDetect
-    }
 }
 
 /// Synthesis configuration body.
@@ -343,17 +335,17 @@ fn looks_like_tool_call_target(s: &str) -> bool {
     if !trimmed.starts_with('{') {
         return false;
     }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(obj) = v.as_object() {
-            if obj.contains_key("tool_calls") {
-                return true;
-            }
-            if obj.contains_key("name") && obj.contains_key("arguments") {
-                return true;
-            }
-            if obj.contains_key("function") || obj.contains_key("tool_call") {
-                return true;
-            }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(obj) = v.as_object()
+    {
+        if obj.contains_key("tool_calls") {
+            return true;
+        }
+        if obj.contains_key("name") && obj.contains_key("arguments") {
+            return true;
+        }
+        if obj.contains_key("function") || obj.contains_key("tool_call") {
+            return true;
         }
     }
     false
@@ -481,13 +473,11 @@ where
 
     for conv in conversations.into_iter() {
         stats.trajectories_seen += 1;
-        if !tools_inconsistent {
-            if let Some(t) = extract_tools_from_extra(&conv.extra) {
-                match &tools_witness {
-                    None => tools_witness = Some(t),
-                    Some(prev) if prev != &t => tools_inconsistent = true,
-                    _ => {}
-                }
+        if !tools_inconsistent && let Some(t) = extract_tools_from_extra(&conv.extra) {
+            match &tools_witness {
+                None => tools_witness = Some(t),
+                Some(prev) if prev != &t => tools_inconsistent = true,
+                _ => {}
             }
         }
         let candidates = match decompose(&conv, config) {
@@ -874,10 +864,10 @@ fn every_assistant_turn(
             format!("synth:turn_{i}"),
             target_kind.tag().to_string(),
         ];
-        if let AssistantTargetKind::Code { ref language } = target_kind {
-            if let Some(l) = language.as_deref() {
-                tags.push(format!("synth:lang_{l}"));
-            }
+        if let AssistantTargetKind::Code { ref language } = target_kind
+            && let Some(l) = language.as_deref()
+        {
+            tags.push(format!("synth:lang_{l}"));
         }
         out.push(EvalExample {
             id: None,
@@ -1067,8 +1057,8 @@ fn extract_tool_call_from_content(content: &str) -> Option<String> {
 /// Pull the first fenced code block out of an assistant message. Returns
 /// `(language_tag, body)`. Falls back to None when no fence is present.
 fn extract_first_code_block(content: &str) -> Option<(Option<String>, String)> {
-    let mut chars = content.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    let chars = content.char_indices().peekable();
+    for (i, c) in chars {
         if c != '`' {
             continue;
         }
@@ -1145,10 +1135,10 @@ fn trajectory_metadata_with_kind(
         "synth_kind".into(),
         serde_json::json!(kind.tag().trim_start_matches("kind:")),
     );
-    if let AssistantTargetKind::Code { language } = kind {
-        if let Some(l) = language.as_deref() {
-            obj.insert("synth_language".into(), serde_json::json!(l));
-        }
+    if let AssistantTargetKind::Code { language } = kind
+        && let Some(l) = language.as_deref()
+    {
+        obj.insert("synth_language".into(), serde_json::json!(l));
     }
     Some(serde_json::Value::Object(obj))
 }
@@ -1189,10 +1179,10 @@ fn extract_tools_from_extra(
     if let Some(arr) = value.as_array() {
         return Some(arr.clone());
     }
-    if let Some(obj) = value.as_object() {
-        if let Some(arr) = obj.get("tools").and_then(|v| v.as_array()) {
-            return Some(arr.clone());
-        }
+    if let Some(obj) = value.as_object()
+        && let Some(arr) = obj.get("tools").and_then(|v| v.as_array())
+    {
+        return Some(arr.clone());
     }
     None
 }

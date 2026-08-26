@@ -92,10 +92,10 @@ impl PiRpcProcess {
         if let Some(name) = &opts.session_name {
             cmd.arg("--name").arg(name);
         }
-        if let Some(tools) = &opts.tools {
-            if !tools.is_empty() {
-                cmd.arg("--tools").arg(tools.join(","));
-            }
+        if let Some(tools) = &opts.tools
+            && !tools.is_empty()
+        {
+            cmd.arg("--tools").arg(tools.join(","));
         }
         if let Some(level) = &opts.thinking_level {
             cmd.arg("--thinking").arg(level);
@@ -120,10 +120,10 @@ impl PiRpcProcess {
                 match reader.read_until(b'\n', &mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        if let Some(value) = parse_rpc_line(&buf) {
-                            if tx.send(PiRpcLine::Json(value)).await.is_err() {
-                                return; // receiver gone — stop pumping
-                            }
+                        if let Some(value) = parse_rpc_line(&buf)
+                            && tx.send(PiRpcLine::Json(value)).await.is_err()
+                        {
+                            return; // receiver gone — stop pumping
                         }
                     }
                 }

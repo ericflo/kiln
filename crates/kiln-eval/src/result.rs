@@ -260,7 +260,7 @@ pub fn aggregate_example_outcomes(
             aggregation.label()
         )));
     }
-    if matches!(aggregation, EvalAggregation::MajorityAtK { .. }) && k % 2 == 0 {
+    if matches!(aggregation, EvalAggregation::MajorityAtK { .. }) && k.is_multiple_of(2) {
         return Err(EvalAggregationError::InvalidDefinition(format!(
             "{} requires an odd k so ties are impossible",
             aggregation.label()

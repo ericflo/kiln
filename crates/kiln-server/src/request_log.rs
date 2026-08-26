@@ -192,7 +192,7 @@ impl RequestLogger {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                if dropped == 1 || dropped % 1000 == 0 {
+                if dropped == 1 || dropped.is_multiple_of(1000) {
                     tracing::warn!(dropped, "request log overloaded; dropping rows");
                 }
             }
@@ -285,10 +285,10 @@ impl LogWriter {
             .open(&active)?;
         self.file = BufWriter::new(fresh);
         self.current_bytes = 0;
-        if self.config.compress {
-            if let Err(e) = gzip_file(&rotated) {
-                tracing::warn!(error = %e, file = %rotated.display(), "request log compression failed; keeping plain file");
-            }
+        if self.config.compress
+            && let Err(e) = gzip_file(&rotated)
+        {
+            tracing::warn!(error = %e, file = %rotated.display(), "request log compression failed; keeping plain file");
         }
         self.enforce_retention();
         Ok(())
@@ -610,15 +610,15 @@ fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
         if model.is_none() {
             model = chunk.get("model").cloned();
         }
-        if let Some(u) = chunk.get("usage") {
-            if !u.is_null() {
-                usage = Some(u.clone());
-            }
+        if let Some(u) = chunk.get("usage")
+            && !u.is_null()
+        {
+            usage = Some(u.clone());
         }
-        if let Some(value) = chunk.get("metadata") {
-            if !value.is_null() {
-                metadata = Some(value.clone());
-            }
+        if let Some(value) = chunk.get("metadata")
+            && !value.is_null()
+        {
+            metadata = Some(value.clone());
         }
         let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
             continue;

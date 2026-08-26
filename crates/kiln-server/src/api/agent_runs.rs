@@ -131,19 +131,19 @@ async fn create_run(
             "`task` must be non-empty",
         ));
     }
-    if let Some(level) = &req.thinking_level {
-        if !THINKING_LEVELS.contains(&level.as_str()) {
-            return Err(ApiError::agent_run_invalid_request(format!(
-                "`thinking_level` must be one of {THINKING_LEVELS:?}, got '{level}'"
-            )));
-        }
+    if let Some(level) = &req.thinking_level
+        && !THINKING_LEVELS.contains(&level.as_str())
+    {
+        return Err(ApiError::agent_run_invalid_request(format!(
+            "`thinking_level` must be one of {THINKING_LEVELS:?}, got '{level}'"
+        )));
     }
-    if let Some(secs) = req.timeout_secs {
-        if secs < 10 {
-            return Err(ApiError::agent_run_invalid_request(
-                "`timeout_secs` must be >= 10",
-            ));
-        }
+    if let Some(secs) = req.timeout_secs
+        && secs < 10
+    {
+        return Err(ApiError::agent_run_invalid_request(
+            "`timeout_secs` must be >= 10",
+        ));
     }
     let cwd = match &req.cwd {
         Some(dir) => {

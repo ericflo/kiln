@@ -2263,6 +2263,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
 /// `KILN_ACCELERATOR_<FIELD>`; alternate spellings are not accepted.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct AcceleratorRuntimeConfig {
     pub kt_api_mode: KtApiModeSetting,
     pub full_attention_score_budget_mib: FullAttentionScoreBudgetMib,
@@ -2393,28 +2394,6 @@ impl AcceleratorRuntimeConfig {
         kiln_model::validate_full_attention_score_budget_mib(
             self.full_attention_score_budget_mib.mib(),
         )
-    }
-}
-
-impl Default for AcceleratorRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            kt_api_mode: KtApiModeSetting::default(),
-            full_attention_score_budget_mib: FullAttentionScoreBudgetMib::default(),
-            vulkan_device_index: VulkanDeviceIndexSetting::default(),
-            vulkan_validation: VulkanValidationSetting::default(),
-            cuda_kernel_profile: CudaKernelProfileSetting::default(),
-            cuda_marlin_profile: CudaMarlinProfileSetting::default(),
-            cuda_flash_backward_mode: CudaFlashBackwardModeSetting::default(),
-            metal_kernel_profile: MetalKernelProfileSetting::default(),
-            rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
-            rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
-            rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
-            rocm_kernel_profile: RocmKernelProfileSetting::default(),
-            rocm_graph_mode: RocmGraphModeSetting::default(),
-            rocm_graph_cache_entries: RocmGraphCacheEntries::default(),
-            rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes::default(),
-        }
     }
 }
 
@@ -2860,6 +2839,7 @@ impl<'de> Deserialize<'de> for PrefillLayerBudget {
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct KilnConfig {
     pub server: ServerConfig,
     pub accelerator: AcceleratorRuntimeConfig,
@@ -4008,7 +3988,9 @@ fn effective_source_for_explicit_value(source: ConfigValueSource) -> BatchingEff
 /// rejected before model loading.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SpecMethod {
+    #[default]
     Off,
     SkipLayer,
     Mtp,
@@ -4020,12 +4002,6 @@ pub enum SpecMethod {
 /// requires new accelerator evidence because verifier work and synchronization
 /// scale with K.
 pub const MAX_SPECULATIVE_DRAFT_TOKENS: usize = kiln_model::speculative::MAX_SPECULATIVE_TOKENS;
-
-impl Default for SpecMethod {
-    fn default() -> Self {
-        Self::Off
-    }
-}
 
 impl SpecMethod {
     /// Parse the canonical environment grammar. Returns `None` for unknown values.
@@ -4268,7 +4244,7 @@ fn validate_streaming_prefill_positive_tokens(field: &str, tokens: usize) -> Res
 }
 
 fn validate_streaming_prefill_tile_tokens(field: &str, tokens: usize) -> Result<()> {
-    if tokens == 0 || tokens % 64 != 0 {
+    if tokens == 0 || !tokens.is_multiple_of(64) {
         anyhow::bail!("{field} must be a positive multiple of 64, got {tokens}");
     }
     Ok(())
@@ -4357,6 +4333,7 @@ impl<'de> Deserialize<'de> for StreamingPrefillLastTokenLmHead {
 /// positive multiple of 64, the recurrent-attention chunk size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct StreamingPrefillConfig {
     pub mode: StreamingPrefillModeSetting,
     pub threshold_tokens: StreamingPrefillThresholdTokens,
@@ -5265,31 +5242,6 @@ const REDACTED_EFFECTIVE_CONFIGURATION_FIELDS: &[&str] = &[
 
 // --- Defaults ---
 
-impl Default for KilnConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            accelerator: AcceleratorRuntimeConfig::default(),
-            batching: BatchingConfig::default(),
-            model: ModelConfig::default(),
-            paths: PathsConfig::default(),
-            memory: MemoryConfig::default(),
-            training: TrainingConfig::default(),
-            openenv: OpenEnvConfig::default(),
-            logging: LoggingConfig::default(),
-            prefix_cache: PrefixCacheConfig::default(),
-            speculative: SpeculativeDecodingConfig::default(),
-            streaming_prefill: StreamingPrefillConfig::default(),
-            adapters: AdaptersConfig::default(),
-            teachers: TeachersConfig::default(),
-            eval: None,
-            request_log: crate::request_log::RequestLogConfig::default(),
-            agent: None,
-            value_sources: BTreeMap::new(),
-        }
-    }
-}
-
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -5529,19 +5481,6 @@ impl SpeculativeDecodingConfig {
     /// Resolve the effective speculative-decoding method.
     pub fn effective_method(&self) -> SpecMethod {
         self.method
-    }
-}
-
-impl Default for StreamingPrefillConfig {
-    fn default() -> Self {
-        Self {
-            mode: StreamingPrefillModeSetting::default(),
-            threshold_tokens: StreamingPrefillThresholdTokens::default(),
-            tile_tokens: StreamingPrefillTileTokens::default(),
-            tape_tile_tokens: StreamingPrefillTapeTileTokens::default(),
-            detached_full_attn_tile_tokens: StreamingPrefillDetachedFullAttnTileTokens::default(),
-            last_token_lm_head: StreamingPrefillLastTokenLmHead::default(),
-        }
     }
 }
 

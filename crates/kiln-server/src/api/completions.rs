@@ -479,9 +479,7 @@ async fn completions_inner(
         )));
     }
     let scored_positions = prompt_tokens.len().saturating_sub(1);
-    let candidate_upper_bound = scored_positions
-        .checked_mul(top_k.saturating_add(1))
-        .unwrap_or(usize::MAX);
+    let candidate_upper_bound = scored_positions.saturating_mul(top_k.saturating_add(1));
     if candidate_upper_bound > MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES {
         return Err(ApiError::completion_invalid_request(format!(
             "prompt_logprobs response may contain {candidate_upper_bound} candidates; \
@@ -949,10 +947,10 @@ async fn chat_completions_inner(
     };
 
     // Ensure the correct LoRA adapter is active for this request.
-    if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if !has_composed_adapter {
-            ensure_adapter(state, runner, &req.adapter, &adapter_request_id).await?;
-        }
+    if let ModelBackend::Real { runner, .. } = state.backend.as_ref()
+        && !has_composed_adapter
+    {
+        ensure_adapter(state, runner, &req.adapter, &adapter_request_id).await?;
     }
 
     let request_adapter = state.loaded_adapter_identity();
@@ -1211,22 +1209,22 @@ async fn chat_completions_inner(
             }
         }
     };
-    if req.stream {
-        if let Err(error) = &result {
-            let model = req
-                .model
-                .clone()
-                .unwrap_or_else(|| state.served_model_id.clone());
-            record_failed_chat_completion(
-                state,
-                &req,
-                &model,
-                &prompt_text,
-                request_start,
-                prompt_tokens.len(),
-                error,
-            );
-        }
+    if req.stream
+        && let Err(error) = &result
+    {
+        let model = req
+            .model
+            .clone()
+            .unwrap_or_else(|| state.served_model_id.clone());
+        record_failed_chat_completion(
+            state,
+            &req,
+            &model,
+            &prompt_text,
+            request_start,
+            prompt_tokens.len(),
+            error,
+        );
     }
     result.map(|response| response_with_loaded_adapter_identity(response, &request_adapter))
 }
@@ -1511,10 +1509,10 @@ async fn generate_multi_chat_response(
         false
     };
 
-    if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if !has_composed_adapter {
-            ensure_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
-        }
+    if let ModelBackend::Real { runner, .. } = state.backend.as_ref()
+        && !has_composed_adapter
+    {
+        ensure_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
     }
     let request_adapter = state.loaded_adapter_identity();
 
@@ -1938,7 +1936,7 @@ async fn generate_one_prepared_response(
             DeterministicCompletionCacheClaim::Hit(cached) => {
                 let resp = response_from_cached_completion(
                     state,
-                    &req,
+                    req,
                     prompt_tokens.len(),
                     request_start,
                     cached,
@@ -1955,7 +1953,7 @@ async fn generate_one_prepared_response(
                 if let Some(cached) = wait_for_deterministic_completion(receiver).await {
                     let resp = response_from_cached_completion(
                         state,
-                        &req,
+                        req,
                         prompt_tokens.len(),
                         request_start,
                         cached,

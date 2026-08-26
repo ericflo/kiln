@@ -142,8 +142,7 @@ fn resolved_environment_eval_seed_start(request: &OpenEnvRunRequest) -> Option<u
         config.seed_start.unwrap_or_else(|| {
             request
                 .seed_start
-                .checked_add(u64::try_from(request.groups).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX)
+                .saturating_add(u64::try_from(request.groups).unwrap_or(u64::MAX))
         })
     })
 }
@@ -879,10 +878,10 @@ impl OpenEnvRunRegistry {
         let now = now_unix_ms();
         let ttl_ms = self.policy.tracked_run_ttl_secs.saturating_mul(1000);
         runs.retain(|_, tracked| {
-            !tracked
+            tracked
                 .status
                 .finished_unix_ms
-                .is_some_and(|finished| now.saturating_sub(finished) > ttl_ms)
+                .is_none_or(|finished| now.saturating_sub(finished) <= ttl_ms)
         });
     }
 
@@ -2354,16 +2353,16 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             "OpenEnv train run has no valid admitted training contract"
         ),
     }
-    if let Some(contract) = training_contract.as_ref() {
-        if let Some(expected) = contract.behavior_policy.as_ref() {
-            let current = state
-                .openenv_behavior_policy_identity(contract.effective_config.base_adapter.as_deref())
-                .map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(
-                expected == &current,
-                "OpenEnv behavior policy changed after training preflight and before collection began"
-            );
-        }
+    if let Some(contract) = training_contract.as_ref()
+        && let Some(expected) = contract.behavior_policy.as_ref()
+    {
+        let current = state
+            .openenv_behavior_policy_identity(contract.effective_config.base_adapter.as_deref())
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            expected == &current,
+            "OpenEnv behavior policy changed after training preflight and before collection began"
+        );
     }
     let run_dir = state.openenv_runs.run_dir(run_id);
     let credential_envs = state

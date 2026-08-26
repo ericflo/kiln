@@ -1767,13 +1767,13 @@ pub(crate) fn submit_grpo_request(
     mut req: GrpoRequest,
     external_promotion_gate_pending: bool,
 ) -> Result<TrainingResponse, ApiError> {
-    ensure_training_backend_admission(&state)?;
+    ensure_training_backend_admission(state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
 
-    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    validate_post_eval_suite(state, req.post_eval.as_ref())?;
 
     // Reject when the queue is at its configured cap. See submit_sft above
     // for the audit reference.
@@ -1880,7 +1880,7 @@ pub(crate) fn submit_grpo_request(
     };
     // Enqueue and publish the tracking record under one admission lock pair.
     let admission = admit_training_jobs_with_summary(
-        &state,
+        state,
         vec![(
             info,
             QueueEntry::new(
@@ -1973,20 +1973,19 @@ async fn submit_opd(
     // A plain-file dataset_path is pre-scored off-policy teacher JSONL;
     // `agent_traces:` selectors are on-policy prompt sources. The worker
     // enforces this too — but at submission the caller can still fix it.
-    if let Some(path) = req.dataset_path.as_deref() {
-        if !crate::dataset_resolve::is_agent_traces_selector(path)
-            && !matches!(
-                req.config.training_mode,
-                kiln_train::opd::OpdTrainingMode::OffPolicy
-            )
-        {
-            return Err(ApiError::training_invalid_request(
-                "OPD dataset_path (teacher-logprob JSONL) requires config.training_mode = \
+    if let Some(path) = req.dataset_path.as_deref()
+        && !crate::dataset_resolve::is_agent_traces_selector(path)
+        && !matches!(
+            req.config.training_mode,
+            kiln_train::opd::OpdTrainingMode::OffPolicy
+        )
+    {
+        return Err(ApiError::training_invalid_request(
+            "OPD dataset_path (teacher-logprob JSONL) requires config.training_mode = \
                  \"off_policy\"; for on-policy training on pi sessions use an \
                  `agent_traces:` selector instead"
-                    .to_string(),
-            ));
-        }
+                .to_string(),
+        ));
     }
     for (i, prompt) in req.prompts.iter().enumerate() {
         if prompt.messages.is_empty() {
@@ -3744,7 +3743,7 @@ fn prepare_training_entry_admission(
             entry.prepared_data = prepared;
         }
         QueuedJob::Opd(req) => {
-            if req.dataset_path.is_some() == !req.prompts.is_empty() {
+            if req.dataset_path.is_some() != req.prompts.is_empty() {
                 return Err(ApiError::training_invalid_request(
                     "OPD request must use exactly one of prompts or dataset_path",
                 ));

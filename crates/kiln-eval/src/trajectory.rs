@@ -209,7 +209,7 @@ fn blocks_to_assistant_sft_message(blocks: &[AnthropicBlock]) -> SftMessage {
 }
 
 fn assistant_has_payload(msg: &SftMessage) -> bool {
-    !msg.content.is_empty() || msg.tool_calls.as_ref().map_or(false, |t| !t.is_empty())
+    !msg.content.is_empty() || msg.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
 }
 
 fn tool_result_content_to_string(value: &serde_json::Value) -> String {

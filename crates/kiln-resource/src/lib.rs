@@ -298,10 +298,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     drop(file);
     match std::fs::rename(&tmp, path) {
         Ok(()) => {
-            if let Some(parent) = path.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
+            if let Some(parent) = path.parent()
+                && let Ok(dir) = std::fs::File::open(parent)
+            {
+                let _ = dir.sync_all();
             }
             Ok(())
         }

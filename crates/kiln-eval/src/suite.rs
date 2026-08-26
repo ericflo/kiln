@@ -376,7 +376,7 @@ impl EvalSuite {
                 self.aggregation.label()
             )));
         }
-        if matches!(self.aggregation, EvalAggregation::MajorityAtK { .. }) && k % 2 == 0 {
+        if matches!(self.aggregation, EvalAggregation::MajorityAtK { .. }) && k.is_multiple_of(2) {
             return Err(SuiteLoadError::Parse(format!(
                 "aggregation {} requires an odd k so ties are impossible",
                 self.aggregation.label()

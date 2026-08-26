@@ -644,12 +644,11 @@ pub(super) fn truncate_at_matched_stop<'a>(
     text: &'a str,
     finish_reason: &kiln_model::FinishReason,
 ) -> &'a str {
-    if let kiln_model::FinishReason::StopSequence(stop) = finish_reason {
-        if !stop.is_empty() {
-            if let Some(idx) = text.find(stop.as_str()) {
-                return &text[..idx];
-            }
-        }
+    if let kiln_model::FinishReason::StopSequence(stop) = finish_reason
+        && !stop.is_empty()
+        && let Some(idx) = text.find(stop.as_str())
+    {
+        return &text[..idx];
     }
     text
 }
@@ -831,11 +830,11 @@ pub(super) fn assistant_output_from_model_output_stop_aware(
     }
     let mut parsed = parsed;
     parsed.content = truncate_at_matched_stop(&parsed.content, engine_finish).to_string();
-    if parsed.content.is_empty() {
-        if let Some(reasoning) = parsed.reasoning_content.take() {
-            let truncated = truncate_at_matched_stop(&reasoning, engine_finish).to_string();
-            parsed.reasoning_content = (!truncated.is_empty()).then_some(truncated);
-        }
+    if parsed.content.is_empty()
+        && let Some(reasoning) = parsed.reasoning_content.take()
+    {
+        let truncated = truncate_at_matched_stop(&reasoning, engine_finish).to_string();
+        parsed.reasoning_content = (!truncated.is_empty()).then_some(truncated);
     }
     parsed
 }
@@ -886,18 +885,16 @@ pub(super) fn stream_assistant_output_with_stop_reconstruction(
     matched_stop: Option<&str>,
     finish: &str,
 ) -> AssistantOutputParts {
-    if buffer_tool_content {
-        if let Some(stop) = matched_stop {
-            let reconstructed = format!("{content_buf}{stop}");
-            let out = assistant_output_from_split_parts_with_tool_parsing(
-                true,
-                reasoning_content.clone(),
-                reconstructed,
-                finish,
-            );
-            if out.tool_calls.is_some() {
-                return out;
-            }
+    if buffer_tool_content && let Some(stop) = matched_stop {
+        let reconstructed = format!("{content_buf}{stop}");
+        let out = assistant_output_from_split_parts_with_tool_parsing(
+            true,
+            reasoning_content.clone(),
+            reconstructed,
+            finish,
+        );
+        if out.tool_calls.is_some() {
+            return out;
         }
     }
     assistant_output_from_split_parts_with_tool_parsing(

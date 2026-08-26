@@ -463,26 +463,26 @@ pub(super) fn streaming_response_from_cached_completion(
     };
     events.push(Event::default().data(serde_json::to_string(&role_chunk).unwrap()));
 
-    if let Some(reasoning) = cached_output.reasoning_content {
-        if !reasoning.is_empty() {
-            let chunk = ChatCompletionChunk {
-                id: id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta {
-                        role: None,
-                        content: None,
-                        reasoning_content: Some(reasoning),
-                        tool_calls: None,
-                    },
-                    finish_reason: None,
-                }],
-            };
-            events.push(Event::default().data(serde_json::to_string(&chunk).unwrap()));
-        }
+    if let Some(reasoning) = cached_output.reasoning_content
+        && !reasoning.is_empty()
+    {
+        let chunk = ChatCompletionChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created,
+            model: model.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some(reasoning),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+        };
+        events.push(Event::default().data(serde_json::to_string(&chunk).unwrap()));
     }
 
     if let Some(tool_calls) = cached_output.tool_calls.as_deref() {

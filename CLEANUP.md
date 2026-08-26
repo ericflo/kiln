@@ -783,3 +783,28 @@ AFTER: `scripts/check_repository_artifacts.py` passes both times (6702 →
 passes both times (all receipts OK); post-deletion `git grep` for
 `2026-05-25-partial` matches only CLEANUP.md and the standing manifest;
 `git status` shows only the ten deletions plus this ledger entry.
+## Cleanup Agent (round 31) — 2026-08-30
+
+Ran the rounds 9–12 mechanical-lint playbook over `crates/kiln-server` and
+its workspace dependency crates (kiln-eval, kiln-resource, kiln-opd-loss-
+kernel, kiln-blas, kiln-core, kiln-scheduler) — surfaces untouched by prior
+lint campaigns. Fixed every machine-applicable instance of
+`clippy::collapsible_if` (~28 sites, nested `if let`/`if` ladders collapsed
+into Rust-2024 let-chains), plus `manual_div_ceil`, `manual_is_multiple_of`,
+`manual_contains`, `unnecessary_sort_by` (`sort_by(|a,b| a.cmp(b))` →
+`sort_by_key`), `while_let_on_iterator`, and the trivial one-offs clippy's
+fixer surfaced: six hand-written `Default` impls replaced by
+`#[derive(Default)]` (+`#[default]` on enums), `new_without_default`
+(`EvalQueue`/`Metrics` got `impl Default = Self::new()`), and two redundant
+borrows on `&format!()`. Net −101 lines. Restored four imports the fixer had
+removed as "lib-unused" that are actually used under `#[cfg(test)]`
+(`Path`, `VramSource` ×2, `TokenPhaseDurations`) after the test target caught
+it. Why it mattered: cut the kiln-server build's clippy diagnostics from 78
+to 29 (−63%), leaving only judgment-call categories (needless_range_loop ×10,
+too_many_arguments keeps, result_large_err, etc.). Verified: `cargo check -p
+kiln-server -p kiln-eval -p kiln-core -p kiln-scheduler` clean; `cargo test
+--lib -p kiln-server -p kiln-eval -p kiln-core -p kiln-scheduler` all green
+(103+239+12+1189 passed, 0 failed); `cargo check -p kiln-model` (downstream)
+clean; `cargo fmt --all --check` clean; clippy JSON confirms zero remaining
+target-category warnings; `scripts/check_repository_artifacts.py` passes;
+diff audit confirms only mechanical rewrites plus the four import restores.

@@ -381,10 +381,10 @@ pub(super) fn score(
 
 /// Resolve the explicitly configured Python binary or use the stable default.
 pub(crate) fn resolve_python_bin(configured: Option<&str>) -> String {
-    if let Some(c) = configured {
-        if !c.is_empty() {
-            return c.to_string();
-        }
+    if let Some(c) = configured
+        && !c.is_empty()
+    {
+        return c.to_string();
     }
     DEFAULT_PYTHON_BIN.to_string()
 }

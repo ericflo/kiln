@@ -1248,10 +1248,10 @@ pub(super) async fn batch_completions_inner(
         false
     };
 
-    if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if !has_composed_adapter {
-            ensure_batch_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
-        }
+    if let ModelBackend::Real { runner, .. } = state.backend.as_ref()
+        && !has_composed_adapter
+    {
+        ensure_batch_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
     }
 
     let request_adapter = state.loaded_adapter_identity();

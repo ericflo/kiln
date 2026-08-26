@@ -31,25 +31,22 @@ use crate::suite::EvalExample;
 /// How strictly the predicted tool *name* must match the target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NameMatch {
     /// Exact equality.
     Exact,
     /// Case-insensitive equality.
+    #[default]
     CaseInsensitive,
     /// Pass if the predicted name appears in this set. Useful when more
     /// than one tool is acceptable (read_file or read_lines, etc.).
     OneOf { allowed: Vec<String> },
 }
 
-impl Default for NameMatch {
-    fn default() -> Self {
-        NameMatch::CaseInsensitive
-    }
-}
-
 /// How to score arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ArgsScoring {
     /// Score only on whether the argument *keys* match (set equality).
     /// Doesn't look at values. Cheap and useful when arg values are
@@ -71,13 +68,8 @@ pub enum ArgsScoring {
     /// Auto: structural for non-string args, contains-based for string
     /// args (extracting the top 3 phrases from the target value).
     #[serde(rename = "auto")]
+    #[default]
     Auto,
-}
-
-impl Default for ArgsScoring {
-    fn default() -> Self {
-        ArgsScoring::Auto
-    }
 }
 
 impl ArgsScoring {
@@ -539,10 +531,10 @@ fn score_arg_value_auto(
     target: &serde_json::Value,
     predicted: &serde_json::Value,
 ) -> f32 {
-    if is_command_key(key) {
-        if let (Some(t), Some(p)) = (target.as_str(), predicted.as_str()) {
-            return score_bash_command(t, p);
-        }
+    if is_command_key(key)
+        && let (Some(t), Some(p)) = (target.as_str(), predicted.as_str())
+    {
+        return score_bash_command(t, p);
     }
     match (target, predicted) {
         (serde_json::Value::String(t), serde_json::Value::String(p)) => {
@@ -616,11 +608,10 @@ fn score_bash_command(target: &str, predicted: &str) -> f32 {
 fn score_bash_command_depth(target: &str, predicted: &str, depth: usize) -> f32 {
     let t_intro = bash::introspect(target);
     let p_intro = bash::introspect(predicted);
-    if depth < BASH_RECURSION_LIMIT {
-        if let Some(score) = score_shell_wrapper_pair(&t_intro, &p_intro, target, predicted, depth)
-        {
-            return score;
-        }
+    if depth < BASH_RECURSION_LIMIT
+        && let Some(score) = score_shell_wrapper_pair(&t_intro, &p_intro, target, predicted, depth)
+    {
+        return score;
     }
     if t_intro.classification() != p_intro.classification() {
         if t_intro.program == p_intro.program {
@@ -878,8 +869,8 @@ fn extract_balanced_call_args(code: &str, start: usize) -> Option<(String, usize
     let mut in_string: Option<char> = None;
     let mut escaped = false;
     let mut out = String::new();
-    let mut iter = code[start..].char_indices().peekable();
-    while let Some((rel, ch)) = iter.next() {
+    let iter = code[start..].char_indices().peekable();
+    for (rel, ch) in iter {
         if let Some(quote) = in_string {
             out.push(ch);
             if escaped {

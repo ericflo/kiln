@@ -31,7 +31,6 @@ mod ui;
 
 pub(crate) use training::{
     enforce_queued_training_optimizer_admission, enforce_queued_training_workload_admission,
-    enforce_training_optimizer_admission,
 };
 
 #[cfg(test)]

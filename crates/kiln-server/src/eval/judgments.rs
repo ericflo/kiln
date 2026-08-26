@@ -527,7 +527,7 @@ pub fn build_validation_suite(
                 ..Default::default()
             })
         })
-        .filter_map(|e| e)
+        .flatten()
         .collect();
     if examples.is_empty() {
         return Err(JudgmentError::NotFound(format!(

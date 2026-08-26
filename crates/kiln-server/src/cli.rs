@@ -1577,18 +1577,18 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
         let _ = writeln!(out, "  {} idle", style("Training:").dim());
     }
 
-    if let Some(checks) = body.get("checks").and_then(|v| v.as_array()) {
-        if !checks.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "  {}", style("Checks:").dim());
-            for c in checks {
-                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let pass = c.get("pass").and_then(|v| v.as_bool()).unwrap_or(false);
-                if pass {
-                    let _ = writeln!(out, "    {} {}", style("✓").green().bold(), name);
-                } else {
-                    let _ = writeln!(out, "    {} {}", style("✗").red().bold(), name);
-                }
+    if let Some(checks) = body.get("checks").and_then(|v| v.as_array())
+        && !checks.is_empty()
+    {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  {}", style("Checks:").dim());
+        for c in checks {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let pass = c.get("pass").and_then(|v| v.as_bool()).unwrap_or(false);
+            if pass {
+                let _ = writeln!(out, "    {} {}", style("✓").green().bold(), name);
+            } else {
+                let _ = writeln!(out, "    {} {}", style("✗").red().bold(), name);
             }
         }
     }
@@ -2207,9 +2207,8 @@ pub fn run_config_check(
                     .unwrap_or_else(|| "unlimited".to_string())
             );
             println!(
-                "  {} {}",
-                style("Speculative serving:").dim(),
-                "off (pending local accelerator qualification)"
+                "  {} off (pending local accelerator qualification)",
+                style("Speculative serving:").dim()
             );
             if let Some(warning) = non_loopback_host_warning(&config.server.host) {
                 println!();
@@ -2297,12 +2296,11 @@ fn load_trajectory_inspect_tokenizer(
         let template = std::fs::read_to_string(path)
             .with_context(|| format!("read chat template {}", path.display()))?;
         tokenizer = tokenizer.with_chat_template(template);
-    } else if let Some(dir) = template_dir.as_deref() {
-        if let Some((_source, template)) = load_inspect_chat_template_from_model_dir(dir)
+    } else if let Some(dir) = template_dir.as_deref()
+        && let Some((_source, template)) = load_inspect_chat_template_from_model_dir(dir)
             .with_context(|| format!("load chat template from {}", dir.display()))?
-        {
-            tokenizer = tokenizer.with_chat_template(template);
-        }
+    {
+        tokenizer = tokenizer.with_chat_template(template);
     }
 
     Ok(tokenizer)
@@ -3672,27 +3670,27 @@ fn print_job_summary(job: &serde_json::Value) {
         };
         println!("  {} {}", style("Gate:").dim(), styled);
     }
-    if state == "failed" {
-        if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
-            println!("  {} {}", style("Error:").red().bold(), style(err).red());
-        }
+    if state == "failed"
+        && let Some(err) = job.get("error").and_then(|v| v.as_str())
+    {
+        println!("  {} {}", style("Error:").red().bold(), style(err).red());
     }
-    if let Some(checkpoint) = job.get("latest_checkpoint") {
-        if let Some(name) = checkpoint.get("resume_checkpoint").and_then(|v| v.as_str()) {
-            let step = checkpoint
-                .get("global_step")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let total = checkpoint
-                .get("total_steps")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            println!(
-                "  {} {} (step {step}/{total})",
-                style("Resume checkpoint:").dim(),
-                style(name).white()
-            );
-        }
+    if let Some(checkpoint) = job.get("latest_checkpoint")
+        && let Some(name) = checkpoint.get("resume_checkpoint").and_then(|v| v.as_str())
+    {
+        let step = checkpoint
+            .get("global_step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total = checkpoint
+            .get("total_steps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "  {} {} (step {step}/{total})",
+            style("Resume checkpoint:").dim(),
+            style(name).white()
+        );
     }
     if let Some(error) = job.get("checkpoint_error").and_then(|v| v.as_str()) {
         println!("  {} {}", style("Checkpoint warning:").yellow(), error);
@@ -3727,14 +3725,14 @@ fn print_job_line(job: &serde_json::Value) {
         progress_pct,
         elapsed
     );
-    if state == "failed" {
-        if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
-            println!(
-                "      {} {}",
-                style("error:").red().bold(),
-                style(err).red()
-            );
-        }
+    if state == "failed"
+        && let Some(err) = job.get("error").and_then(|v| v.as_str())
+    {
+        println!(
+            "      {} {}",
+            style("error:").red().bold(),
+            style(err).red()
+        );
     }
 }
 

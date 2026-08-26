@@ -79,6 +79,6 @@ impl Request {
 
     /// How many KV cache blocks this request currently needs.
     pub fn blocks_needed(&self, block_size: usize) -> usize {
-        (self.total_tokens() + block_size - 1) / block_size
+        self.total_tokens().div_ceil(block_size)
     }
 }

@@ -245,6 +245,12 @@ pub struct EvalQueue {
     pub(crate) queue: VecDeque<EvalQueueEntry>,
 }
 
+impl Default for EvalQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EvalQueue {
     pub fn new() -> Self {
         Self {

@@ -367,8 +367,8 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
     } else {
         1usize << (usize::BITS - 1 - raw.leading_zeros())
     };
-    let safe = rounded.max(1).min(cfg.vocab_size.max(1));
-    safe
+
+    rounded.max(1).min(cfg.vocab_size.max(1))
 }
 
 fn sft_loss_workspace_bytes(cfg: &ModelConfig, max_seq_len: usize, sft: SftEstimateOptions) -> u64 {
@@ -799,7 +799,7 @@ fn ceil_div_u64(n: u64, d: u64) -> u64 {
     if d == 0 {
         0
     } else {
-        (n / d).saturating_add(u64::from(n % d != 0))
+        (n / d).saturating_add(u64::from(!n.is_multiple_of(d)))
     }
 }
 
@@ -1050,15 +1050,15 @@ pub fn available_for_training_bytes_with_meminfo_details(
     // Unified memory: training and inference share the same physical
     // pool, so MemAvailable_now is the truth. Cap by the effective capacity so
     // a host cannot report more available memory than the GPU can address.
-    if vram.unified {
-        if let Some(mem_avail) = mem_available_bytes {
-            let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
-            return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
-        }
-        // No live host signal (for example non-Linux Apple Silicon): fall
-        // through to the conservative static path. Capacity detection already
-        // retained unified-memory system headroom.
+    if vram.unified
+        && let Some(mem_avail) = mem_available_bytes
+    {
+        let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
+        return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
     }
+    // No live host signal (for example non-Linux Apple Silicon): fall
+    // through to the conservative static path. Capacity detection already
+    // retained unified-memory system headroom.
 
     // Discrete-GPU / unknown path: reserve a fraction of the budget
     // for inference (KV cache + the running scheduler), capped at
@@ -1219,10 +1219,10 @@ fn approximate_tokens_for_messages(
 
     if let Some(tok) = tokenizer {
         let core: Vec<kiln_core::tokenizer::ChatMessage> = messages.to_vec();
-        if let Ok(text) = tok.apply_chat_template(&core) {
-            if let Ok(ids) = tok.encode(&text) {
-                return ids.len();
-            }
+        if let Ok(text) = tok.apply_chat_template(&core)
+            && let Ok(ids) = tok.encode(&text)
+        {
+            return ids.len();
         }
     }
     char_estimate
@@ -1230,10 +1230,10 @@ fn approximate_tokens_for_messages(
 
 fn approximate_tokens_for_text(text: &str, tokenizer: Option<&KilnTokenizer>) -> usize {
     let char_estimate = (text.chars().count() / 4).saturating_add(4);
-    if let Some(tok) = tokenizer {
-        if let Ok(ids) = tok.encode(text) {
-            return ids.len().max(char_estimate);
-        }
+    if let Some(tok) = tokenizer
+        && let Ok(ids) = tok.encode(text)
+    {
+        return ids.len().max(char_estimate);
     }
     char_estimate
 }

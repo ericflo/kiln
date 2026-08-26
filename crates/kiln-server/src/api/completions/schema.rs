@@ -1,20 +1,15 @@
 use super::*;
 
 /// OpenAI-compatible chat completion request adapter selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ChatAdapterSelection {
     /// The request omitted `adapter`; use the server default as-is.
+    #[default]
     Default,
     /// The request explicitly selected base model for this request.
     Base,
     /// The request explicitly selected a named adapter for this request.
     Named(String),
-}
-
-impl Default for ChatAdapterSelection {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl ChatAdapterSelection {

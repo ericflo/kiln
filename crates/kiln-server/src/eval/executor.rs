@@ -224,12 +224,11 @@ async fn run_suite_inner(
         // For tool_call-scored examples, snapshot the target tool name so
         // the aggregate can break out pass-rate per tool. Cheap parse of
         // the target — uses the same extractor the scorer does.
-        if matches!(scorer, kiln_eval::scorers::Scorer::ToolCall { .. }) {
-            if let Some(target) = example.target.as_deref() {
-                if let Some(call) = kiln_eval::qwen3::extract_first_tool_call(target) {
-                    target_tool_by_example.insert(example_id.clone(), call.name);
-                }
-            }
+        if matches!(scorer, kiln_eval::scorers::Scorer::ToolCall { .. })
+            && let Some(target) = example.target.as_deref()
+            && let Some(call) = kiln_eval::qwen3::extract_first_tool_call(target)
+        {
+            target_tool_by_example.insert(example_id.clone(), call.name);
         }
         let (gen_params, _) = effective_generation(example, suite, generation_override);
         let gen_params = gen_params.clone();
@@ -315,22 +314,19 @@ async fn run_suite_inner(
                         // Schema check: when the suite/example declares a
                         // `tools` catalogue, validate the predicted call's
                         // args against the tool's declared parameters.
-                        if let Some(call) = parsed.as_ref() {
-                            if let Some(catalogue) = example.effective_tools(suite.tools.as_deref())
-                            {
-                                if let Some(chk) =
-                                    kiln_eval::qwen3::validate_against_schema(call, catalogue)
-                                {
-                                    schema_violations_by_outcome.insert(
-                                        (example_id.clone(), completion_idx),
-                                        (
-                                            chk.missing_required.len() as u32,
-                                            chk.extra_unknown.len() as u32,
-                                        ),
-                                    );
-                                    pending_schema_detail = Some(chk);
-                                }
-                            }
+                        if let Some(call) = parsed.as_ref()
+                            && let Some(catalogue) = example.effective_tools(suite.tools.as_deref())
+                            && let Some(chk) =
+                                kiln_eval::qwen3::validate_against_schema(call, catalogue)
+                        {
+                            schema_violations_by_outcome.insert(
+                                (example_id.clone(), completion_idx),
+                                (
+                                    chk.missing_required.len() as u32,
+                                    chk.extra_unknown.len() as u32,
+                                ),
+                            );
+                            pending_schema_detail = Some(chk);
                         }
                     }
                     let schema_note = pending_schema_detail.as_ref().and_then(|chk| {

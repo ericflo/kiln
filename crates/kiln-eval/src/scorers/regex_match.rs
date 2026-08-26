@@ -53,7 +53,7 @@ pub(super) fn score(
         candidates.push(a.as_str());
     }
     let matched_target = if case_sensitive {
-        candidates.iter().any(|c| *c == actual)
+        candidates.contains(&actual)
     } else {
         candidates.iter().any(|c| c.eq_ignore_ascii_case(actual))
     };

@@ -629,10 +629,10 @@ async fn fetch_health_hashes(client: &reqwest::Client, url: &str) -> Option<Valu
 }
 
 fn render_http_error(status: StatusCode, body: &Value) -> String {
-    if let Some(error) = body.get("error") {
-        if let Some(message) = error.get("message").and_then(Value::as_str) {
-            return format!("{status}: {message}");
-        }
+    if let Some(error) = body.get("error")
+        && let Some(message) = error.get("message").and_then(Value::as_str)
+    {
+        return format!("{status}: {message}");
     }
     format!("{status}: {body}")
 }

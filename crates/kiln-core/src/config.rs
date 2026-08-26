@@ -149,7 +149,7 @@ impl ModelConfig {
 
     /// Whether a given layer index uses full attention (true) or linear attention (false).
     pub fn is_full_attention_layer(&self, layer_idx: usize) -> bool {
-        (layer_idx + 1) % self.full_attention_interval == 0
+        (layer_idx + 1).is_multiple_of(self.full_attention_interval)
     }
 
     /// Full attention Q projection output dim (includes gate when attn_output_gate is true).

@@ -95,7 +95,6 @@ fn normalize_sha256(value: &str) -> String {
 fn effective_kiln_environment() -> BTreeMap<String, String> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with("KILN_"))
-        .into_iter()
         .map(|(key, value)| {
             let value = if environment_key_is_sensitive(&key) {
                 "<redacted-present>".to_string()
@@ -158,10 +157,10 @@ fn compiled_features() -> Vec<String> {
     if cfg!(feature = "nvtx") {
         features.push("nvtx".to_string());
     }
-    if let Some(arches) = option_env!("KILN_ROCM_ARCHS") {
-        if !arches.trim().is_empty() {
-            features.push(format!("rocm-archs={}", arches.trim()));
-        }
+    if let Some(arches) = option_env!("KILN_ROCM_ARCHS")
+        && !arches.trim().is_empty()
+    {
+        features.push(format!("rocm-archs={}", arches.trim()));
     }
     features
 }

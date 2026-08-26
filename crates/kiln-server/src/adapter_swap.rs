@@ -148,10 +148,7 @@ pub(crate) async fn swap_runtime_adapter_locked(
         Some(dir) => {
             let (device, num_layers) = {
                 let guard = runner.read().unwrap();
-                (
-                    guard.weights.embed_tokens.device().clone(),
-                    guard.config.num_layers,
-                )
+                (guard.weights.embed_tokens.device(), guard.config.num_layers)
             };
             // Load weights OUTSIDE the barrier (disk + H2D copy take real
             // time; the engine keeps serving meanwhile). Only the cheap
@@ -236,10 +233,7 @@ fn swap_runtime_adapter_blocking_locked_with_action(
         Some(dir) => {
             let (device, num_layers) = {
                 let guard = runner.read().unwrap();
-                (
-                    guard.weights.embed_tokens.device().clone(),
-                    guard.config.num_layers,
-                )
+                (guard.weights.embed_tokens.device(), guard.config.num_layers)
             };
             Some(LoraWeights::load(&dir, num_layers, device).map_err(|e| format!("{e}"))?)
         }

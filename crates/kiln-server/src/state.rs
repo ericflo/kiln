@@ -458,10 +458,10 @@ pub fn push_loss_sample(history: &mut Vec<TrainingLossSample>, sample: TrainingL
             keep.push(s.clone());
         }
     }
-    if let Some(last) = last {
-        if keep.last().map(|s| s.elapsed_secs) != Some(last.elapsed_secs) {
-            keep.push(last);
-        }
+    if let Some(last) = last
+        && keep.last().map(|s| s.elapsed_secs) != Some(last.elapsed_secs)
+    {
+        keep.push(last);
     }
     *history = keep;
 }
@@ -1804,7 +1804,7 @@ impl RealPrefixCache {
         self.is_enabled()
             && prompt_len >= self.min_register_tokens
             && self.block_size > 0
-            && prompt_len % self.block_size == 0
+            && prompt_len.is_multiple_of(self.block_size)
     }
 
     pub fn should_lookup_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
@@ -1946,8 +1946,11 @@ impl RealPrefixCache {
         adapter: Option<LoadedAdapterIdentity>,
         registration: PagedPrefixRegistration,
     ) -> RealPrefixCacheRegisterOutcome {
-        let block_aligned =
-            self.block_size > 0 && registration.prompt_tokens.len() % self.block_size == 0;
+        let block_aligned = self.block_size > 0
+            && registration
+                .prompt_tokens
+                .len()
+                .is_multiple_of(self.block_size);
         let block_shape_valid = block_aligned
             && registration.block_ids.len() == registration.prompt_tokens.len() / self.block_size;
         let exact_reusable = registration.next_token.is_some() && block_aligned;

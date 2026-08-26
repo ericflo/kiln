@@ -624,13 +624,13 @@ pub fn verify_openenv_artifacts(
                         contract.effective_config.base_adapter == summary.adapter,
                         "OpenEnv training contract behavior adapter differs from the collected policy"
                     );
-                    if summary.schema == "kiln.openenv-rollout-summary.v5" {
-                        if let Some(contract_policy) = contract.behavior_policy.as_ref() {
-                            anyhow::ensure!(
-                                Some(contract_policy) == summary.behavior_policy.as_ref(),
-                                "OpenEnv training contract behavior-policy revision differs from the collected policy"
-                            );
-                        }
+                    if summary.schema == "kiln.openenv-rollout-summary.v5"
+                        && let Some(contract_policy) = contract.behavior_policy.as_ref()
+                    {
+                        anyhow::ensure!(
+                            Some(contract_policy) == summary.behavior_policy.as_ref(),
+                            "OpenEnv training contract behavior-policy revision differs from the collected policy"
+                        );
                     }
                     anyhow::ensure!(
                         contract

@@ -260,10 +260,10 @@ pub fn extract_tool_calls(raw: &str) -> Vec<ParsedToolCall> {
     if !xml.is_empty() {
         return xml;
     }
-    if let Some(calls) = extract_fenced_tool_calls(scan) {
-        if !calls.is_empty() {
-            return calls;
-        }
+    if let Some(calls) = extract_fenced_tool_calls(scan)
+        && !calls.is_empty()
+    {
+        return calls;
     }
     if let Some(calls) = extract_json_tool_calls(scan) {
         return calls;
@@ -369,10 +369,10 @@ fn parse_xml_value(s: &str) -> serde_json::Value {
     }
     // Object / array: try strict JSON parse first.
     let first = trimmed.chars().next().unwrap();
-    if first == '{' || first == '[' {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            return v;
-        }
+    if (first == '{' || first == '[')
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        return v;
     }
     // Bool / null primitives — accept Python-style ("True"/"False"/"None")
     // and JSON-style ("true"/"false"/"null") tokens emitted by the chat
@@ -389,12 +389,11 @@ fn parse_xml_value(s: &str) -> serde_json::Value {
         // Number coercion — only when the *entire* trimmed body is one
         // numeric token. We reject leading-zero non-numbers like "0123"
         // by going through serde_json's parser which preserves precision.
-        if looks_like_number(trimmed) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if v.is_number() {
-                    return v;
-                }
-            }
+        if looks_like_number(trimmed)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && v.is_number()
+        {
+            return v;
         }
     }
     serde_json::Value::String(s.to_string())
@@ -461,18 +460,18 @@ fn extract_json_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 
     // First try a strict parse of the whole text — common case for bench
     // datasets that store the JSON answer verbatim.
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(v) = json_to_tool_calls(&parsed) {
-            return Some(v);
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(v) = json_to_tool_calls(&parsed)
+    {
+        return Some(v);
     }
 
     // Otherwise, scan for the first brace-balanced JSON object that looks
     // tool-call-shaped and parse it.
-    if let Some(obj) = find_first_tool_call_object(text) {
-        if let Some(v) = json_to_tool_calls(&obj) {
-            return Some(v);
-        }
+    if let Some(obj) = find_first_tool_call_object(text)
+        && let Some(v) = json_to_tool_calls(&obj)
+    {
+        return Some(v);
     }
     None
 }
@@ -486,10 +485,8 @@ fn json_to_tool_calls(value: &serde_json::Value) -> Option<Vec<ParsedToolCall>> 
             }
         }
         if out.is_empty() { None } else { Some(out) }
-    } else if let Some(call) = parse_canonical_tool_call_entry(value) {
-        Some(vec![call])
     } else {
-        None
+        parse_canonical_tool_call_entry(value).map(|call| vec![call])
     }
 }
 

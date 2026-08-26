@@ -157,11 +157,12 @@ fn scan_sessions_dir(dir: &Path, depth_left: usize, index: &mut AgentTraceIndex)
             if depth_left > 0 {
                 count += scan_sessions_dir(&p, depth_left - 1, index);
             }
-        } else if p.is_file() && p.extension().is_some_and(|s| s == "jsonl") {
-            if let Some(trace) = parse_pi_session(&p) {
-                index.traces.insert(trace.id.clone(), trace);
-                count += 1;
-            }
+        } else if p.is_file()
+            && p.extension().is_some_and(|s| s == "jsonl")
+            && let Some(trace) = parse_pi_session(&p)
+        {
+            index.traces.insert(trace.id.clone(), trace);
+            count += 1;
         }
     }
     count
@@ -335,10 +336,10 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if id.is_none() {
-            if let Some(s) = v.get("id").and_then(|x| x.as_str()) {
-                id = Some(s.to_string());
-            }
+        if id.is_none()
+            && let Some(s) = v.get("id").and_then(|x| x.as_str())
+        {
+            id = Some(s.to_string());
         }
         if cwd.is_none() {
             // Pi's session header row ({"type":"session", ..., "cwd": "..."})
@@ -348,31 +349,31 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
                 cwd = Some(s.to_string());
             }
         }
-        if parent_id.is_none() {
-            if let Some(s) = v.get("parentId").and_then(|x| x.as_str()) {
-                parent_id = Some(s.to_string());
-            }
+        if parent_id.is_none()
+            && let Some(s) = v.get("parentId").and_then(|x| x.as_str())
+        {
+            parent_id = Some(s.to_string());
         }
         if let Some(s) = v.get("tool_manifest_sha").and_then(|x| x.as_str()) {
             tool_manifest_sha = Some(s.to_string());
         }
         if is_pi_message_event(&v) {
             saw_pi_message_event = true;
-            if let Some(message) = v.get("message").and_then(|x| x.as_object()) {
-                if let Some(role) = message.get("role").and_then(|x| x.as_str()) {
-                    if matches!(role, "user" | "assistant") {
-                        num_turns += 1;
-                    }
-                    if role == "assistant" {
-                        if let Some(blocks) = message.get("content").and_then(|x| x.as_array()) {
-                            num_tool_calls += blocks
-                                .iter()
-                                .filter(|block| {
-                                    block.get("type").and_then(|x| x.as_str()) == Some("toolCall")
-                                })
-                                .count();
-                        }
-                    }
+            if let Some(message) = v.get("message").and_then(|x| x.as_object())
+                && let Some(role) = message.get("role").and_then(|x| x.as_str())
+            {
+                if matches!(role, "user" | "assistant") {
+                    num_turns += 1;
+                }
+                if role == "assistant"
+                    && let Some(blocks) = message.get("content").and_then(|x| x.as_array())
+                {
+                    num_tool_calls += blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(|x| x.as_str()) == Some("toolCall")
+                        })
+                        .count();
                 }
             }
         }

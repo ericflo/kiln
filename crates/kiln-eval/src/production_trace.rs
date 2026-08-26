@@ -37,6 +37,7 @@ use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_
 /// JSONL shape to expect in the production trace export.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProductionTraceFormat {
     /// Inspect each row and pick the first recognized trace row shape.
     /// Routing rules, in order: an explicit per-row `format`/`trace_format`
@@ -46,6 +47,7 @@ pub enum ProductionTraceFormat {
     /// `messages` with `tool`-role entries or multiple assistant `tool_calls`
     /// turns → OpenAI trajectory; any other `messages` row → OpenAI
     /// single-turn (last assistant message is the target).
+    #[default]
     Auto,
     /// Rows with `prompt_messages` plus a separate `chosen` assistant message.
     PromptChosenJsonl,
@@ -279,12 +281,6 @@ pub enum ProductionTraceError {
     NoExamples,
     #[error("io: {0}")]
     Io(String),
-}
-
-impl Default for ProductionTraceFormat {
-    fn default() -> Self {
-        ProductionTraceFormat::Auto
-    }
 }
 
 /// Stream a production trace JSONL export and build a tool-call
