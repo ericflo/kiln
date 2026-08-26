@@ -152,3 +152,27 @@ run locally but reproduces degraded output offline (clearlydefined API
 unreachable → duplicate license sections), so the checked-in copy stays.
 `scripts/check_repository_artifacts.py` passed after the change (6712 tracked
 paths); `git status` shows only the 11 README edits.
+
+## Cleanup Agent (round 5) — 2026-08-26
+
+Deleted the stale committed `docs/site/sitemap.xml` (47 lines, hand-maintained
+`<changefreq>/<priority>` format listing only 9 product-guide URLs).
+Investigation of this round's steering candidate confirmed that the rest of
+the committed `docs/site/*.html` set is NOT build output: `pages.yml` deploys
+exclusively from a freshly built `_site/` (`node scripts/docs-site/build.mjs
+--out _site`), and those HTML pages are hand-authored product-guide source
+that the build copies verbatim via `cp(siteSourceDir, buildOut)`. The sitemap,
+however, is the one file the build always overwrites afterward —
+`writeSitemap(buildOut)` regenerates it as a flat-format sitemap covering all
+71 canonical routes — so the committed copy never reaches the published site
+and had drifted badly (9 URLs vs 71, wrong format). Nothing consumes it as
+input: `check_docs_site_smoke.mjs` validates only the generated sitemap at the
+site root (and skips that block entirely when pointed at unbuilt `docs/site/`,
+since `llms.txt` is already absent there), `robots.txt` references just the
+published URL, and the unit tests read temp-dir output. Verified before AND
+after: fresh builds to /tmp are byte-identical (`diff -r` clean), all 11
+docs-site unit tests pass, `--validate-only` passes (59 documents), the smoke
+check against the fresh post-deletion build produces output identical to the
+pre-deletion baseline (its only failure is the local absence of Chromium, an
+environmental pre-existing condition), and `check_repository_artifacts.py`
+passes with exactly one fewer tracked path (6712 → 6711).
