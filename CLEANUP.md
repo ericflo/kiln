@@ -922,3 +922,31 @@ identically on the stashed baseline due to no local CUDA toolkit
 (pre-existing environment limitation, not this change); `cargo test -p
 kiln-tensor --lib` passes 992/992; git status shows only these two files
 plus this ledger entry.
+## Cleanup Agent (round 36) — 2026-08-30
+
+Fixed five stale candle-era comments in live operational files — the CI/build
+surface analog of Round 32's doc sweep, which covered README/QUICKSTART/
+BENCHMARKS but not these. All are comment-only (no behavioral surface):
+(1) workspace `Cargo.toml` default-members comment claimed kiln-kt-bridge has
+a "default-on `candle` feature" that candle-free consumers can opt out of —
+#1082 removed candle from the crate entirely (`crates/kiln-kt-bridge/Cargo.toml`
+itself says "candle fully removed ... kt-native only", no such feature exists);
+rewritten to match. (2) `.github/workflows/server-release.yml` MSVC step said
+"candle-kernels compiles .cu files with nvcc" — candle-kernels is gone; our own
+kernel crates (kiln-blas et al.) do the nvcc compilation now. (3) Same file's
+Windows DLL-bundling list justified nvrtc64_120_0.dll as "used by
+candle-kernels JIT" — it is actually linked by cudarc's `nvrtc` feature
+(enabled in the workspace manifest), so bundling stays correct and the
+attribution was fixed. (4) `.github/workflows/perf-regression-nightly.yml`
+said the bench's `generic` trainer "dispatches to the BackendRuntime+candle
+path" — rewritten to the shared kt-native BackendRuntime path. (5)
+`.github/workflows/ci.yml`'s Metal job attributed its `--test-threads=1`
+serialization to a panic "in candle-metal 0.10.2's MetalDevice::new"; kept the
+serialization but marked the attribution historical (pre-#1082). Verified:
+every claim cross-checked before editing (kt-bridge Cargo.toml features,
+kiln-blas csrc/*.cu + build.rs nvcc usage, cudarc nvrtc feature in Cargo.toml,
+no remaining candle packages in Cargo.lock); all three edited YAML files parse
+cleanly with PyYAML; `cargo metadata --locked` resolves cleanly after the
+manifest comment edit (comment-only, so no rebuild needed);
+`scripts/check_repository_artifacts.py` passes; diff audit confirms every
+changed line is inside a comment block.

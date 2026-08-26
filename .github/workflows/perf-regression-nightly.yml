@@ -272,7 +272,7 @@ jobs:
         env:
           # The `native` matrix value asks for cuda_native_sft_train via
           # the env knob the bench reads; `generic` leaves it unset so
-          # the trainer dispatches to the BackendRuntime+candle path.
+          # the trainer dispatches to the shared kt-native BackendRuntime path.
           KILN_CUDA_NATIVE_TRAINING: ${{ matrix.trainer == 'native' && '1' || '0' }}
         run: |
           rm -f /tmp/kiln_bench_stdout.txt

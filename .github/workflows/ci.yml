@@ -92,8 +92,8 @@ jobs:
 
       - name: Test (Metal feature — exercises Apple Silicon GPU path)
         # `--test-threads=1` because concurrent `Device::new_metal(0)` calls
-        # panic in candle-metal 0.10.2's MetalDevice::new (`swap_remove` on
-        # an empty vec).
+        # have panicked historically (originally in candle-metal 0.10.2's
+        # MetalDevice::new, pre-#1082); keep Metal device creation serialized.
         run: |
           cargo test --locked --features metal -- --test-threads=1
 

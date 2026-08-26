@@ -504,8 +504,8 @@ jobs:
           method: 'local'
 
       - name: Set up MSVC dev environment
-        # candle-kernels compiles .cu files with nvcc, which shells out
-        # to MSVC's cl.exe for host-side code. Server 2022 has MSVC
+        # Our CUDA kernel crates compile .cu files with nvcc, which
+        # shells out to MSVC's cl.exe for host-side code. Server 2022 has MSVC
         # installed but not on PATH by default; this action runs
         # vcvarsall.bat and exports the env vars to subsequent steps.
         uses: ilammy/msvc-dev-cmd@v1
@@ -559,7 +559,8 @@ jobs:
           #   - cublas64_12.dll      cuBLAS (Eric's reported missing DLL)
           #   - cublasLt64_12.dll    cuBLASLt — pulled in by cuBLAS
           #   - curand64_10.dll      cuRAND keeps soversion 10 even on CUDA 12
-          #   - nvrtc64_120_0.dll    NVRTC — used by candle-kernels JIT
+          #   - nvrtc64_120_0.dll    NVRTC — linked by cudarc's `nvrtc`
+          #     feature (workspace Cargo.toml)
           # Hard-fail on any missing entry: silent omission is the bug we're
           # fixing, so we want the workflow to break if the runner image
           # changes the layout.
