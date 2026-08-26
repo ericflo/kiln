@@ -409,13 +409,13 @@ impl Tensor {
         }
     }
 
-    /// Build a tensor from raw little-endian bytes + an explicit `dtype`
-    /// + `shape` on `device` — the **candle-free twin** of candle's
+    /// Build a tensor from raw little-endian bytes plus an explicit
+    /// `dtype` and `shape` on `device` — the **candle-free twin** of candle's
     /// `Tensor::from_raw_buffer` (#1082). The bytes are the dtype's native
     /// little-endian representation (bf16/f16 = 2 bytes/elem, f32 = 4), i.e.
     /// the on-disk / safetensors weight layout. Unlike [`Self::from_vec_on`]
     /// this takes no `Element` type parameter, so the loader can stay generic
-    /// over the on-disk dtype without a per-dtype match + per-element
+    /// over the on-disk dtype without a per-dtype match plus per-element
     /// reinterpretation pass.
     ///
     /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:

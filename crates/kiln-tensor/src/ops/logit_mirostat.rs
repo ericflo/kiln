@@ -11,12 +11,12 @@
 //! 2. For each step:
 //!    a. Compute `surprise(tok) = -log p(tok)` for every token.
 //!    b. Mask any token whose surprise > `mu` (i.e. keep only tokens
-//!       softer than the budget).
+//!    softer than the budget).
 //!    c. (Caller) samples one token from the masked distribution.
 //!    d. (Caller) calls [`Mirostat2Processor::update`] with the
-//!       observed surprise of the sampled token.
+//!    observed surprise of the sampled token.
 //!    e. Update `mu` via simple gradient descent on the surprise gap:
-//!       `mu := mu - lr * (observed_surprise - tau)`.
+//!    `mu := mu - lr * (observed_surprise - tau)`.
 //!
 //! # Design notes
 //!

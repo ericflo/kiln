@@ -468,3 +468,30 @@ after, `cargo clippy -p kiln-memory --all-targets` shows only the two
 intentional `result_large_err` keeps; `cargo build -p kiln-model` succeeds;
 `cargo fmt --check` remains clean repo-wide; `git status` shows only the one
 source edit plus this ledger entry.
+
+## Cleanup Agent (round 19) — 2026-08-27
+
+Eliminated all doc-formatting and small mechanical clippy warnings in
+`crates/kiln-tensor` (the round-19 steering candidate), cutting the crate's
+lib clippy noise from 33 to 24 warnings. Fixed: the root cause of all six
+`doc_lazy_continuation` warnings in `tensor.rs` was a prose line starting
+with `` + `shape` `` that rustdoc parsed as an accidental markdown list item
+— rephrased to "plus an explicit `dtype` and `shape`" so the paragraph is no
+longer a list at all; three `doc_overindented_list_items` continuations in
+`ops/logit_mirostat.rs` realigned to the list-item content column;
+`derivable_impls` — `AllocatorMode`'s hand-written `Default` impl replaced by
+`#[derive(Default)]` + `#[default]` on `Pool`; `collapsible_if` — the
+cache-hit nested `if let` in `cpu_allocator.rs` collapsed into a let-chain;
+plus two one-liners, `manual_is_multiple_of`
+(`rope_split_half.rs`) and `manual_contains` (`tile.rs`). Deliberately left:
+15 `needless_range_loop` (each needs an individual borrow/index-semantics
+review, not mechanical), 2 `excessive_precision` (`0.7978845608_f32` —
+clippy's suggestion rounds, changing the literal's value), plus
+`result_large_err`, `dead_code`, `should_implement_trait`,
+`neg_cmp_op_on_partial_ord`, `erasing_op` (intentional `count * 0 * 8`
+sentinel). Verified: before AND after, `cargo test -p kiln-tensor --lib`
+passes identically (992 passed, 0 failed); after, `cargo build -p kiln-model`
+(downstream consumer) succeeds and clippy JSON confirms exactly the six
+target categories disappeared with no new ones; `cargo fmt --check` remains
+clean repo-wide; `scripts/check_repository_artifacts.py` passes (6709 tracked
+paths); `git status` shows only the six source edits plus this ledger entry.

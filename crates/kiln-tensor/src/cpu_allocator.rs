@@ -128,12 +128,12 @@ impl Allocator for CpuAllocator {
     fn alloc(&mut self, dtype: DType, n_elements: usize) -> Result<Storage> {
         let key = (dtype, n_elements);
         // 1. Try the cache first regardless of mode — cheaper than alloc.
-        if let Some(slot) = self.cache.get_mut(&key) {
-            if let Some(s) = slot.pop() {
-                // Storage came from the cache; reserved_bytes already
-                // accounts for it.
-                return Ok(s);
-            }
+        if let Some(slot) = self.cache.get_mut(&key)
+            && let Some(s) = slot.pop()
+        {
+            // Storage came from the cache; reserved_bytes already
+            // accounts for it.
+            return Ok(s);
         }
         // 2. Cache miss.
         match self.mode {

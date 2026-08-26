@@ -22,7 +22,7 @@ pub fn tile(x: &Tensor, reps: &[usize]) -> Result<Tensor> {
     if reps.is_empty() {
         bail!("tile: reps must not be empty");
     }
-    if reps.iter().any(|&r| r == 0) {
+    if reps.contains(&0) {
         bail!("tile: each rep must be > 0");
     }
     let dtype = x.dtype();

@@ -148,7 +148,7 @@ fn validate(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> Result
     }
     let seq = x.shape()[1];
     let head_dim = x.shape()[3];
-    if rotary_dim == 0 || rotary_dim % 2 != 0 {
+    if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
         bail!("rope_split_half: rotary_dim must be positive and even, got {rotary_dim}");
     }
     if rotary_dim > head_dim {

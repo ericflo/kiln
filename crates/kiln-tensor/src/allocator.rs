@@ -42,7 +42,7 @@ use crate::{DType, Device, Error, Result, Storage};
 ///
 /// `kiln-graph` re-exports this so the Phase 5 capture surface and
 /// the kiln-tensor allocator share one enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum AllocatorMode {
     /// Per-allocation `cudaMalloc` / `MTLDevice::newBuffer` /
@@ -51,6 +51,7 @@ pub enum AllocatorMode {
     /// Slab-allocated from a pre-sized device-local pool. The
     /// steady-state decode path. Mirrors Vulkan's `buffer_pool.rs`
     /// + `decode_resident_pool.rs`.
+    #[default]
     Pool,
     /// No allocation. Pulls from a pre-warmed slab indexed by
     /// tensor-handle. Active for the duration of `capture()` …
@@ -72,12 +73,6 @@ impl AllocatorMode {
     /// `true` iff this mode permits new allocations.
     pub const fn allows_alloc(self) -> bool {
         !matches!(self, AllocatorMode::Frozen)
-    }
-}
-
-impl Default for AllocatorMode {
-    fn default() -> Self {
-        AllocatorMode::Pool
     }
 }
 
