@@ -7024,7 +7024,7 @@ impl ModelRunner {
                     pc_guard,
                     block_tables,
                     seq_lens,
-                    linear_state_for_forward.as_deref_mut(),
+                    linear_state_for_forward,
                     self.active_lora.as_ref(),
                     row_ids,
                 )

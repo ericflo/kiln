@@ -23,7 +23,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden(
     paged_cache: &PagedKvCache,
     block_tables: &[&BlockTable],
     start_positions: &[usize],
-    mut linear_state: Option<&mut LinearAttentionState>,
+    linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     model_forward_paged_decode_contiguous_batch_hidden_with_ids(
@@ -34,7 +34,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden(
         paged_cache,
         block_tables,
         start_positions,
-        linear_state.as_deref_mut(),
+        linear_state,
         lora,
         None,
     )
@@ -49,7 +49,7 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
     paged_cache: &PagedKvCache,
     block_tables: &[&BlockTable],
     start_positions: &[usize],
-    mut linear_state: Option<&mut LinearAttentionState>,
+    linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
     row_ids: Option<&[u64]>,
 ) -> Result<Tensor> {
@@ -86,7 +86,7 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
         paged_cache,
         block_tables,
         start_positions,
-        linear_state.as_deref_mut(),
+        linear_state,
         lora,
         None,
         None,
@@ -112,7 +112,7 @@ pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buf
     paged_cache: &PagedKvCache,
     block_tables: &[&BlockTable],
     start_positions: &[usize],
-    mut linear_state: Option<&mut LinearAttentionState>,
+    linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
     stable_positions_gpu: &Tensor,
     stable_token_ids_gpu: &Tensor,
@@ -133,7 +133,7 @@ pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buf
         paged_cache,
         block_tables,
         start_positions,
-        linear_state.as_deref_mut(),
+        linear_state,
         lora,
         Some(stable_positions_gpu),
         Some(stable_token_ids_gpu),
@@ -1297,7 +1297,7 @@ pub fn model_forward_kt_with_policy(
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 // Reborrow the cache for each layer call
-                let cache_ref = kv_cache.as_mut().map(|c| &mut **c);
+                let cache_ref = kv_cache.as_deref_mut();
                 hidden = transformer_block_with_policy(
                     backend,
                     &hidden,
