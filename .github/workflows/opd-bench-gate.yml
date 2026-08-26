@@ -2,28 +2,20 @@ name: OPD bench gate
 
 # §9.9 of docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md
 #
-# Runs the kiln-opd-loss-kernel throughput bench and fails the PR if any
-# kernel_tok_s row regresses by more than 5% versus the committed baseline
-# in bench-results/opd-a6000-baseline.json.
+# Single-job gate: `gate-self-test` (CPU-only, GitHub-hosted) exercises
+# bench-results/check_opd_regression.py — the §9.9 regression checker that
+# fails any run whose kernel_tok_s rows regress by more than 5% versus the
+# committed baseline in bench-results/opd-a6000-baseline.json — against
+# known-good and known-regressed fixtures. It fires on `pull_request` for
+# changes to the OPD loss/training crates, the retained evidence
+# (bench-results/check_opd_regression.py, the opd-a6000/a100 baseline JSONs),
+# or this workflow, and on `workflow_dispatch` for manual runs.
 #
-# The bench requires a CUDA GPU (A6000 minimum, per the baseline). GitHub-
-# hosted runners don't have a GPU, so this workflow runs on:
-#   1. `pull_request` — only the `gate-self-test` job (no GPU) fires on
-#      PRs that touch `bench-results/**`, the gate scripts, or the OPD
-#      loss/training crates. This is the #1082 §9 "CPU-only smoke variant"
-#      that gives the gate PR-time enforcement on the regression-check
-#      schema without waiting for the self-hosted A6000 runner.
-#   2. `workflow_dispatch` — manual trigger for the full CUDA bench
-#      against the A6000 baseline (requires a self-hosted runner
-#      labelled `cuda-a6000`).
-#   3. `schedule` is intentionally NOT wired here — `perf-regression-nightly.yml`
-#      handles the nightly A6000 cron for the SFT/GRPO step-time gate;
-#      this workflow's CUDA leg is dispatch-only.
-#
-# When the self-hosted runner comes online, broaden the `pull_request`
-# event to also fire the `cuda-bench` job below — today it's
-# conditionally skipped via the `if: github.event_name == 'workflow_dispatch'`
-# guard, so PRs only spin up the cheap `gate-self-test` job.
+# The former `cuda-bench` self-hosted A6000 job was retired 2026-08-26 per
+# owner decision: its target `cargo run --release --example bench_opd_topk_kl
+# -p kiln-opd-loss-kernel` no longer exists — commit 4f04c8a50 deleted the
+# crate's examples/ directory. The retained evidence (regression script +
+# baseline JSONs) stays, and this job guards it.
 
 on:
   workflow_dispatch:
@@ -35,10 +27,6 @@ on:
       - 'bench-results/opd-a6000-baseline.json'
       - 'bench-results/opd-a100-baseline.json'
       - '.github/workflows/opd-bench-gate.yml'
-
-env:
-  CARGO_TERM_COLOR: always
-  KILN_CUDA_ARCHS: "86"
 
 jobs:
   gate-self-test:
@@ -81,37 +69,3 @@ jobs:
             exit 1
           fi
           echo "OK — gate correctly returned non-zero on regression"
-
-  cuda-bench:
-    name: CUDA bench against A6000 baseline
-    # Self-hosted runner with an A6000 (or stronger). Until one is wired
-    # up this job is skipped — the `gate-self-test` job above still
-    # validates the regression-check script on every dispatch.
-    runs-on: [self-hosted, linux, cuda-a6000]
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust stable
-        run: |
-          rustup set profile minimal
-          rustup default stable
-          rustc --version
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - name: Run kiln-opd-loss-kernel bench
-        run: |
-          cargo run --release --example bench_opd_topk_kl \
-            --features cuda -p kiln-opd-loss-kernel \
-            2>&1 | tee /tmp/opd_bench_stdout.txt
-      - name: Compare against baseline
-        run: |
-          python3 bench-results/check_opd_regression.py \
-            --bench-stdout /tmp/opd_bench_stdout.txt
-      - name: Upload bench artefact
-        uses: actions/upload-artifact@v7
-        with:
-          name: opd-bench-output-${{ github.run_id }}
-          path: /tmp/opd_bench_stdout.txt
-          retention-days: 30

@@ -2215,3 +2215,55 @@ backend files (diff is line numbers only; `--check` passes).
   clippy sweep" round is the right follow-up.
 - kiln-core `type_complexity` ×2 (tokenizer.rs:449/602) — already
   documented as deferred since round 65; untouched.
+
+## Cleanup Agent (round 68) — 2026-08-26
+
+Retired the dead `cuda-bench` job in `.github/workflows/opd-bench-gate.yml`
+per the owner decision that had been frozen pending since round 37 (the §9.9
+OPD bench gate item). The self-hosted A6000 job ran `cargo run --release
+--example bench_opd_topk_kl --features cuda -p kiln-opd-loss-kernel`, a target
+that no longer exists — commit 4f04c8a50 (#1082) deleted `crates/
+kiln-opd-loss-kernel/examples/bench_opd_topk_kl.rs` and the crate now has no
+`examples/` directory at all (build.rs, csrc/, src/, tests/ only), so the job
+would have failed at its first `workflow_dispatch`. Changed: deleted the
+entire `cuda-bench:` job block and the workflow's top-level `env:` block
+(`CARGO_TERM_COLOR: always`, `KILN_CUDA_ARCHS: "86"`) — both existed solely to
+feed cargo in that job, and the surviving `gate-self-test` job is pure Python
+that consumes neither; rewrote the top-of-file comment to describe the
+remaining single-job gate and record, dated 2026-08-26, that the CUDA bench
+job was retired because its example target no longer exists (commit
+4f04c8a50). Kept per steering: the `gate-self-test:` job, both triggers
+(`workflow_dispatch`, `pull_request`), and all six path filters — they still
+protect the retained evidence (`bench-results/check_opd_regression.py`,
+`bench-results/opd-a6000-baseline.json`, `bench-results/opd-a100-baseline.json`).
+Deliberately untouched as owner-retained evidence: `check_opd_regression.py`
+(including its docstring), the opd-* baseline JSONs (including their
+provenance comments), `bench-results/opd-phase0-validation-2026-05-16.json`,
+and `scripts/opd_phase0_pod_validation.sh`. Audited and left unchanged:
+`crates/kiln-vulkan-kernel/BENCH_RESULTS_OPD.md` — it points at the *live*
+Vulkan example (`examples/bench_opd_topk_kl_vk.rs`, a different target) and
+describes bench results, not the retired job, so it would mislead no one;
+`docs/ci-policy.md`'s `opd-bench-gate.yml` row ("The inexpensive OPD gate
+parser detects known pass and regression fixtures") remains an accurate
+description of the surviving job's primary claim. This resolves the
+owner-decision item flagged in round 37 ("re-wire the vk example + re-capture
+baselines vs retire the gate") — the owner chose: retire the job, keep the
+evidence.
+
+Verified: the edited workflow parses with PyYAML and contains exactly one job
+(`gate-self-test`), both triggers, and all six path filters intact (13
+insertions / 59 deletions, single file); `bench-results/check_opd_regression.py`
+still works standalone — `--help` clean, a zero-delta fixture exits 0 ("OK —
+all shapes within ±5.0% of baseline") and a simulated 23% regression fixture
+exits 1, reproducing exactly the two fake-stdout checks the `gate-self-test`
+job runs; `git grep cuda-bench` / `git grep bench_opd_topk_kl` after the
+change — every remaining hit is historical or retained: the dated retirement
+note in this workflow, the live but unrelated `cuda-bench` job in
+`perf-regression-nightly.yml` (the SFT gate's own A6000 job, different
+workflow, runs `kiln-bench --training-steps 5`), the historical CHANGELOG.md
+entry (round 37 ledger entry in this file included), and the owner-retained
+evidence files (`check_opd_regression.py` docstring,
+opd-a6000/a100-baseline.json provenance comments, multi-gpu-seam.csv audit
+row, `scripts/opd_phase0_pod_validation.sh`, the live `_vk` Vulkan example);
+`python3 scripts/check_repository_artifacts.py` passes (6694 tracked paths —
+unchanged, no files deleted); `git status` clean after the commit.
