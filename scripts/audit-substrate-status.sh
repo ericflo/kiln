@@ -46,7 +46,9 @@ ROWS = [
     ("0.2",  "CustomOpN audit",
      ["scripts/audit-customop.py", "bench-results/customop-audit.csv"]),
     ("0.3",  "determinism stance (PROFILING.md section)",
-     ["PROFILING.md"]),  # presence-only; deeper check via grep below
+     # PROFILING.md moved to docs/archive/profiling/ when the live report
+     # was relocated there; presence check follows the archived location.
+     ["docs/archive/profiling/PROFILING.md"]),
     ("0.4",  "parity-tolerance.csv",
      ["scripts/build-parity-tolerance.py", "bench-results/parity-tolerance.csv"]),
     ("0.5",  "DType usage audit",

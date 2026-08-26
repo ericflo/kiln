@@ -1140,3 +1140,29 @@ Verified: scripted check that every rewritten link target exists in
 — move not deletion); no code touched, no cargo checks needed;
 `git status` shows exactly the rename, five archive edits, and this ledger
 entry.
+## Cleanup Agent (round 43) — 2026-09-02
+
+Fixed a false-negative in `scripts/audit-substrate-status.sh` discovered while
+evaluating this round's steering candidates: the Phase 0.3 row ("determinism
+stance (PROFILING.md section)") probed for `PROFILING.md` at the repo root,
+but Round 2 relocated that file to `docs/archive/profiling/PROFILING.md` — so
+the dashboard has reported "64/65 deliverables shipped" with Phase 0.3 as
+`[ ] todo` ever since, even though the deliverable shipped long ago. Updated
+the row's path to the archived location with a comment explaining why, and
+dropped its stale trailing comment claiming a "deeper check via grep below"
+that does not exist anywhere in the script. Steering candidates audited and
+left alone: (a) `docs/audits/pr1383-qwen35-base-production-tool-call-
+eval-1000-2026-05-25/` is genuinely protected — its 13 files are cited by the
+final audit doc `...-eval-1000-2026-05-25.md`, which survived Round 30's
+partial-dir deletion; (b) both `bench-results/regression/*.json` baselines
+are consumed by `check_sft_train_regression.py` (Round 37 already fixed the
+docstring drift) — no stale entries; (c) desktop/ deep audit: `cargo check`
+shows only the two documented pre-existing tauri-plugin-shell deprecations,
+no dead code surfaced.
+Why it mattered: the substrate dashboard's whole point is an accurate
+shipped/todo census; it has been lying by one row since the Round 2 move.
+Verified BEFORE and AFTER: human mode went from "64/65" with exactly one todo
+row (0.3) to "65/65 deliverables shipped"; `--json` mode's unshipped list
+went from `[phase 0.3]` to empty with all other rows byte-identical;
+`--help` still works; `bash -n` passes; git status shows only the script edit
+plus this ledger entry.
