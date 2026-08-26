@@ -404,3 +404,28 @@ kiln-server` passes (doc-comment-only code change; the 22 lib warnings are
 pre-existing); docs-site `--validate-only` passes (59 documents); repo-wide
 grep confirms no remaining `"sft" | "grpo"` payload listing without `"opd"`;
 `git status` shows exactly the two doc edits plus this ledger entry.
+
+## Cleanup Agent (round 16) — 2026-08-27
+
+Eliminated every clippy warning in `crates/kiln-rmsnorm-kernel` (the round-16
+steering candidate: a scoped lint triage of a smaller kernel crate), all in
+its build script — the crate's lib/bin targets were already clean. Five
+`clippy::collapsible_if` warnings in `find_cuda_root()` / `find_rocm_root()`
+(nested `if let Ok(...) { if ... }` and `if let Some(a) { if let Some(b) {
+... } }` toolchain-probing ladders) collapsed into Rust-2024 let-chains,
+semantics identical; plus three trivial fixes in the same file:
+`clippy::ptr_arg` (`&PathBuf` → `&Path` on `configure_nvcc_from_cuda_root`,
+with the `Path` import added), a redundant `&format!(...)` borrow passed to
+`build.flag`, applied via `cargo clippy --fix -A clippy::all -W
+clippy::collapsible_if` then two hand edits, and rustfmt normalization. Why it
+mattered: the crate now compiles with zero clippy output, matching the
+standard rounds 8–12 set for kiln-vulkan-kernel, and the CUDA/HIP discovery
+logic reads flat instead of five levels deep. Verified: before AND after,
+`cargo build -p kiln-rmsnorm-kernel` succeeds (the crate has no tests; the
+build script runs during build) and `cargo build -p kiln-model` (downstream
+consumer) succeeds; after, `cargo clippy -p kiln-rmsnorm-kernel --all-targets`
+reports zero warnings attributable to this crate; `cargo fmt --check` remains
+clean repo-wide. Noted for future agents: `crates/kiln-tensor/build.rs`
+contains the same duplicated discovery code with the identical 5
+collapsible_if + ptr_arg pattern, left untouched to keep this session scoped
+to one crate.
