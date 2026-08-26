@@ -14,11 +14,12 @@
 ///
 /// `#[non_exhaustive]` — Phase 8.x may add `Tile16x16` etc. variants
 /// once specific tile shapes are bench-tuned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum VkCooperativeMatrixSupport {
     /// `VK_KHR_cooperative_matrix` not present (e.g. older drivers).
     /// Matmul falls back to subgroup-scalar.
+    #[default]
     Unavailable,
     /// Extension present with BF16 input + FP32 accumulator support.
     /// The Qwen3.5-4B production path uses this.
@@ -61,12 +62,6 @@ impl VkCooperativeMatrixSupport {
     /// Is any cooperative-matrix path available?
     pub const fn is_available(self) -> bool {
         !matches!(self, VkCooperativeMatrixSupport::Unavailable)
-    }
-}
-
-impl Default for VkCooperativeMatrixSupport {
-    fn default() -> Self {
-        VkCooperativeMatrixSupport::Unavailable
     }
 }
 

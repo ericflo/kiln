@@ -78,7 +78,7 @@ fn cpu_matmul_f16(a: &[f16], b: &[f16], m: usize, k: usize, n: usize) -> Vec<f32
 
 fn run_case(m: usize, k: usize, n: usize, groupsize: i64) {
     // Random weight [k, n] and activations [m, k].
-    let mut wstate = 0xC0FFEE_5EED_u64 ^ ((k as u64) << 17) ^ ((n as u64) << 3);
+    let mut wstate = 0x00C0_FFEE_5EED_u64 ^ ((k as u64) << 17) ^ ((n as u64) << 3);
     let mut weight = vec![0.0f32; k * n];
     for v in weight.iter_mut() {
         *v = lcg(&mut wstate) * 0.5;

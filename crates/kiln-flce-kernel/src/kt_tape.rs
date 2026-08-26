@@ -375,8 +375,7 @@ mod tests {
     /// CUDA-only (CPU FLCE keeps using the candle Phase B body).
     #[test]
     fn envelope_rejects_cpu() {
-        let hidden =
-            KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
+        let hidden = KtTensor::from_vec(vec![0.0f32; 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
         let head = KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("cpu head");
         assert!(!envelope_ok(&hidden, &head));
     }
@@ -395,7 +394,7 @@ mod tests {
     /// Envelope rejects head_t with mismatched hidden_size axis.
     #[test]
     fn envelope_rejects_head_hidden_mismatch() {
-        let hidden = KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("hidden");
+        let hidden = KtTensor::from_vec(vec![0.0f32; 4 * 8], vec![1, 4, 8]).expect("hidden");
         // head_t hidden_size (12) != hidden hidden_size (8).
         let head = KtTensor::from_vec(vec![0.0f32; 12 * 16], vec![12, 16]).expect("head");
         assert!(!envelope_ok(&hidden, &head));
@@ -405,8 +404,7 @@ mod tests {
     /// input. Keep this contract covered without requiring a GPU.
     #[test]
     fn backward_contract_has_one_hidden_input() {
-        let hidden =
-            KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
+        let hidden = KtTensor::from_vec(vec![0.0f32; 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
         let head_t = KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("cpu head");
         let bwd = CudaFlcePhaseBBackward {
             hidden,

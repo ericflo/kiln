@@ -194,7 +194,10 @@ pub mod pack {
         } else {
             groupsize as usize
         };
-        assert!(k % g == 0, "k={k} must be divisible by groupsize={g}");
+        assert!(
+            k.is_multiple_of(g),
+            "k={k} must be divisible by groupsize={g}"
+        );
         let num_groups = k / g;
 
         // 1) Compute per-(group, column) scales. We use upstream Marlin's
@@ -308,7 +311,7 @@ pub mod pack {
     fn permute_scales_grouped(scales: &[f32], num_groups: usize, n: usize) -> Vec<f32> {
         let sp = build_scale_perm();
         let group_len = sp.len(); // 64
-        assert!(n % group_len == 0);
+        assert!(n.is_multiple_of(group_len));
         let mut out = vec![0.0f32; num_groups * n];
         for grp in 0..num_groups {
             // Each scale row has length n, broken into n/64 sub-rows of 64.
@@ -329,7 +332,7 @@ pub mod pack {
     fn permute_scales_single(scales: &[f32], n: usize) -> Vec<f32> {
         let sps = build_scale_perm_single();
         let group_len = sps.len(); // 32
-        assert!(n % group_len == 0);
+        assert!(n.is_multiple_of(group_len));
         let mut out = vec![0.0f32; n];
         for sub in 0..(n / group_len) {
             for (i, &p) in sps.iter().enumerate() {
@@ -346,7 +349,7 @@ pub mod pack {
     fn unpermute_scales_grouped(perm_scales: &[f32], num_groups: usize, n: usize) -> Vec<f32> {
         let sp = build_scale_perm();
         let group_len = sp.len(); // 64
-        assert!(n % group_len == 0);
+        assert!(n.is_multiple_of(group_len));
         let mut out = vec![0.0f32; num_groups * n];
         for grp in 0..num_groups {
             let row = &perm_scales[grp * n..(grp + 1) * n];
@@ -367,7 +370,7 @@ pub mod pack {
     fn unpermute_scales_single(perm_scales: &[f32], n: usize) -> Vec<f32> {
         let sps = build_scale_perm_single();
         let group_len = sps.len(); // 32
-        assert!(n % group_len == 0);
+        assert!(n.is_multiple_of(group_len));
         let mut out = vec![0.0f32; n];
         for sub in 0..(n / group_len) {
             for (i, &p) in sps.iter().enumerate() {
@@ -484,7 +487,10 @@ pub mod pack {
         } else {
             groupsize as usize
         };
-        assert!(k % g == 0, "k={k} must be divisible by groupsize={g}");
+        assert!(
+            k.is_multiple_of(g),
+            "k={k} must be divisible by groupsize={g}"
+        );
         let num_groups = k / g;
         assert_eq!(
             scales.len(),

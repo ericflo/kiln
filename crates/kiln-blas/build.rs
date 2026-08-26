@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     let want_probe = env::var_os("CARGO_FEATURE_PROBE").is_some();
@@ -44,7 +44,7 @@ fn main() {
     for arch in cuda_archs.split(';') {
         let arch = arch.trim();
         if !arch.is_empty() {
-            build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            build.flag(format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
         }
     }
 
@@ -78,7 +78,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
 }
 
-fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+fn configure_nvcc_from_cuda_root(cuda_root: &Path) {
     if env::var_os("NVCC").is_some() {
         return;
     }

@@ -532,6 +532,10 @@ fn flce_forward_full_active_stats(
     Ok((running_max, running_sumexp, correct_logit))
 }
 
+// Judgment keep (round 66): the flat argument list mirrors the per-tile
+// kernel inputs (tensors, labels, dims, tile, device) — a parameter
+// struct would obscure that 1:1 correspondence.
+#[allow(clippy::too_many_arguments)]
 fn flce_forward_row_tiled_stats(
     active_hidden_f32: &KtTensor,
     head_t_f32: &KtTensor,
@@ -586,6 +590,9 @@ fn flce_forward_row_tiled_stats(
     Ok((running_max_all, running_sumexp_all, correct_logit_all))
 }
 
+// Judgment keep (round 66): same mirrored-kernel-input argument list as
+// the forward driver above.
+#[allow(clippy::too_many_arguments)]
 fn flce_backward_row_tiled_dhidden(
     active_hidden_f32: &KtTensor,
     head_t_f32: &KtTensor,
@@ -1673,6 +1680,11 @@ mod tests {
             .collect()
     }
 
+    // Device-agnostic read for GPU tensors — used only by the
+    // `cuda`-gated tests below (e.g.
+    // fused_linear_cross_entropy_phase_b_backward_kt_cuda_sparse_chunk_runs),
+    // so it looks dead under default features.
+    #[allow(dead_code)]
     fn read_f32_vec_any(t: &KtTensor) -> Vec<f32> {
         t.to_dtype(KtDType::F32)
             .unwrap()

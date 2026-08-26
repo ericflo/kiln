@@ -502,10 +502,10 @@ mod tests {
         let input = stable_resource();
         let mut plan = DummyReplayPlan::new(key.clone(), vec![input.clone()]);
 
-        plan.validate_inputs(ReplayInputs::new(&key, &[input.clone()]))
+        plan.validate_inputs(ReplayInputs::new(&key, std::slice::from_ref(&input)))
             .unwrap();
         let outputs = plan
-            .replay(ReplayInputs::new(&key, &[input.clone()]))
+            .replay(ReplayInputs::new(&key, std::slice::from_ref(&input)))
             .unwrap();
         assert_eq!(outputs.replay_count, 1);
         assert_eq!(outputs.resources, vec![input]);
@@ -594,7 +594,7 @@ mod tests {
             .expect("backend should match key");
 
         let outputs = plan
-            .replay(ReplayInputs::new(&key, &[input.clone()]))
+            .replay(ReplayInputs::new(&key, std::slice::from_ref(&input)))
             .unwrap();
         assert_eq!(outputs.replay_count, 1);
         assert_eq!(plan.graph().replay_count(), 1);

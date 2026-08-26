@@ -16,8 +16,8 @@
 //! This PR ships the **type definitions and the storage-coherence
 //! state machine**:
 //!
-//! - `Parameter` — owns `forward_storage` + optional `backward_storage`
-//!   + optional `transposed_cache` + optional `lora_delta`, all keyed
+//! - `Parameter` — owns `forward_storage` plus optional
+//!   `backward_storage`, `transposed_cache`, and `lora_delta`, all keyed
 //!   by one stable [`kiln_tensor::TensorId`].
 //! - `ForwardStorage` enum — `Bf16Tensor`, `Marlin`, `Fp8`, plus a
 //!   `Fp4Packed` scaffold for Phase 8.10.

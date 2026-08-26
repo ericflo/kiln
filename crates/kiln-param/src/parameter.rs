@@ -1066,7 +1066,7 @@ mod tests {
     fn snapshot_captures_epoch_at_time_of_capture() {
         let fs = plain_f32();
         let master_tensor = fs.primary_tensor().clone();
-        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
         p.bump_epoch();
         p.bump_epoch();
         let s = p.snapshot();
@@ -1113,7 +1113,7 @@ mod tests {
     fn epoch_bumps_monotonically() {
         let fs = plain_f32();
         let master_tensor = fs.primary_tensor().clone();
-        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
         for expected in 1..=5_u64 {
             p.bump_epoch();
             assert_eq!(p.current_epoch(), expected);
@@ -1128,7 +1128,7 @@ mod tests {
         // the field directly through a controlled construction path.
         let fs = plain_f32();
         let master_tensor = fs.primary_tensor().clone();
-        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
         // We don't have a direct setter; rely on the doc contract.
         // This test exercises the public API: many bumps without panic.
         for _ in 0..1000 {

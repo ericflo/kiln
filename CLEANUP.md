@@ -48,6 +48,84 @@ Rules of engagement:
 
 ## Ledger
 
+### Cleanup round 66 — 2026-08-26 — Final clippy sweep: 11 small buildable crates to zero own-code warnings
+
+**Steering:** final clippy sweep across the 11 small buildable crates that still had
+own-code warnings (measured on the committed tree before this round; target: zero own
+code warnings per crate, or explicit per-crate deferred list). No new capabilities,
+no gates, no kiln-tensor.
+
+**Before → after own-code clippy warnings** (`cargo clippy -p <crate> --all-targets`):
+
+| crate | before | after | what was fixed |
+|---|---|---|---|
+| kiln-param | 4 | 0 | `doc_lazy_continuation` (lib.rs — leading `+` made a doc list item parse as a nested list; reworded); 3× `unused_mut` (parameter.rs tests — `let mut p` where only `&self` `bump_epoch` is called; dropped `mut`, kept it in the one test calling `replace_forward_storage(&mut …)`) |
+| kiln-blas | 3 | 0 | `needless_borrow` (build.rs `build.flag(&format!(…))` → `format!(…)`); `&PathBuf` → `&Path` (build.rs `configure_nvcc_from_cuda_root`, matches kiln-tensor build-script style); `manual_div_ceil` (algo_cache.rs → `.div_ceil(64)`, round-9 playbook) |
+| kiln-graph | 3 | 0 | 3× `redundant_clone` (replay_plan.rs tests — `[input.clone()]` → `std::slice::from_ref(&input)`, `ReplayInputs::new` takes `&[ResidentResourceRef]` by reference) |
+| kiln-kt-bridge | 2 | 0 | 2× `redundant_closure` (tape_bridge.rs — `\|a,b\| ops::add(a,b)` → pass `kiln_tensor::ops::add` directly; live lib code — downstream `cargo check -p kiln-model` clean) |
+| kiln-vulkan-blas | 1 | 0 | `derivable_impls` (cooperative_matrix.rs — derived `Default` with `#[default]` on `Unavailable`, deleted hand-written impl) |
+| kiln-rocblas | 1 | 0 | `manual_div_ceil` (algo_cache.rs — same one-line fix as kiln-blas) |
+| kiln-marlin-gemm | 5 | 0 | `needless_borrow` + `&PathBuf`→`&Path` (build.rs, same patterns); 3× `collapsible_if` (build.rs `find_cuda_root` — nested ifs → let-chains, edition 2024) |
+| kiln-graph-metal | 2 | 0 | 2× `redundant_clone` (tests — same `std::slice::from_ref(&input)` fix as kiln-graph) |
+| kiln-graph-vulkan | 2 | 0 | 2× `redundant_clone` (tests — same fix) |
+| kiln-flce-kernel | 6 | 0 | 3× `identity_op` (kt_tape.rs tests — `vec![0.0f32; 1 * 4 * 8]` → `vec![0.0f32; 4 * 8]`, element count unchanged); 2× `too_many_arguments` + 1× `dead_code` (kt_api.rs — see below, explicit allows) |
+| kiln-memory | 2 | 0 | 2× `result_large_err` (governor.rs — see below, explicit allows) |
+
+**Total: 31 own-code warnings → 0.**
+
+**Judgment-class items (explicit `#[allow(clippy::…)]` + in-tree justification, per steering):**
+
+- `kiln-flce-kernel::kt_api::{flce_forward_row_tiled_stats, flce_backward_row_tiled_dhidden}` —
+  `#[allow(clippy::too_many_arguments)]`: flat argument lists mirror the per-tile kernel
+  inputs (tensors, labels, dims, tile, device) 1:1; a parameter struct would obscure that
+  correspondence (round-65 allow-with-justification pattern).
+- `kiln-flce-kernel` tests `read_f32_vec_any` — `#[allow(dead_code)]`: **kept, not deleted** —
+  live under `feature = "cuda"` (used by
+  `fused_linear_cross_entropy_phase_b_backward_kt_cuda_sparse_chunk_runs`, kt_api.rs:1992+);
+  the round-35/64/65 trap. Only looks dead under default features. In-tree comment.
+- `kiln-memory::governor` `GlobalGovernorState::configure` + `GlobalGovernor::configure_global` —
+  `#[allow(clippy::result_large_err)]`: `AlreadyInitialized{existing, requested}`
+  deliberately carries BOTH configs so operators can log the diff; boxing would not reduce
+  cost (both fields already `Clone`). Breaking-API alternative (boxed fields) rejected for
+  an internal policy crate.
+
+**Bonus (found while verifying the `rocm` feature lane of kiln-marlin-gemm — mechanical lints
+rounds 9–12 already swept in kiln-vulkan-kernel, never hit this crate's rocm-gated code):**
+6× `manual_is_multiple_of` (lib.rs rocm test helpers — `x % y == 0` asserts →
+`x.is_multiple_of(y)`) and 1× `unusual_byte_groupings` (tests/rocm_marlin_parity.rs —
+`0xC0FFEE_5EED` → `0x00C0_FFEE_5EED`, value identical). kiln-marlin-gemm now clean under
+both `cuda` (default) and `rocm` feature sets.
+
+**Verification (before→after, same commands):**
+
+- `cargo test -p <each touched crate>` after: kiln-param 66 pass; kiln-blas 23 pass;
+  kiln-graph 17+5 pass (1 ignored, pre-existing); kiln-kt-bridge 7 pass (1 ignored, pre-existing);
+  kiln-vulkan-blas 16 pass; kiln-rocblas 23 pass; kiln-graph-metal 3 pass; kiln-graph-vulkan 3
+  pass; kiln-flce-kernel 22 pass; kiln-memory 71 pass (1 ignored, pre-existing); kiln-marlin-gemm
+  default features: test BUILD fails on the external `cudarc` build script (no nvcc in this
+  container — **pre-existing environment limit, confirmed identical on the pristine tree via
+  `git stash`**; baseline run of the same command had succeeded only on cached artifacts);
+  `--features rocm` lane: 3 pass (1 lib + 2 parity) after the fixes.
+- `cargo fmt --check`: clean (whole repo).
+- `cargo check -p kiln-model` + `cargo check -p kiln-train`: clean (rc=0) — downstream
+  consumers of kiln-kt-bridge/kiln-param/kiln-blas unchanged in behavior; their own warning
+  counts are the pre-existing protected sets (untouched).
+- `cargo clippy -p <11 crates> --all-targets` after: 10/11 rc=0 with 0 own-code warnings;
+  kiln-marlin-gemm rc=101 solely from the external `cudarc` build script (nvcc absent) with
+  0 own-code warnings emitted; its rocm-lane clippy rc=0, 0 own-code warnings.
+- Pre-existing baseline notes (unchanged, not regressions): no local CUDA toolkit in this
+  container (rounds 55/65 same baseline); kiln-flce-kernel default-features test BUILD on
+  `cudarc` still fails here while its lib clippy passes and all 22 buildable default-feature
+  tests pass.
+
+**DO-NOT-TOUCH compliance:** kiln-tensor untouched (its 14–29 warning judgment sets stand);
+OPD gate cluster, kiln-rmsnorm-kernel, kiln-kernels, kiln-quant, kiln-train, kiln-model,
+sweep-audit, `scripts/audit-candle-usage.sh`, `bench-results/candle-api-surface.*`,
+`check_backend_latency_fixtures.py --require-covered`, and the ~26 feature-gated
+kiln-model/kiln-train unused imports all untouched.
+
+-Round 66
+
 ## Cleanup Agent — 2026-08-25
 
 Removed two stray artifacts that had been committed to the repository root:

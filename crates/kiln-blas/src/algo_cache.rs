@@ -372,7 +372,7 @@ fn json_str(s: &str) -> String {
 /// Tiny stdlib base64 encoder (avoids pulling in `base64` as a dep).
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
         let n = u32::from_be_bytes([0, bytes[i], bytes[i + 1], bytes[i + 2]]);

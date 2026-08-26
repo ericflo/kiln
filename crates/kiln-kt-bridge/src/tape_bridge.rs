@@ -335,7 +335,7 @@ where
         let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
         seeds.insert(loss_kt.id(), seed);
         let kt_grads = tape
-            .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+            .backward_with_seeds(seeds, kiln_tensor::ops::add)
             .map_err(|e| {
                 BridgeError::new(format!(
                     "tape_bridge: tape-authoritative(kt) backward walk: {e}"
@@ -420,7 +420,7 @@ where
         let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
         seeds.insert(seg_output.id(), upstream_grad);
         let kt_grads = tape
-            .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+            .backward_with_seeds(seeds, kiln_tensor::ops::add)
             .map_err(|e| {
                 BridgeError::new(format!(
                     "tape_bridge: with_tape_segment_backward_scope backward walk: {e}"

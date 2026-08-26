@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // CUDA path: only compile the vendored Marlin kernel when `--features cuda`
@@ -68,7 +68,7 @@ fn build_cuda() {
     for arch in cuda_archs.split(';') {
         let arch = arch.trim();
         if !arch.is_empty() {
-            build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            build.flag(format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
         }
     }
 
@@ -89,7 +89,7 @@ fn build_cuda() {
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
 }
 
-fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+fn configure_nvcc_from_cuda_root(cuda_root: &Path) {
     if env::var_os("NVCC").is_some() {
         return;
     }
@@ -123,17 +123,16 @@ fn find_cuda_root() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(output) = std::process::Command::new("which").arg("nvcc").output() {
-        if output.status.success() {
-            let nvcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let p = PathBuf::from(nvcc_path);
-            if let Some(bin_dir) = p.parent() {
-                if let Some(cuda_dir) = bin_dir.parent() {
-                    if cuda_dir.join("include").join("cuda.h").exists() {
-                        return Some(cuda_dir.to_path_buf());
-                    }
-                }
-            }
+    if let Ok(output) = std::process::Command::new("which").arg("nvcc").output()
+        && output.status.success()
+    {
+        let nvcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let p = PathBuf::from(nvcc_path);
+        if let Some(bin_dir) = p.parent()
+            && let Some(cuda_dir) = bin_dir.parent()
+            && cuda_dir.join("include").join("cuda.h").exists()
+        {
+            return Some(cuda_dir.to_path_buf());
         }
     }
     None
