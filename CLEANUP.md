@@ -2092,3 +2092,126 @@ consumes the touched kiln-eval API). `cargo fmt --check` clean;
 `cargo doc -p kiln-eval --no-deps` zero warnings;
 `python3 scripts/check_repository_artifacts.py` passes (6694 tracked
 paths, size policy unchanged — edits only).
+
+## Cleanup Agent (round 67) — 2026-08-26
+
+Completion of the kiln-model clippy sweep (attempt 2; attempt 1 was
+committed 8/11 categories — commits `8d7e924b8`…`386cd5580` — with a
+partial stash `round67-attempt1-partial-kiln-model-sweep` left untouched).
+This session closed the remaining categories in 8 incremental commits
+(`190454833`…`843081ebb`), one per lint group, each verified green before
+and after.
+
+**Baseline → end state:** 79 unique kiln-model warnings at the start of
+the remaining work (from the 8/11 state) → **zero** kiln-model warnings
+under `cargo clippy -p kiln-model --all-targets` (default features).
+
+**Fixed this session (8 commits):**
+1. `manual_div_ceil` 6→0 — `(a + b - 1) / b` → `usize::div_ceil` (loader,
+   weight_loading, kv_cache, generate, model_dispatch, fp8).
+2. `doc_overindented_list_items` 4→0 — doc lists reindented in
+   linear_attention.rs / linear_attention_streaming.rs.
+3. `needless_option_as_deref` 4→0 + `option_as_ref_deref` 1→0
+   (`opt.as_ref().map(|x| x.as_deref())` → `opt.as_deref()` in
+   model_dispatch, generate) + `unused_mut` removal on three
+   `linear_state` parameters (lines 26/52/115 family) — verified no
+   `as_mut`/`as_deref_mut` usage in **any** cfg branch before dropping
+   `mut`; vulkan build checked green. Other `linear_state` params keep
+   `mut` (they do mutate).
+4. `manual_contains` 3→0 (`.iter().any(|x| x == &T)` → `.contains(&T)`,
+   backend/mod.rs) + `manual_range_contains` 1→0
+   (`(1..=N).contains(&x)`, linear_attention_streaming.rs).
+5. `useless_vec` 3→0 (kv_cache.rs ×2, loader.rs `.repeat`) +
+   `useless_conversion` 3→0 (weight_loading.rs, generate.rs ×2
+   `.zip(x.into_iter())` → `.zip(x)`).
+6. 16 singleton lints → 0 across 11 files: `matches!`, `print_literal`,
+   `redundant_closure`, `duplicated_attributes`, `manual_checked_ops`
+   (→ `checked_div` with the exact `denom==0 ⇒ no clamp` semantics
+   preserved), `manual_clamp`, `needless_question_mark`,
+   `empty_line_after_doc_comments`, `question_mark`, `needless_borrow` ×2,
+   `unnecessary_cast` ×2, `needless_as_bytes`, `unused_parens`,
+   `identity_op`, `cloned_ref_to_slice_refs` (→ `std::slice::from_ref`),
+   `items_after_test_module` (cuda_graph.rs Send/Sync impl moved above
+   `mod tests`).
+7. `unused_variables` 8→0 — all feature-gated locals/params
+   (forward.rs `backend` (cuda), full_attention.rs `kv_slot` (cuda/metal/
+   rocm), linear_attention_streaming.rs `conv_entry_state` (cuda/metal/
+   vulkan/rocm), lm_head.rs `backend` (any of 4), model_dispatch.rs
+   `row_ids` ×2 (vulkan), quantized.rs test locals (genuinely dead —
+   removed). Gated ones carry the repo's established
+   `#[cfg_attr(not(feature = …), allow(unused_variables))]` convention
+   (precedent: model_dispatch.rs:2314) so the consuming features stay
+   warning-free without renaming.
+8. `unused_imports` 5→0 — metal_graph.rs: the five names consumed only by
+   the `#[cfg(feature = "metal")]` impl block (`anyhow::Context`,
+   `GpuAttentionWeights`, both
+   `model_forward_paged_decode_contiguous_batch_*_with_stable_buffers`,
+   `rms_norm`) are now in `#[cfg(feature = "metal")] use` statements —
+   imports **preserved and gated, not deleted** (steering constraint).
+   Three other flagged names were proven dead (zero occurrences file-wide,
+   in every feature build): `kiln_tensor::D` (sampling.rs),
+   `CachedTransposedWeightBytes` (forward.rs), `CrossEntropyKtBackward`
+   (tape_forward.rs, superseded by `CrossEntropyFromLogitsKtBackward`) —
+   removed with evidence in the commit messages.
+9. Judgment lints 22→0: `type_complexity` ×6 → documented allows at each
+   site (GDN `runtime_gdn_chunk_prep` 6-tuple kernel ABI on the trait
+   default in backend/mod.rs **and** all four backend impls — the 6-tuple
+   is the `gdn_chunk_prep` kernel's positional contract; the batched-decode
+   cached-meta 7-tuple; the batch-sampling context pair; the
+   threaded-prefill result tuple; the loader raw-triple; the test
+   CacheSnapshot row). `unnecessary_mut_passed` ×13 call sites →
+   `#[allow]` on the 5 containing CPU parity tests: the
+   `model_forward_paged*` family keeps its **public**
+   `Option<&mut LinearAttentionState>` contract (mutated on cuda/metal/
+   rocm/vulkan paths, read-only on CPU); changing the signature would be a
+   breaking API change (steering: never reshape public signatures).
+   `large_enum_variant` ×3 → allows with rationale (boxing public enum
+   payloads `GpuAttentionWeights`/`AttentionWeights`/`MtpGpuSource` would
+   break every consumer's pattern matches). `enum_variant_names` ×1 →
+   allow on `MarlinPackKind` (variants mirror the checkpoint projection
+   suffixes). `missing_is_empty` ×1 → added the actual `is_empty()`
+   method to `WeightData` (pure addition, no signature change).
+   `doc_lazy_continuation` ×4 → blank doc line before the post-list
+   paragraph in tests/vk_bwd_adapter_parity.rs.
+
+**Collateral:** `docs/backend-capability-report.{md,json}` regenerated via
+`scripts/generate_backend_capability_report.py` — the report records
+function line numbers, which shifted by the new allow attributes in the
+backend files (diff is line numbers only; `--check` passes).
+
+**Verification (all after the changes; identical before each commit):**
+- `cargo clippy -p kiln-model --all-targets` — 79 → **0** kiln-model
+  warnings (default features).
+- `cargo check -p kiln-model --features vulkan` — green after every commit
+  (feature builds still compile; the 3 removed dead names verified by
+  zero textual occurrences file-wide, and `cargo check --features vulkan`
+  re-run after removal with zero errors/unused-import warnings).
+- `cargo test -p kiln-model` — 371 lib + 22 integration + 1 doc =
+  **394 passed, 0 failed** at every checkpoint (including after the
+  capability-report regeneration, which initially made
+  `generated_capability_report_check_mode_is_non_mutating_and_enforced`
+  fail until the report was regenerated).
+- `cargo check -p kiln-server -p kiln-train -p kiln-eval` — clean
+  (compiles; kiln-server's own 22 pre-existing warnings are that crate's
+  scope, not touched here).
+- `cargo fmt --check` — clean after every commit.
+- `python3 scripts/check_repository_artifacts.py` — passes (6694 tracked
+  paths; policy unchanged).
+
+**Deferred (documented, not fixed this round):**
+- **Vulkan-feature clippy build (`--features vulkan`)**: 73 pre-existing
+  kiln-model warnings that only compile under the vulkan feature and were
+  outside the 11-category plan (derived from the default build). By lint:
+  collapsible_if 23, identity_op 7, redundant_closure 7,
+  too_many_arguments 11 (8–14 args, several in the `model_forward_paged*`
+  family), manual_is_multiple_of 4,
+  needless_borrows_for_generic_args 4, needless_return 3, manual_contains
+  3, doc list indentation 3, explicit into_iter 2, type_complexity 2,
+  items_after_test_module 2, empty_line_after_doc_comment 1,
+  needless_range_loop 1 (73 total). These live in vulkan_gdn.rs,
+  vk_decode_resident.rs and cfg-gated branches of model_dispatch.rs /
+  transformer.rs / primitives.rs / tape_forward.rs — some in
+  protected/audited territory. A dedicated "kiln-model vulkan-feature
+  clippy sweep" round is the right follow-up.
+- kiln-core `type_complexity` ×2 (tokenizer.rs:449/602) — already
+  documented as deferred since round 65; untouched.
