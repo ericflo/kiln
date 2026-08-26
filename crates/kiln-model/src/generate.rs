@@ -4912,6 +4912,10 @@ impl ModelRunner {
             } else {
                 None
             };
+        // `type_complexity`: (per-row seeds, per-row histories) is the compact
+        // sampling-context pair passed to the batched sampler; a dedicated
+        // struct would add indirection for a 2-element pair.
+        #[allow(clippy::type_complexity)]
         let batch_sampling_contexts: Option<(Vec<Option<u64>>, Vec<Vec<TokenId>>)> = if !all_greedy
         {
             Some((
@@ -9681,6 +9685,11 @@ impl ModelRunner {
                 let runner_guard = runner_lock
                     .read()
                     .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                // `type_complexity`: the threaded-prefill result carries the
+                // token plus both registration vectors (head + tail) in one
+                // positional tuple; kept as-is to match the existing call
+                // convention at this seam.
+                #[allow(clippy::type_complexity)]
                 let result = (|| -> Result<(
                     TokenId,
                     Option<PagedPrefixRegistration>,

@@ -7528,6 +7528,11 @@ fn deterministic_tokens(seq_len: usize, vocab_size: u32) -> Vec<u32> {
 /// Run monolithic vs streaming on the same config + tokens, return
 /// `(monolithic_full_logits[1, T, V], streaming_full_last_tile_logits[1, last_tile_len, V])`
 /// where the streaming pass uses `tile_size` and `last_token_only=false`.
+// `unnecessary_mut_passed`: `model_forward_paged*` keeps its public
+// `Option<&mut LinearAttentionState>` contract (the state IS mutated on the
+// cuda/metal/rocm/vulkan paths); the CPU path merely reads through it, so
+// these call sites must still hand over the `&mut` form.
+#[allow(clippy::unnecessary_mut_passed)]
 fn run_parity(
     config: &kiln_core::config::ModelConfig,
     token_ids: &[u32],
@@ -7736,6 +7741,10 @@ fn test_streaming_prefill_progress_is_cumulative_across_split_cpu() -> Result<()
     Ok(())
 }
 
+// `unnecessary_mut_passed`: see the note on `run_parity` — the paged forward
+// family's `&mut LinearAttentionState` parameter is its public contract even
+// though the CPU path only reads it.
+#[allow(clippy::unnecessary_mut_passed)]
 #[test]
 fn test_streaming_last_hidden_matches_monolithic_cpu() -> Result<()> {
     let config = streaming_test_config();
@@ -7825,6 +7834,10 @@ fn test_streaming_matches_monolithic_cpu_mid() -> Result<()> {
     Ok(())
 }
 
+// `unnecessary_mut_passed`: see the note on `run_parity` — the paged forward
+// family's `&mut LinearAttentionState` parameter is its public contract even
+// though the CPU path only reads it.
+#[allow(clippy::unnecessary_mut_passed)]
 #[test]
 fn test_streaming_tile_invariance_cpu() -> Result<()> {
     // For a fixed token sequence, the last token's logits must agree
@@ -7901,6 +7914,10 @@ fn test_streaming_tile_invariance_cpu() -> Result<()> {
     Ok(())
 }
 
+// `unnecessary_mut_passed`: see the note on `run_parity` — the paged forward
+// family's `&mut LinearAttentionState` parameter is its public contract even
+// though the CPU path only reads it.
+#[allow(clippy::unnecessary_mut_passed)]
 #[test]
 fn test_model_forward_paged_last_token_matches_full_last_row_cpu() -> Result<()> {
     let config = streaming_test_config();
@@ -8033,6 +8050,10 @@ fn test_weighted_lm_head_prep_argmax_matches_final_rmsnorm_argmax_metal() -> Res
     Ok(())
 }
 
+// `unnecessary_mut_passed`: see the note on `run_parity` — the paged forward
+// family's `&mut LinearAttentionState` parameter is its public contract even
+// though the CPU path only reads it.
+#[allow(clippy::unnecessary_mut_passed)]
 #[test]
 fn test_streaming_preserves_state_cpu() -> Result<()> {
     // After prefill, run a single decode step on top of the resulting

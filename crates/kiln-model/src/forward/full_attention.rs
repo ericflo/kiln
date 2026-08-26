@@ -3103,6 +3103,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // block_table tensors. The cache is invariant across the 8 full-attn
     // layers within a step, so building once saves 7 HtoD launches per
     // step at bs > 1.
+    // `type_complexity`: one positional 7-tuple is the cached batched-decode
+    // metadata contract (lengths + the three optional pre-built tensors);
+    // splitting it into a struct would ripple through the call chain for no
+    // behavioral change.
+    #[allow(clippy::type_complexity)]
     let (
         max_seqlen_k,
         kernel_max_seqlen_k,

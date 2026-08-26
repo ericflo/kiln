@@ -2219,6 +2219,10 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq)]
+    // `type_complexity`: the per-layer snapshot row mirrors the pool's
+    // positional (k/v tensor ids, shapes, scales) tuple; a struct here would
+    // be test-only ceremony.
+    #[allow(clippy::type_complexity)]
     struct CacheSnapshot {
         identity: KvPoolIdentity,
         layers: Vec<(TensorId, TensorId, Vec<usize>, Vec<f32>, Vec<f32>)>,

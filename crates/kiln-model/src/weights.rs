@@ -79,6 +79,10 @@ impl WeightData {
     pub fn len(&self) -> usize {
         self.as_bytes().len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Deref for WeightData {
@@ -211,6 +215,10 @@ pub struct LinearAttentionWeights {
 }
 
 /// Attention weights — either full GQA or linear (Gated DeltaNet).
+// `large_enum_variant`: the full-GQA payload (q/k/v/o projections + norms) is
+// the larger arm; boxing a public enum payload would break every consumer's
+// pattern-matches for no behavioral gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AttentionWeights {
     Full(FullAttentionWeights),

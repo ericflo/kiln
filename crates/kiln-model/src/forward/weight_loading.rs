@@ -730,6 +730,10 @@ pub(super) fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
 /// job belongs to. Populated inline with `pack_from_bf16_batch`'s input vec
 /// during the per-layer build loop, then replayed after the batch pack
 /// finishes so the packed `MarlinPackedProj` lands in the right field.
+// `enum_variant_names`: the variants deliberately mirror the checkpoint's
+// projection suffixes (q_proj / gate_proj / up_proj / down_proj / gdn out
+// proj); a distinct naming scheme would only obscure the weight-file mapping.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum MarlinPackKind {
     QProj,

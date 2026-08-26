@@ -14,6 +14,7 @@
 //!      - (b) through the adapter: wrap `grad_fn` in `VkBwdAdapter`, bridge
 //!        `grad_out` to a kt `Tensor(VulkanStorage)`, call
 //!        `BackwardOp::apply`, bridge each result back.
+//!
 //!      The adapter is a pure wrapper over the same kernel, so (a) and (b)
 //!      MUST match to `max_abs_err == 0.0` per input grad. This isolates the
 //!      PR3b kt<->vk bridge round-trip from kernel correctness, and proves the

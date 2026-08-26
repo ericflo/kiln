@@ -783,6 +783,9 @@ impl GdnBackend for VulkanBackend {
         vulkan_gdn::gdn_chunkwise_forward(self, q, k, v, beta, g, state_kt, chunk_size)
     }
 
+    // `type_complexity`: fixed 6-tuple kernel output contract (see trait
+    // default in backend/mod.rs); kept as the kernel's positional ABI.
+    #[allow(clippy::type_complexity)]
     fn runtime_gdn_chunk_prep(
         &self,
         g: &kiln_tensor::Tensor,

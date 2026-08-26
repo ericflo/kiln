@@ -965,6 +965,11 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    // `type_complexity`: the 6-tuple is the fixed `gdn_chunk_prep` kernel
+    // output contract (reordered q/k/v, scaled q, and the two entry
+    // tensors) shared by every backend impl; a named struct would change
+    // the public trait seam for no behavioral gain.
+    #[allow(clippy::type_complexity)]
     fn runtime_gdn_chunk_prep(
         &self,
         _g: &kiln_tensor::Tensor,

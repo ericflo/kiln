@@ -110,6 +110,10 @@ impl Clone for MtpGpuWeightsSlot {
     }
 }
 
+// `large_enum_variant`: `MtpWeights` is the heavy variant by design (it IS
+// the loaded head); boxing would change every constructor/match site for a
+// private enum with no measurable memory win (at most one instance exists).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub(super) enum MtpGpuSource {
     Loaded(MtpWeights),
@@ -399,6 +403,10 @@ pub struct GpuLayerWeights {
 }
 
 /// Attention weights on device.
+// `large_enum_variant`: `GpuFullAttentionWeights` (q/k/v/o + norms) is larger
+// than the linear variant; boxing the public payload would break every
+// constructor/match site across crates for a heap hop that buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum GpuAttentionWeights {
     Full(GpuFullAttentionWeights),

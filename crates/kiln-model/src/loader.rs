@@ -1694,6 +1694,10 @@ fn load_gptq_linear(
 
 /// Extract raw tensor data (bytes, shape, dtype) without dtype conversion.
 /// Used for GPTQ tensors which may be I32 (not supported by our TensorDType).
+// `type_complexity`: (bytes, shape, dtype, source) is the minimal raw-triple
+// (+ provenance) a loader caller needs; wrapping it in a struct would only
+// add a field-renaming tax.
+#[allow(clippy::type_complexity)]
 fn extract_raw_tensor(
     tensor_map: &TensorMap<'_>,
     name: &str,
