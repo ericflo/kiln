@@ -6,7 +6,9 @@
 //! replay object is `kiln_graph_metal::MetalCapturedGraph`, which owns an
 //! `MTLIndirectCommandBuffer` under the `metal` feature.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "metal")]
+use anyhow::Context;
+use anyhow::Result;
 #[cfg(feature = "metal")]
 use std::collections::{HashMap, hash_map::DefaultHasher};
 #[cfg(feature = "metal")]
@@ -22,11 +24,13 @@ use crate::backend::BackendRuntime;
 use crate::backend::SamplingBackend;
 #[cfg(feature = "metal")]
 use crate::forward::MetalPagedDecodeIcbInputs;
+use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged_next_token_greedy};
+// Consumed only by the `metal`-gated impl block below (stable-decode steps +
+// weight fingerprint); keep gated so feature-less builds don't warn.
+#[cfg(feature = "metal")]
 use crate::forward::{
-    GpuAttentionWeights, GpuWeights, LinearAttentionState,
-    model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers,
-    model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers,
-    model_forward_paged_next_token_greedy, rms_norm,
+    GpuAttentionWeights, model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers,
+    model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers, rms_norm,
 };
 use crate::lora_loader::LoraWeights;
 

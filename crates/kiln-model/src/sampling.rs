@@ -26,7 +26,7 @@ use rand::{RngExt, SeedableRng};
 
 // #1082: bare `Tensor`/`Device`/`DType`/`D` resolve to `kiln_tensor` —
 // candle has been removed from the sampler. Mirrors `forward.rs`.
-use kiln_tensor::{D, DType, Device, Tensor};
+use kiln_tensor::{DType, Device, Tensor};
 
 /// One token sampled from the fully resolved behavior distribution.
 ///

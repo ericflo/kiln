@@ -38,8 +38,7 @@ use crate::lora_loader::{
 // it) and now comes from the `kiln_core::block` import below.
 use crate::PagedKvCacheKt as PagedKvCache;
 use crate::transposed_weight_cache::{
-    CachedTransposedWeightBytes, TransposedWeightCacheMissPolicy,
-    transposed_weight_bytes_2d_cached_bytes,
+    TransposedWeightCacheMissPolicy, transposed_weight_bytes_2d_cached_bytes,
 };
 use crate::weight_upload::{AcceleratorWeightUploadPacer, AcceleratorWeightUploadPolicy};
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
