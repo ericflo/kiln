@@ -440,10 +440,9 @@ pub(super) fn gated_rms_norm(
     if !skip_backend_for_active_tape
         && !any_kt_tensor_tracks_op(&[x, z, weight])
         && GdnBackend::runtime_supports_gdn_gated_rms_norm(backend)
+        && let Some(out) = GdnBackend::runtime_gdn_gated_rms_norm(backend, x, z, weight, eps)?
     {
-        if let Some(out) = GdnBackend::runtime_gdn_gated_rms_norm(backend, x, z, weight, eps)? {
-            return Ok(out);
-        }
+        return Ok(out);
     }
     gated_rms_norm_fallback(x, z, weight, eps)
 }
@@ -1207,13 +1206,13 @@ pub(super) fn gdn_chunkwise_recurrence(
         feature = "rocm"
     )))]
     let tape_recording_active = false;
-    if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
-    {
-        if let Some(out) =
+    if seq_len > 1
+        && !tape_recording_active
+        && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
+        && let Some(out) =
             GdnBackend::runtime_gdn_chunkwise_forward(backend, q, k, v, beta, g, state, chunk_size)?
-        {
-            return Ok(out);
-        }
+    {
+        return Ok(out);
     }
 
     let full_chunks = seq_len / chunk_size;

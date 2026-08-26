@@ -1126,12 +1126,12 @@ pub fn gqa_attention_core_prefill(
             seq_len,
             prepared.k.dim(1).unwrap_or(seq_len),
         );
-        if !skip_leaf_flash && leaf_flash_allowed {
-            if let Some(attn_output) =
+        if !skip_leaf_flash
+            && leaf_flash_allowed
+            && let Some(attn_output) =
                 flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-            {
-                return Ok(attn_output);
-            }
+        {
+            return Ok(attn_output);
         }
     }
 
@@ -1907,14 +1907,12 @@ pub fn gqa_attention_pre_o(
             feature = "rocm"
         )))]
         let skip_leaf_flash = false;
-        if !skip_leaf_flash {
-            if let Some(attn_output) =
+        if !skip_leaf_flash
+            && let Some(attn_output) =
                 flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-            {
-                let attn_output =
-                    attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-                return Ok(attn_output);
-            }
+        {
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            return Ok(attn_output);
         }
     }
 
@@ -2346,102 +2344,100 @@ pub(super) fn try_flash_attn_paged_decode(
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
     let is_fp8 = paged_cache.is_fp8();
-    if !is_fp8 && !use_direct_paged_decode {
-        if let Some(start_slot) =
+    if !is_fp8
+        && !use_direct_paged_decode
+        && let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
-        {
-            let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-            let attn_output = {
-                kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
-                AttentionBackend::runtime_flash_attn_paged_decode_contiguous(
+    {
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+        let attn_output = {
+            kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
+            AttentionBackend::runtime_flash_attn_paged_decode_contiguous(
+                backend,
+                q,
+                k_pool,
+                v_pool,
+                start_slot,
+                total_seq_len,
+                softmax_scale,
+            )?
+        };
+        let attn_output = if attn_output.is_some() {
+            attn_output
+        } else {
+            let can_read_head_major =
+                AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
+                    && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
+            let fast_head_major = if can_read_head_major {
+                kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
+                PagedKvBackend::runtime_paged_kv_head_major_read(
                     backend,
-                    q,
                     k_pool,
                     v_pool,
                     start_slot,
                     total_seq_len,
-                    softmax_scale,
                 )?
-            };
-            let attn_output = if attn_output.is_some() {
-                attn_output
             } else {
-                let can_read_head_major =
-                    AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
-                        && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
-                let fast_head_major = if can_read_head_major {
-                    kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    PagedKvBackend::runtime_paged_kv_head_major_read(
-                        backend,
-                        k_pool,
-                        v_pool,
-                        start_slot,
-                        total_seq_len,
-                    )?
-                } else {
-                    None
-                };
-                if AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
-                    // Q is already head-major at the call site. Keep K/V grouped
-                    // instead of routing through `flash_attention_forward`, which
-                    // expands GQA K/V before Metal SDPA and defeats Candle's
-                    // native vector-attention GQA path.
-                    let (k_head, v_head) = match fast_head_major {
-                        Some(kv) => kv,
-                        None => {
-                            let k_live =
-                                k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                            let v_live =
-                                v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                            (
-                                k_live.transpose(1, 2)?.contiguous()?,
-                                v_live.transpose(1, 2)?.contiguous()?,
-                            )
-                        }
-                    };
-                    flash_attention_forward_head_major(
-                        backend, q, &k_head, &v_head, num_heads, head_dim,
-                    )?
-                } else {
-                    None
-                }
+                None
             };
-            let attn_output = if attn_output.is_some() {
-                attn_output
-            } else {
-                // Reshape Q for the fused-attention APIs only when the
-                // head-major path declined. The common Metal desktop path
-                // returns above and should not pay this transpose/copy.
-                let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                let q_fa = {
-                    kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-                    q.transpose(1, 2)?.contiguous()?
+            if AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
+                // Q is already head-major at the call site. Keep K/V grouped
+                // instead of routing through `flash_attention_forward`, which
+                // expands GQA K/V before Metal SDPA and defeats Candle's
+                // native vector-attention GQA path.
+                let (k_head, v_head) = match fast_head_major {
+                    Some(kv) => kv,
+                    None => {
+                        let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                        let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                        (
+                            k_live.transpose(1, 2)?.contiguous()?,
+                            v_live.transpose(1, 2)?.contiguous()?,
+                        )
+                    }
                 };
-                flash_attention_forward(
-                    backend,
-                    &q_fa,
-                    &k_live,
-                    &v_live,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
+                flash_attention_forward_head_major(
+                    backend, q, &k_head, &v_head, num_heads, head_dim,
                 )?
-            };
-            if let Some(attn_output) = attn_output {
-                // The flash-attention helpers already reshape to
-                // [batch, seq_len, num_heads * head_dim].
-                let attn_output =
-                    attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
-                let out = gqa_attention_output_projection(
-                    backend,
-                    &attn_output,
-                    attn_weights,
-                    use_metal_decode_gemv,
-                    lora_layer.map(|l| (l, lora_scale)),
-                )?;
-                return Ok(Some(out));
+            } else {
+                None
             }
+        };
+        let attn_output = if attn_output.is_some() {
+            attn_output
+        } else {
+            // Reshape Q for the fused-attention APIs only when the
+            // head-major path declined. The common Metal desktop path
+            // returns above and should not pay this transpose/copy.
+            let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+            let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+            let q_fa = {
+                kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
+                q.transpose(1, 2)?.contiguous()?
+            };
+            flash_attention_forward(
+                backend,
+                &q_fa,
+                &k_live,
+                &v_live,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )?
+        };
+        if let Some(attn_output) = attn_output {
+            // The flash-attention helpers already reshape to
+            // [batch, seq_len, num_heads * head_dim].
+            let attn_output =
+                attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
+            let out = gqa_attention_output_projection(
+                backend,
+                &attn_output,
+                attn_weights,
+                use_metal_decode_gemv,
+                lora_layer.map(|l| (l, lora_scale)),
+            )?;
+            return Ok(Some(out));
         }
     }
 

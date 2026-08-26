@@ -98,10 +98,10 @@ fn ensure_speculative_generation_available() -> Result<()> {
 /// fired, instead of leaving it running with locks held (see #664).
 #[inline]
 fn check_cancelled(cancel: Option<&CancelHandle>) -> Result<()> {
-    if let Some(c) = cancel {
-        if c.is_cancelled() {
-            anyhow::bail!("generation cancelled by client (request timeout)");
-        }
+    if let Some(c) = cancel
+        && c.is_cancelled()
+    {
+        anyhow::bail!("generation cancelled by client (request timeout)");
     }
     Ok(())
 }
@@ -2009,8 +2009,8 @@ fn run_lm_head_sample_batch_with_contexts(
                 history_counts.push(count);
             }
         }
-        if rocm_w8_supported {
-            if let Some(profiled) = crate::forward::rocm_w8_lm_head_sample_batch_profiled(
+        if rocm_w8_supported
+            && let Some(profiled) = crate::forward::rocm_w8_lm_head_sample_batch_profiled(
                 backend,
                 hidden,
                 weights,
@@ -2028,9 +2028,8 @@ fn run_lm_head_sample_batch_with_contexts(
                 &seed_values,
             )
             .context("fused ROCm W8 batched lm_head sample failed")?
-            {
-                return Ok(profiled);
-            }
+        {
+            return Ok(profiled);
         }
         if backend_fused_supported {
             let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
@@ -6593,10 +6592,10 @@ impl ModelRunner {
             };
             (tokens, graph_capture_duration, graph_replay_duration)
         };
-        if let Some(state) = batch_state.as_ref() {
-            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                state.scatter_batch_rows_replace(linear_states)?;
-            }
+        if let Some(state) = batch_state.as_ref()
+            && !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)?
+        {
+            state.scatter_batch_rows_replace(linear_states)?;
         }
         // Park the (now updated) batched state back in the cache so the
         // next decode step can reuse its resident allocation. Exact row IDs
@@ -6844,10 +6843,10 @@ impl ModelRunner {
             return Ok(None);
         };
 
-        if let Some(state) = batch_state.as_ref() {
-            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                state.scatter_batch_rows_replace(linear_states)?;
-            }
+        if let Some(state) = batch_state.as_ref()
+            && !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)?
+        {
+            state.scatter_batch_rows_replace(linear_states)?;
         }
 
         if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
@@ -7020,10 +7019,10 @@ impl ModelRunner {
                 graph_hidden.replay_duration,
             )
         };
-        if let Some(state) = batch_state.as_ref() {
-            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                state.scatter_batch_rows_replace(linear_states)?;
-            }
+        if let Some(state) = batch_state.as_ref()
+            && !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)?
+        {
+            state.scatter_batch_rows_replace(linear_states)?;
         }
 
         if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {

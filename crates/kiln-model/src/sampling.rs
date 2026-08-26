@@ -1065,10 +1065,10 @@ fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32,
         .map(|(i, v)| (i as u32, v))
         .collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    if let Some(k) = top_k {
-        if k < indexed.len() {
-            indexed.truncate(k);
-        }
+    if let Some(k) = top_k
+        && k < indexed.len()
+    {
+        indexed.truncate(k);
     }
     Ok(indexed)
 }

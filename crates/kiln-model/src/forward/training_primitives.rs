@@ -647,11 +647,11 @@ pub(super) fn solve_tri_transpose_f32(
     dw: &Tensor,
 ) -> Result<Tensor> {
     let (_, _, chunk, _) = dw.dims4()?;
-    if chunk <= 128 && !any_kt_tensor_tracks_op(&[a_strict, beta, dw]) {
-        if let Some(out) = GdnBackend::runtime_gdn_solve_tri_transpose(backend, a_strict, beta, dw)?
-        {
-            return Ok(out);
-        }
+    if chunk <= 128
+        && !any_kt_tensor_tracks_op(&[a_strict, beta, dw])
+        && let Some(out) = GdnBackend::runtime_gdn_solve_tri_transpose(backend, a_strict, beta, dw)?
+    {
+        return Ok(out);
     }
     let mut rows_rev: Vec<Tensor> = Vec::with_capacity(chunk);
     for t in (0..chunk).rev() {

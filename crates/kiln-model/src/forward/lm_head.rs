@@ -597,12 +597,11 @@ pub(super) fn lm_head_argmax_backend_decode_if(
     x: &Tensor,
     embed_tokens_t: &Tensor,
 ) -> Result<u32> {
-    if let Some(backend) = backend {
-        if let Some(token) =
+    if let Some(backend) = backend
+        && let Some(token) =
             SamplingBackend::runtime_linear_decode_argmax(backend, x, embed_tokens_t)?
-        {
-            return Ok(token);
-        }
+    {
+        return Ok(token);
     }
     lm_head_argmax_with_backend(backend, x, embed_tokens_t)
 }
@@ -889,14 +888,12 @@ pub(super) fn lm_head_argmax_rows_backend_decode_if(
     x: &Tensor,
     embed_tokens_t: &Tensor,
 ) -> Result<Vec<u32>> {
-    if let Some(backend) = backend {
-        if SamplingBackend::runtime_supports_linear_decode_argmax_batch(backend) {
-            if let Some(tokens) =
-                SamplingBackend::runtime_linear_decode_argmax_batch(backend, x, embed_tokens_t)?
-            {
-                return Ok(tokens);
-            }
-        }
+    if let Some(backend) = backend
+        && SamplingBackend::runtime_supports_linear_decode_argmax_batch(backend)
+        && let Some(tokens) =
+            SamplingBackend::runtime_linear_decode_argmax_batch(backend, x, embed_tokens_t)?
+    {
+        return Ok(tokens);
     }
     lm_head_argmax_rows_with_backend(backend, x, embed_tokens_t)
 }

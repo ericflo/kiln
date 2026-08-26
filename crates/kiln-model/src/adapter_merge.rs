@@ -232,13 +232,13 @@ pub fn merge_linear(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
                 targets
             );
         }
-        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model()) {
-            if a != b {
-                bail!(
-                    "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
+        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model())
+            && a != b
+        {
+            bail!(
+                "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
                      source[{idx}] is {b:?}"
-                );
-            }
+            );
         }
 
         // Tensor key sets must match exactly.
@@ -373,13 +373,13 @@ pub fn merge_ties(adapters: &[(&PeftLora, f32)], density: f32) -> Result<PeftLor
                 targets
             );
         }
-        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model()) {
-            if a != b {
-                bail!(
-                    "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
+        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model())
+            && a != b
+        {
+            bail!(
+                "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
                      source[{idx}] is {b:?}"
-                );
-            }
+            );
         }
         if first.tensors.len() != adapter.tensors.len() {
             bail!(
@@ -570,13 +570,13 @@ pub fn merge_concat(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
                 targets
             );
         }
-        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model()) {
-            if a != b {
-                bail!(
-                    "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
+        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model())
+            && a != b
+        {
+            bail!(
+                "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
                      source[{idx}] is {b:?}"
-                );
-            }
+            );
         }
         if first.tensors.len() != adapter.tensors.len() {
             bail!(
@@ -730,27 +730,26 @@ pub fn merge_concat(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
         *r_field = Value::Number(serde_json::Number::from(r_total as u64));
     }
     let r_first = ranks[0] as f64;
-    if r_first > 0.0 {
-        if let Some(alpha_val) = config.get("lora_alpha").cloned() {
-            if let Some(alpha_first) = alpha_val.as_f64() {
-                let alpha_total = alpha_first * (r_total as f64) / r_first;
-                let int_round = alpha_total.round();
-                let new_alpha = if alpha_val.is_i64()
-                    && (alpha_total - int_round).abs() < 1e-9
-                    && int_round.is_finite()
-                    && int_round >= 0.0
-                    && int_round <= u64::MAX as f64
-                {
-                    Value::Number(serde_json::Number::from(int_round as u64))
-                } else {
-                    serde_json::Number::from_f64(alpha_total)
-                        .map(Value::Number)
-                        .unwrap_or(alpha_val.clone())
-                };
-                if let Some(alpha_field) = config.get_mut("lora_alpha") {
-                    *alpha_field = new_alpha;
-                }
-            }
+    if r_first > 0.0
+        && let Some(alpha_val) = config.get("lora_alpha").cloned()
+        && let Some(alpha_first) = alpha_val.as_f64()
+    {
+        let alpha_total = alpha_first * (r_total as f64) / r_first;
+        let int_round = alpha_total.round();
+        let new_alpha = if alpha_val.is_i64()
+            && (alpha_total - int_round).abs() < 1e-9
+            && int_round.is_finite()
+            && int_round >= 0.0
+            && int_round <= u64::MAX as f64
+        {
+            Value::Number(serde_json::Number::from(int_round as u64))
+        } else {
+            serde_json::Number::from_f64(alpha_total)
+                .map(Value::Number)
+                .unwrap_or(alpha_val.clone())
+        };
+        if let Some(alpha_field) = config.get_mut("lora_alpha") {
+            *alpha_field = new_alpha;
         }
     }
 

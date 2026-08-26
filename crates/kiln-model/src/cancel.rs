@@ -81,10 +81,10 @@ impl CancelHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::mem::replace(&mut *current, 0);
-        if previous > 0 {
-            if let Some(gauge) = &self.prefill_progress_gauge {
-                gauge.fetch_sub(previous, Ordering::SeqCst);
-            }
+        if previous > 0
+            && let Some(gauge) = &self.prefill_progress_gauge
+        {
+            gauge.fetch_sub(previous, Ordering::SeqCst);
         }
     }
 }

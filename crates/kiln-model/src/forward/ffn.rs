@@ -621,43 +621,41 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
             }
         }
     }
-    if !tape_scope_active && !has_mlp_lora && !has_marlin {
-        if let Some(backend) = backend {
-            if let Some(out) = LinearBackend::runtime_mlp_decode(
-                backend,
-                x,
-                &mlp.gate_proj_t,
-                &mlp.up_proj_t,
-                &mlp.down_proj_t,
-            )? {
-                return Ok(out);
-            }
-        }
+    if !tape_scope_active
+        && !has_mlp_lora
+        && !has_marlin
+        && let Some(backend) = backend
+        && let Some(out) = LinearBackend::runtime_mlp_decode(
+            backend,
+            x,
+            &mlp.gate_proj_t,
+            &mlp.up_proj_t,
+            &mlp.down_proj_t,
+        )?
+    {
+        return Ok(out);
     }
-    if !tape_scope_active && !has_mlp_gate_up_lora && !has_marlin {
-        if let Some(backend) = backend {
-            if let Some(hidden) = LinearBackend::runtime_mlp_gate_up_decode(
-                backend,
-                x,
-                &mlp.gate_proj_t,
-                &mlp.up_proj_t,
-            )? {
-                synchronize_tensor_ready_for_model_handoff("mlp gate_up_fused hidden", &hidden)?;
-                let out = {
-                    kiln_nvtx::range!(c"kiln/mlp/down");
-                    mlp_proj_forward_decode_if(
-                        Some(backend),
-                        use_metal_decode_gemv,
-                        &hidden,
-                        &mlp.down_proj_t,
-                        mlp.down_proj_marlin.as_ref(),
-                        lora_layer.and_then(|l| l.down_proj.as_ref()),
-                        lora_scale,
-                    )?
-                };
-                return Ok(out);
-            }
-        }
+    if !tape_scope_active
+        && !has_mlp_gate_up_lora
+        && !has_marlin
+        && let Some(backend) = backend
+        && let Some(hidden) =
+            LinearBackend::runtime_mlp_gate_up_decode(backend, x, &mlp.gate_proj_t, &mlp.up_proj_t)?
+    {
+        synchronize_tensor_ready_for_model_handoff("mlp gate_up_fused hidden", &hidden)?;
+        let out = {
+            kiln_nvtx::range!(c"kiln/mlp/down");
+            mlp_proj_forward_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                &hidden,
+                &mlp.down_proj_t,
+                mlp.down_proj_marlin.as_ref(),
+                lora_layer.and_then(|l| l.down_proj.as_ref()),
+                lora_scale,
+            )?
+        };
+        return Ok(out);
     }
     #[cfg(feature = "metal")]
     if !tape_scope_active {

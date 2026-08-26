@@ -1291,12 +1291,11 @@ fn linear_with_lora_t_backend_decode_if(
         if let Some(backend) = backend {
             // Autograd-tracked input → prefer the autograd-safe Vulkan
             // CustomOp1 (linear_prefill_apply).
-            if x.track_op() {
-                if let Some(base) =
+            if x.track_op()
+                && let Some(base) =
                     LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)?
-                {
-                    return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
-                }
+            {
+                return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
             }
             if let Some(base) = LinearBackend::runtime_linear_decode(backend, x, weight_t)? {
                 return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);

@@ -181,10 +181,10 @@ impl StopTailGate {
         // Earliest full occurrence across all stops.
         let mut best: Option<(usize, usize)> = None; // (byte idx, stop idx)
         for (si, s) in self.stops.iter().enumerate() {
-            if let Some(i) = self.pending.find(s.as_str()) {
-                if best.map(|(bi, _)| i < bi).unwrap_or(true) {
-                    best = Some((i, si));
-                }
+            if let Some(i) = self.pending.find(s.as_str())
+                && best.map(|(bi, _)| i < bi).unwrap_or(true)
+            {
+                best = Some((i, si));
             }
         }
         if let Some((idx, si)) = best {
