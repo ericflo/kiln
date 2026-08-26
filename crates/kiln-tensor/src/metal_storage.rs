@@ -1152,7 +1152,8 @@ pub fn metal_cumsum_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor
 /// through the candle dispatch layer.
 ///
 /// This is the substrate addition called out in Step 2 of
-/// `docs/metal-types-objc2-swap-plan-2026-05-28.md`. It is the **only**
+/// `docs/archive/metal/metal-types-objc2-swap-plan-2026-05-28.md`. It is
+/// the **only**
 /// substrate gap left between `kiln-tensor` and the `metal_types`
 /// chokepoint flip — every other Phase 7 transition is a pure caller
 /// migration (Storage downcast, helper-signature swap, re-export

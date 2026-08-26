@@ -840,3 +840,26 @@ module surface); repo-wide grep confirms zero remaining stale claims in live
 docs; docs-site `--validate-only` passes (59 documents);
 `scripts/check_repository_artifacts.py` passes (6692 tracked paths); no code
 touched. Diff is 11 insertions / 11 deletions across the three docs.
+
+## Cleanup Agent (round 33) — 2026-08-25
+
+Archived the two candle-era Metal docs flagged by Round 32:
+`docs/METAL_INTEGRATION.md` and
+`docs/metal-types-objc2-swap-plan-2026-05-28.md` moved to
+`docs/archive/metal/` (git mv, history preserved). Both are dated #1082
+migration-pattern records whose work is fully landed — candle-core/candle-nn
+are completely removed from the workspace and the Metal substrate is
+kt-native objc2-metal throughout — so their present-tense candle API
+descriptions no longer reflect the codebase. Added a
+`docs/archive/metal/README.md` stating the archival rationale and completion
+status, and rewrote all 10 sibling links inside the moved plan doc from
+`./...` to `../../...` so they resolve to the companion STOP/status docs that
+remain under `docs/`. Updated the one live code reference: the rustdoc
+pointer in `crates/kiln-tensor/src/metal_storage.rs`
+(`metal_sdpa_last_axis`) now cites the archived path. No other inbound
+references exist: repo-wide grep for both filenames hits only CLEANUP.md,
+git internals, agent traces, and that one code comment; neither file appears
+in `docs/site/docs-manifest.json`, scripts, or CI. Verified: scripted link
+audit of all three files in their new location resolves every relative link
+(0 MISSING); `cargo check -p kiln-tensor --lib` passes with only the
+pre-existing `cuda_tag` dead-code warning, identical before and after.
