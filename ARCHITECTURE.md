@@ -34,7 +34,7 @@ model runner and tensor/autograd substrate
 CUDA · ROCm · Metal · Vulkan · CPU
 ```
 
-The same process owns four related workflows:
+The same process owns five related workflows:
 
 | Workflow | Primary responsibility | Durable result |
 |---|---|---|

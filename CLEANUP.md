@@ -1457,3 +1457,31 @@ kiln-vulkan-kernel --lib` and `cargo test -p kiln-vulkan-kernel --lib`
 pass 65/65 first try; `scripts/check_repository_artifacts.py` passes (6692
 tracked paths, same count — moves not deletions); git status shows exactly
 the two renames, four reference edits, and this ledger entry.
+
+## Cleanup Agent (round 56) — 2026-09-03
+
+Fixed an off-by-one factual drift bug in `ARCHITECTURE.md`: the "System at a
+glance" section said "The same process owns four related workflows" while its
+own table directly below lists five (Serving, Training, OpenEnv RL,
+Evaluation, Artifact management). `git log -p` confirms the sentence and all
+five rows were introduced in the same commit — the count was wrong from birth,
+not a later row insertion, so it is a plain typo-class drift in a live doc.
+Same defect class as Round 14's QUICKSTART "eight batching values" fix. This
+was this session's steering sweep outcome: candidate (a) ECHO_GUIDE.md was
+deep-verified against code and found fully accurate (config keys match
+`kiln_train::LossConfig`/`EchoConfig` defaults λ=0.05/env_only/warning_filter;
+endpoints /v1/train/agentic|grpo|opd exist in training.rs's router tests; all
+receipt token-count fields and EchoReceipt fields exist exactly as documented
+including the "does not publish env_ce_drop_pct/lambda_effective_final"
+negative claim; the warning-filter warn! exists at train_receipt.rs:1730; the
+CLI JSON path preserves config.loss while the JSONL form builds config without
+loss keys; all four Further-reading links and the control-plane schema link
+resolve), so no change was warranted; candidate (b) root-md link audit found
+only frozen historical references (CLEANUP.md ledger, CHANGELOG's never-existed
+auto-synced skill doc which precedent keeps untouched); candidate (c)
+desktop/package.json does not exist (npm surface is only scripts/docs-site/
+package.json, whose three deps are all live). The one-word count fix was the
+only genuine drift found and is fully verified below.
+Verified: docs-site --validate-only passes after the edit (59 documents);
+scripts/check_repository_artifacts.py passes (6692 tracked paths); no code
+touched; git status shows only the one-line doc edit plus this ledger entry.
