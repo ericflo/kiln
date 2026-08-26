@@ -2046,9 +2046,7 @@ pub(super) fn tokenize_grpo_group_timed(
             "GRPO mask build start"
         );
         let mut action_mask = vec![false; full_ids.len()];
-        for i in prompt_ids.len()..full_ids.len() {
-            action_mask[i] = true;
-        }
+        action_mask[prompt_ids.len()..].fill(true);
         let env_mask = vec![false; full_ids.len()];
         let mask_elapsed = mask_started.elapsed();
         if let Some(t) = timings.as_deref_mut() {

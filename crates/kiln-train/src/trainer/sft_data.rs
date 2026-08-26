@@ -191,9 +191,7 @@ pub(super) fn label_mask_by_prefix_tokenization(
 
             let start = before_ids.len();
             let end = prefix_ids.len().min(input_len);
-            for i in start..end {
-                label_mask[i] = true;
-            }
+            label_mask[start..end].fill(true);
         }
     }
     Ok(label_mask)
@@ -726,8 +724,8 @@ pub(super) fn load_or_recompute_checkpoint_boundary(
     let anchor_idx = spool.anchor_for_boundary(boundary_idx);
     let mut current = spool.load(anchor_idx, device)?;
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
-    for replay_idx in anchor_idx..boundary_idx {
-        let (start, end) = segments[replay_idx];
+    for (offset, &(start, end)) in segments[anchor_idx..boundary_idx].iter().enumerate() {
+        let replay_idx = anchor_idx + offset;
         current = model_forward_segment_with_policy(
             backend,
             current,

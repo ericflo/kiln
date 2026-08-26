@@ -510,9 +510,7 @@ fn prefix_tokenization_strategy(
             TurnKind::Observation => env_mask,
             TurnKind::Context => unreachable!(),
         };
-        for i in start..end {
-            target_mask[i] = true;
-        }
+        target_mask[start..end].fill(true);
         segment_spans.push((start, end, seg.kind));
     }
 

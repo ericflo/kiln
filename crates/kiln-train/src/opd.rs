@@ -2150,8 +2150,10 @@ pub fn compute_agentic_loss_weights(inputs: &AgenticLossInputs) -> AgenticLossWe
     }
     // SCoRe earliest-divergence schedule.
     if let Some(idx) = inputs.earliest_divergence {
-        for i in idx..n.min(idx + inputs.score_decay_steps + 1) {
-            let dist = i - idx;
+        for (dist, weight) in weights[idx..n.min(idx + inputs.score_decay_steps + 1)]
+            .iter_mut()
+            .enumerate()
+        {
             let frac = if inputs.score_decay_steps == 0 {
                 0.0
             } else {
@@ -2162,7 +2164,7 @@ pub fn compute_agentic_loss_weights(inputs: &AgenticLossInputs) -> AgenticLossWe
             // The schedule modulates ON TOP of TIP. Multiplicative
             // composition: a tool-call-name position at earliest
             // divergence gets `score_earliest * tool_name_weight`.
-            weights[i] *= extra.max(0.0);
+            *weight *= extra.max(0.0);
         }
     }
     weights
