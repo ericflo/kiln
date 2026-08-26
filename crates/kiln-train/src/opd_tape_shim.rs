@@ -19,25 +19,24 @@
 //!
 //! # Layout
 //!
-//! - **Phase A** ([`opd_top_k_reverse_kl_phase_a_per_position`]) — the
-//!   pure-candle reference path. Builds `[T_active, K]` student logits
-//!   via per-token gather + batched matmul, runs the renormalised
-//!   reverse-KL in candle ops, and lets candle autograd handle the
-//!   backward. Used only as the fallback inside the kt-forward-op shim
-//!   when the kt envelope (`{K∈16,32} × {F32,BF16} × CUDA`) doesn't
-//!   apply.
-//! - **kt-forward-op shim** ([`opd_top_k_reverse_kl_per_position_via_kt_forward_op`])
-//!   — a single candle `CustomOp1`
-//!   ([`kiln_kt_bridge::forward_op::KtForwardOp1`]) wrapping the kt
-//!   composite forward + the fused kt CUDA backward
-//!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_kt`]).
-//!   The production candle-autograd path.
-//! - **kt-tape adapters** ([`try_tape_opd_per_position_cuda`],
-//!   [`try_tape_opd_scalar_mean_cuda_kt`]) — active-scope adapters that record
+//! - **Phase A** (`opd_top_k_reverse_kl_phase_a_per_position`), gone with the
+//!   #1082 candle drop — the former pure-candle reference path. Built
+//!   `[T_active, K]` student logits via per-token gather + batched matmul,
+//!   ran the renormalised reverse-KL in candle ops, and let candle autograd
+//!   handle the backward. Historical — the kt-tape adapters below are the
+//!   production path.
+//! - **kt-forward-op shim** (`opd_top_k_reverse_kl_per_position_via_kt_forward_op`),
+//!   also removed with #1082 — was a single candle `CustomOp1`
+//!   (`kiln_kt_bridge::forward_op::KtForwardOp1`, gone with the bridge's
+//!   candle surface) wrapping the kt composite forward + the fused kt CUDA
+//!   backward (`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_kt`,
+//!   still shipped under `--features cuda`/`rocm`). Historical.
+//! - **kt-tape adapters** (`try_tape_opd_per_position_cuda`, deleted;
+//!   `try_tape_opd_scalar_mean_cuda_kt`) — active-scope adapters that record
 //!   the OPD backward onto a thread-local
 //!   `kiln_autograd::Tape` via the kernel crate's kt-tape entries
 //!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]
-//!   / [`..._via_kt_tape`]).
+//!   / `..._via_kt_tape`).
 
 #[cfg(any(
     feature = "cuda",

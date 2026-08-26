@@ -30,7 +30,7 @@ pub struct GpuWeights {
     pub lm_head_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Per-layer weights
     pub layers: Vec<GpuLayerWeights>,
-    /// Final RMSNorm weight: [hidden_size]
+    /// Final RMSNorm weight: `[hidden_size]`
     pub final_norm: Tensor,
     /// Cached rotary inv_freq tensor, shape `[half_rotary]`, F32 on device.
     /// Computed once at load time from `config.rotary_dim()` and `config.rope_theta`
@@ -544,7 +544,7 @@ impl GpuLinearAttentionWeights {
     ///
     /// Returns the contiguous kt field as a `KtTensor`, mirroring
     /// [`GpuFullAttentionWeights::q_proj_t_kt`] and
-    /// [`GpuFfnWeights::gate_proj_t_kt`]. Provided so the GDN region's
+    /// `GpuFfnWeights::gate_proj_t_kt` (cuda/rocm-gated). Provided so the GDN region's
     /// kt weight boundary lives in one place. The tensor is already kt-native;
     /// backend eligibility belongs to the request-dispatch call site. The hot
     /// path uses the pre-transposed `*_t` variants.

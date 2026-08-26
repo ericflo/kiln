@@ -1,7 +1,7 @@
 //! Build `(input_ids, action_mask, env_mask)` from a [`Trajectory`].
 //!
 //! Generalizes the SFT pattern in
-//! [`crate::trainer::label_mask_from_rendered_assistant_spans`] from one
+//! `crate::trainer::label_mask_from_rendered_assistant_spans` from one
 //! role (assistant) to multiple (assistant + tool / observation), and adds
 //! the paper §3.2 harness-warning-prefix exclusion for env spans.
 //!

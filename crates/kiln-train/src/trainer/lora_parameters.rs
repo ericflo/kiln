@@ -26,7 +26,7 @@ pub(super) struct AdapterSmokeGeneration {
 /// NO `loss.backward()`.
 pub struct TrainableLoraParams {
     /// Per-layer, per-module (A, B) parameter pairs.
-    /// Indexed as: layers[layer_idx].module_name -> (Param_A, Param_B)
+    /// Indexed as: `layers[layer_idx].module_name` -> (Param_A, Param_B)
     pub layers: Vec<TrainableLoraLayerParams>,
     /// LoRA pairs for the native MTP draft block (MTP training plan
     /// PR-B). `None` unless the post-SFT MTP alignment phase initialized
@@ -104,7 +104,7 @@ impl TrainableLoraParams {
         Self::initialize_seeded(config, weights, rank, alpha, device, None)
     }
 
-    /// Like [`initialize`], but uses a deterministic RNG seeded with `seed`
+    /// Like [`Self::initialize`], but uses a deterministic RNG seeded with `seed`
     /// to draw A. Used by the SFT/GRPO training loops so an adapter
     /// initialized with the same seed against the same base weights produces
     /// byte-identical LoRA-A tensors on every run, even on backends like the
@@ -400,7 +400,7 @@ impl TrainableLoraParams {
     /// `dispatch_sgd_step` path that writes to the registry buffer
     /// in-place.
     ///
-    /// Caller invokes this once after [`initialize_seeded`], typically
+    /// Caller invokes this once after [`Self::initialize_seeded`], typically
     /// from `sft_train` / `grpo_train`. Test code that doesn't
     /// exercise the registry path skips this call — the trainer's
     /// existing fall-through logic handles the not-resident case
@@ -436,7 +436,7 @@ impl TrainableLoraParams {
         Ok(())
     }
 
-    /// Inverse of [`register_with_backend`]: evict every LoRA param
+    /// Inverse of [`Self::register_with_backend`]: evict every LoRA param
     /// from the resident activation registry. Caller invokes this
     /// after the training loop completes (or per-step if Phase 4.1
     /// step 2 makes the registry the data-of-record and the trainer
@@ -712,7 +712,7 @@ impl TrainableLoraParams {
 
     /// Mutable variant — the optimizer step + `sync_to_master` mutate
     /// each `Parameter`'s storage in place (preserving `tensor_id`).
-    /// Same traversal order as [`all_params`].
+    /// Same traversal order as [`Self::all_params`].
     pub fn all_params_mut(&mut self) -> Vec<&mut Parameter> {
         let mut out: Vec<&mut Parameter> = Vec::new();
         for layer in &mut self.layers {

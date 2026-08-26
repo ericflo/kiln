@@ -563,7 +563,7 @@ impl KilnTokenizer {
 
     /// Apply the chat template to format messages into a prompt string.
     ///
-    /// If a Jinja2 template was set via [`with_chat_template`], renders it with
+    /// If a Jinja2 template was set via [`Self::with_chat_template`], renders it with
     /// minijinja. Otherwise falls back to plain ChatML framing — a minimal
     /// subset that omits Qwen3.5's XML `<function=...>` tool calls, `<think>`
     /// reasoning, and `<tool_response>` handling. Load the model's real
@@ -639,7 +639,7 @@ impl KilnTokenizer {
             .collect()
     }
 
-    /// Same as [`apply_chat_template`] but also threads OpenAI-style tool/function
+    /// Same as [`Self::apply_chat_template`] but also threads OpenAI-style tool/function
     /// definitions into the Jinja chat-template context as `tools`. Templates
     /// that branch on `{% if tools %}` (e.g. Qwen3.5's official template) emit
     /// their tool-calling prelude only when this is `Some(non-empty)`. Pass

@@ -1,8 +1,8 @@
 //! Tape-based single-step training entry — CP-4 substrate pilot for `kiln-train`.
 //!
 //! Phase 6a/CP-4 of the candle-removal plan (#1082) — see
-//! [`docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`] and
-//! [`docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md`] §"Top 3 next-tasks" #1.
+//! `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md` and
+//! `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md` §"Top 3 next-tasks" #1.
 //!
 //! # Why this module exists
 //!

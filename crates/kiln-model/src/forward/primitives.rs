@@ -325,7 +325,7 @@ pub(super) fn embedding_lookup_from_transposed_index(
 /// RMSNorm: x * weight / sqrt(mean(x^2) + eps).
 ///
 /// `x`: [..., hidden_size]
-/// `weight`: [hidden_size] (learnable scale)
+/// `weight`: `[hidden_size`] (learnable scale)
 /// `eps`: small constant for numerical stability (1e-6 for Qwen3.5-4B)
 ///
 /// Returns: same shape as `x`.
@@ -823,7 +823,7 @@ pub fn rotary_embedding(
 /// GPU address stays stable across graph replays, and its contents can be updated via
 /// `cudaMemcpyAsync` outside the captured graph.
 ///
-/// `positions_tensor`: f32 tensor on device, shape [seq_len]
+/// `positions_tensor`: f32 tensor on device, shape `[seq_len`]
 /// `inv_freq`: cached frequency table, shape `[rotary_dim / 2]`, F32 on device.
 pub fn rotary_embedding_from_tensor(
     q: &Tensor,

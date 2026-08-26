@@ -4,7 +4,7 @@
 //! ([`AlgoCache`], [`WorkspacePool`], [`BackendMatmul`] + [`MatmulRequest`] +
 //! [`Epilogue`]) are copied verbatim from `kiln-blas` (they carry no driver
 //! dependency); the cublasLt executor is ported to hipBLASLt
-//! ([`HipblasLtMatmulHandle`], behind `--features hipblaslt`).
+//! (`HipblasLtMatmulHandle`, behind `--features hipblaslt`).
 
 mod algo_cache;
 mod backend_matmul;

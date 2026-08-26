@@ -1851,11 +1851,11 @@ pub fn model_forward_no_head_with_policy(
 
 /// Full model forward pass using paged KV cache.
 ///
-/// Same as [`model_forward`] but uses a [`PagedKvCache`] and [`BlockTable`]
+/// Same as [`model_forward_kt`] but uses a [`PagedKvCache`] and [`BlockTable`]
 /// for KV storage. The caller provides `start_pos` (the absolute position of
 /// the first token in `token_ids`) instead of relying on `kv_cache.seq_len()`.
 ///
-/// `positions_gpu`: optional pre-allocated f32 tensor on device with shape [seq_len].
+/// `positions_gpu`: optional pre-allocated f32 tensor on device with shape `[seq_len]`.
 /// When provided, this tensor is used for RoPE instead of creating a new one.
 /// This is required for CUDA graph replay: the tensor's GPU address must remain
 /// stable so the captured graph reads updated position values on replay.
@@ -1938,7 +1938,7 @@ pub fn model_forward_paged(
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
-/// Paged-KV forward pass with an optional [`PagedKvCacheKt`] twin threaded
+/// Paged-KV forward pass with an optional `PagedKvCacheKt` twin threaded
 /// through to the per-layer GQA-attention writer.
 ///
 /// Same contract as [`model_forward_paged`] but lets the caller pass a kt
@@ -3611,10 +3611,10 @@ pub fn model_forward_paged_last_token_with_last_hidden(
 ///
 /// Fusion pipeline:
 ///
-/// 1. `token_emb  = embed_tokens[draft_token_id]`   # [1, 1, H]
+/// 1. `token_emb  = embed_tokens[draft_token_id]`   # `[1, 1, H]`
 /// 2. `norm_emb   = rms_norm(token_emb, pre_fc_norm_embedding)`
 /// 3. `norm_h     = rms_norm(h_prev,    pre_fc_norm_hidden)`
-/// 4. `fused      = concat([norm_emb, norm_h], dim=-1) @ fc_t`   # [1,1,2H]→[1,1,H]
+/// 4. `fused      = concat([norm_emb, norm_h], dim=-1) @ fc_t`   # `[1,1,2H]`→`[1,1,H]`
 /// 5. `hidden     = transformer_block_paged(mtp_layer, fused, mtp_cache, mtp_pos)`
 /// 6. `logits     = rms_norm(hidden, final_layernorm) @ embed_tokens_t`  # tied head
 ///

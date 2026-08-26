@@ -50,7 +50,7 @@
 //! REINFORCE (`exp(plp - plp.detach())` ≡ 1 by value → value-FD returns 0;
 //! `coeff = -advantage · loss_normalizer`) and CISPO (detached `weight`
 //! multiplying `plp` → `coeff = -weight + KL grad`). See
-//! [`grpo_pg_loss_from_logits_grad_kt`]. (Validated by the candle-free
+//! `grpo_pg_loss_from_logits_grad_kt`. (Validated by the candle-free
 //! finite-difference / closed-form test
 //! `grpo_logit_grad_matches_finite_difference_f32` at the foot of this file,
 //! which covers Token+None, Token+K1, and reinforce.)

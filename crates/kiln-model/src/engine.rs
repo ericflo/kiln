@@ -41,7 +41,7 @@ pub struct BatchInput {
     /// Flat array of token IDs across all sequences in the batch.
     pub token_ids: Vec<TokenId>,
     /// Cumulative sequence lengths for ragged batching.
-    /// seqlens[i] = number of tokens in sequence i.
+    /// `seqlens[i]` = number of tokens in sequence i.
     pub seqlens: Vec<usize>,
     /// Per-token physical slot index for KV cache writes.
     pub slot_mapping: Vec<usize>,

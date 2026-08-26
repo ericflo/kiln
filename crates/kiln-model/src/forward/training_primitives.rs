@@ -22,8 +22,8 @@ pub struct GdnGatedRmsNormFrozenWeightBackwardGrads {
 /// Candle-composite analytic backward for [`gated_rms_norm_fallback`] with a
 /// frozen normalization weight (`out = rms_norm(x, weight, eps) * silu(z)`).
 /// Device-agnostic (runs in candle F32; works on CUDA without a host
-/// round-trip), so the kt-tape [`crate::tape_forward::GdnGatedRmsNormBackward`]
-/// op can wrap it the same way [`crate::tape_forward::GdnRecurrentBackward`]
+/// round-trip), so the kt-tape `crate::tape_forward::GdnGatedRmsNormBackward`
+/// op can wrap it the same way `crate::tape_forward::GdnRecurrentBackward`
 /// wraps [`gdn_recurrent_backward_no_grad`].
 ///
 /// # Math (per trailing-axis row, `D` = trailing-axis size)
@@ -94,10 +94,10 @@ pub fn gdn_gated_rms_norm_frozen_weight_backward_no_grad(
 }
 
 /// kt-native analytic backward for the fused "cross-entropy from full
-/// logits" tape node ([`crate::tape_forward::CrossEntropyFromLogitsKtBackward`]).
+/// logits" tape node (the `crate::tape_forward::CrossEntropyFromLogitsKtBackward` op).
 ///
 /// Computes `dL/d(full logits)` for the next-token-prediction masked
-/// cross-entropy loss that [`crate::tape_forward::try_tape_cross_entropy_from_logits_kt`]
+/// cross-entropy loss that `crate::tape_forward::try_tape_cross_entropy_from_logits_kt`
 /// (and the candle-authoritative fallback `kiln_train::trainer::cross_entropy_loss`)
 /// produces. Device-agnostic (F32, kt in/out — the `_candle` suffix is a misnomer
 /// kept for history) so the kt-tape `CrossEntropyFromLogitsKtBackward` op can wrap
@@ -254,13 +254,13 @@ pub fn cross_entropy_from_logits_grad_candle(
 /// Candle-composite analytic backward for the GDN L2-qk-norm forward
 /// `y = l2_normalize(x) * scale` (the Step-4/5 `gdn_qk_norm` op: Q uses
 /// `scale = 1/sqrt(dk)`, K uses `scale = 1.0`). Device-agnostic (candle F32),
-/// so the kt-tape [`crate::tape_forward::GdnL2NormScaleBackward`] op can wrap it
+/// so the kt-tape `crate::tape_forward::GdnL2NormScaleBackward` op can wrap it
 /// the same way the gated-rms-norm and recurrence ops wrap their composites.
 ///
 /// # Math (per trailing-axis row, `norm = sqrt(Σⱼ x_j^2 + eps)`)
 ///
 /// Forward (from [`l2_normalize`] + scale): `y_i = scale * x_i / norm`.
-/// Same structure as [`kiln_autograd::L2NormBackward`] (l2norm.rs lines 66-79)
+/// Same structure as `kiln_autograd::L2NormBackward` (l2norm.rs lines 66-79)
 /// with the constant `scale` folded into the upstream grad:
 ///
 /// ```text
@@ -313,8 +313,8 @@ pub struct SdpaFallbackBackwardGrads {
 /// (e.g. `head_dim` ∉ {128, 256}, as on the tiny synthetic test model with
 /// `head_dim = 16`). Device-agnostic (runs in candle F32; works on CUDA
 /// without a host round-trip), so the kt-tape
-/// [`crate::tape_forward::SdpaBackward`] op can wrap it the same way
-/// [`crate::tape_forward::GdnRecurrentBackward`] wraps
+/// `crate::tape_forward::SdpaBackward` op can wrap it the same way
+/// `crate::tape_forward::GdnRecurrentBackward` wraps
 /// [`gdn_recurrent_backward_no_grad`].
 ///
 /// # Inputs

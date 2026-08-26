@@ -175,12 +175,12 @@ pub struct FullAttentionWeights {
     pub k_proj: WeightTensor,
     /// [num_kv_heads * head_dim, hidden_size]
     pub v_proj: WeightTensor,
-    /// [hidden_size, num_heads * head_dim]
+    /// `[hidden_size, num_heads * head_dim]`
     pub o_proj: WeightTensor,
     /// QK normalization weights (RMSNorm per head).
-    /// [head_dim]
+    /// `[head_dim]`
     pub q_norm: WeightTensor,
-    /// [head_dim]
+    /// `[head_dim]`
     pub k_norm: WeightTensor,
 }
 
@@ -231,9 +231,9 @@ pub struct FfnWeights {
 /// One transformer layer's complete weights.
 #[derive(Debug, Clone)]
 pub struct LayerWeights {
-    /// RMSNorm before attention. [hidden_size]
+    /// RMSNorm before attention. `[hidden_size]`
     pub input_layernorm: WeightTensor,
-    /// RMSNorm before FFN. [hidden_size]
+    /// RMSNorm before FFN. `[hidden_size]`
     pub post_attention_layernorm: WeightTensor,
     /// Attention weights (full or linear depending on layer index).
     pub attention: AttentionWeights,
@@ -779,7 +779,7 @@ pub struct ModelWeights {
     pub(crate) source_content_guard: Option<SourceContentGuard>,
     pub embedding: EmbeddingWeights,
     pub layers: Vec<LayerWeights>,
-    /// Final RMSNorm. [hidden_size]
+    /// Final RMSNorm. `[hidden_size]`
     pub final_norm: WeightTensor,
     /// Optional native MTP head (Qwen3.5-4B ships one, other variants may not).
     /// Populated when `num_nextn_predict_layers > 0` in the model config AND the

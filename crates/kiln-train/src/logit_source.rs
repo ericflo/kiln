@@ -484,10 +484,11 @@ pub fn target_token_positions_to_logits_rows(
 ///
 /// Implementations:
 ///
-/// * [`LocalTeacher`] — loads a second model into the same kiln process
+/// * `LocalTeacher` — loads a second model into the same kiln process
 ///   (or attaches to one already loaded), runs a forward pass, extracts
 ///   top-K via `torch.topk`-equivalent on the resulting logits. Default
-///   for the prosumer / corporate tiers (§2.2 / §2.3).
+///   for the prosumer / corporate tiers (§2.2 / §2.3); the production
+///   in-process implementation is [`crate::opd::LiveLocalTeacher`] (#31).
 /// * `RemoteTeacher` speaks the validated OpenAI-compatible prompt-logprob
 ///   schema for explicitly supported providers.
 /// * `CachedTeacher` wraps another source and answers from the local logit

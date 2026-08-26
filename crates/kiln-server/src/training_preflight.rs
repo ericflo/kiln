@@ -6,7 +6,7 @@
 //! intentionally a closed-form upper bound: it overestimates by design so
 //! that "fits according to preflight" implies "actually fits at runtime".
 //!
-//! Used by [`crate::api::training::submit_sft`] and `submit_grpo`.
+//! Used by `crate::api::training::submit_sft` and `submit_grpo`.
 
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;

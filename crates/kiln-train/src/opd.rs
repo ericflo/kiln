@@ -2553,7 +2553,7 @@ fn select_validated_topk_logprob_row(
 
 /// In-process self-distillation teacher (#31): holds a shared (cheap, Arc-backed)
 /// handle to the loaded model and computes top-K teacher logprobs **live** for
-/// any token sequence. Unlike a pre-computed [`FixtureLogitSource`] containing
+/// any token sequence. Unlike a pre-computed [`crate::logit_source::FixtureLogitSource`] containing
 /// exact fixed sequences, this scores the actual ON-policy rollouts the student
 /// generates, so `teacher: "self"` works in
 /// on-policy mode. `fetch_logprobs` runs in the OPD data-prep phase, OUTSIDE the

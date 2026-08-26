@@ -2336,7 +2336,7 @@ impl Default for SpeculativeRuntimePolicy {
 }
 
 /// Shared application state passed to all handlers.
-/// Durable status for the [agent] self_improve scheduler.
+/// Durable status for the agent self_improve scheduler.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SelfImproveSchedulerStatus {
     pub interval_hours: u64,
@@ -2431,7 +2431,7 @@ pub struct AppState {
     /// This can differ from `active_adapter_name` during explicit per-request
     /// chat adapter overrides; missing `adapter` requests reload the default.
     pub loaded_adapter: Arc<std::sync::RwLock<Option<LoadedAdapterIdentity>>>,
-    /// [agent] self_improve scheduler status — None when the scheduler
+    /// agent self_improve scheduler status — None when the scheduler
     /// isn't armed. Persisted to `<adapter_dir>/.self_improve_scheduler.json`
     /// so the cadence survives restarts; surfaced via /health.
     pub self_improve_scheduler: Arc<std::sync::RwLock<Option<SelfImproveSchedulerStatus>>>,

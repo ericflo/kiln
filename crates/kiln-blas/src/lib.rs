@@ -21,7 +21,7 @@
 //!   backend-agnostic matmul trait. CUDA / Metal / Vulkan handles
 //!   implement this single trait; forward.rs reaches for
 //!   `dyn BackendMatmul` and is free of per-backend conditionals.
-//! - [`probe_ffi`] — Phase 0.8 probe FFI (kept for the probe example).
+//! - `probe_ffi` — Phase 0.8 probe FFI (kept for the probe example).
 //!
 //! # CPU-buildable
 //!

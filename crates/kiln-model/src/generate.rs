@@ -3515,7 +3515,7 @@ impl ModelRunner {
         })
     }
 
-    /// Same as [`generate_paged_shared`], but optionally reuses a
+    /// Same as [`Self::generate_paged_shared`], but optionally reuses a
     /// block-aligned cached prefix and returns a completed prompt snapshot that
     /// the caller may register after successful generation.
     pub fn generate_paged_shared_tokens_with_prefix_cache(
@@ -3742,7 +3742,7 @@ impl ModelRunner {
         }
     }
 
-    /// Same as [`generate_paged_shared`], but accepts an already-tokenized
+    /// Same as [`Self::generate_paged_shared`], but accepts an already-tokenized
     /// prompt so API callers do not render/tokenize the same prompt twice.
     ///
     /// The optional `cancel` handle is polled between decode tokens so that
@@ -9251,7 +9251,7 @@ impl ModelRunner {
     /// Streaming generation using shared paged-cache state protected by
     /// short-lived mutexes.
     ///
-    /// Mirrors [`generate_paged_shared`]: CUDA graph-enabled runtimes keep the
+    /// Mirrors [`Self::generate_paged_shared`]: CUDA graph-enabled runtimes keep the
     /// existing whole-request lock scope, while non-CUDA desktop paths reserve
     /// blocks up front and lock the paged cache only around prefill / decode
     /// forward passes.

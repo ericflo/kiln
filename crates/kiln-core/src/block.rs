@@ -157,11 +157,11 @@ impl BlockManager {
     /// Physically shrink the manager's block space to `new_num_blocks`, dropping
     /// the tail `[new_num_blocks, num_blocks)` from the free/retired lists. The
     /// CALLER must realloc the backing KV pool tensor to match in lockstep
-    /// ([`PagedKvCacheKt::physical_resize_to`]).
+    /// (`PagedKvCacheKt::physical_resize_to`, the kt-side twin in kiln-model).
     ///
     /// Sound only when the tail holds no live request — fails with `OutOfMemory`
     /// (repurposed: "tail still in use") if `physical_floor() > new_num_blocks`.
-    /// Drive a logical [`set_target_usable`] shrink first and let it drain, then
+    /// Drive a logical [`Self::set_target_usable`] shrink first and let it drain, then
     /// truncate once `physical_floor()` has dropped to the target.
     pub fn physical_truncate(&mut self, new_num_blocks: usize) -> Result<(), BlockError> {
         if new_num_blocks >= self.num_blocks {

@@ -1,13 +1,13 @@
 //! Cross-backend handle for a buffer that lives on a compute device.
 //!
 //! Backends keep their own native buffer types
-//! ([`kiln_vulkan_kernel::VulkanBuffer`], [`kiln_tensor::CudaStorage`],
+//! (`kiln_vulkan_kernel::VulkanBuffer`, `kiln_tensor::CudaStorage`,
 //! and a Metal slot reserved for parity); [`DeviceBuffer`] is the
 //! common Arc-shaped wrapper that callers in `kiln-model` (the resident
 //! registry) and `kiln-train` (LoRA params, optimizer state, activations)
 //! can pass around without depending directly on a specific backend
 //! crate. Conversion to the underlying buffer happens through the typed
-//! accessors (e.g. [`DeviceBuffer::as_vulkan`], [`DeviceBuffer::as_cuda`])
+//! accessors (e.g. `DeviceBuffer::as_vulkan`, `DeviceBuffer::as_cuda`)
 //! which return `None` when the variant doesn't match.
 //!
 //! The Metal arm is deliberately stubbed — the call sites that need it

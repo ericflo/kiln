@@ -9,12 +9,12 @@
 //!
 //! [`MarlinPackedProj`] holds the packed Marlin weight + scales on GPU, plus
 //! the `k`/`n`/`groupsize` metadata the kernel needs on every call. It is
-//! built once at model-load time via [`pack_from_bf16`] and reused for every
+//! built once at model-load time via [`pack_from_bf16_batch`] and reused for every
 //! forward pass.
 //!
 //! # Activation path
 //!
-//! [`matmul_bf16`] takes a BF16 activation of shape `[.., k]`, flattens it to
+//! [`matmul_bf16_kt`] takes a BF16 activation of shape `[.., k]`, flattens it to
 //! `[m, k]` for the kernel, runs the Marlin GEMM, and reshapes back to
 //! `[.., n]`. This matches the contract of the existing BF16 `broadcast_matmul`
 //! against a pre-transposed weight.
@@ -33,9 +33,9 @@ use half::f16;
 /// # #1082 type-flip
 ///
 /// `b_packed`/`scales` are stored as kt (`kiln_tensor::Tensor`) so the kt-API
-/// GEMM ([`kiln_marlin_gemm::marlin_w4a16_gemm_kt`]) consumes them directly on
+/// GEMM (`kiln_marlin_gemm::marlin_w4a16_gemm_kt`, optional dependency) consumes them directly on
 /// the decode hot path. The candle→kt bridge happens **once** at pack time in
-/// [`upload_packed`] (a single device-to-device copy at model load), not on
+/// `upload_packed` (a single device-to-device copy at model load), not on
 /// every per-token decode call.
 #[derive(Clone, Debug)]
 pub struct MarlinPackedProj {

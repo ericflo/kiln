@@ -1626,3 +1626,63 @@ Verified: `cargo doc -p kiln-tensor --no-deps` goes from 12 unresolved to 0;
 `cargo test -p kiln-tensor --lib` passes identically after the edit (994
 passed, 0 failed); `git status` shows only the six source edits plus this
 ledger entry.
+## Cleanup Agent (round 61) — 2026-08-26
+
+Finished the rustdoc intra-doc link sweep for the remaining eight
+locally buildable crates (baseline: `kiln-model` 31, `kiln-train` 19,
+`kiln-core` 8, `kiln-server` 3, `kiln-vulkan-blas` 2, `kiln-rocblas` 1,
+`kiln-blas` 1, `kiln-autograd` 1 — 66 unresolved links across 26 files),
+continuing the round 57–60 kernel-crate sweep. Every site got its
+playbook treatment. (1) Square-bracket shape/notation parsed as links
+(`[hidden_size]`, `[seq_len]`, `[1,1,2H]→[1,1,H]`, `seqlens[i]`,
+`layers[layer_idx].module_name`) → backticks (kiln-model weights.rs,
+primitives.rs, engine.rs, weight_types.rs, model_dispatch.rs;
+kiln-train lora_parameters.rs). (2) Resolvable public items → real
+intra-doc links: renamed successors (`model_forward` →
+`[model_forward_kt]`; marlin_proj's `pack_from_bf16` →
+`[pack_from_bf16_batch]` and `matmul_bf16` → `[matmul_bf16_kt]`;
+`LengthInflation` → `[LengthInflationGuardrail]`), bare sibling-method
+links that only resolve with a `Self::` prefix (`set_target_usable`,
+`with_chat_template`, `apply_chat_template`, `initialize`,
+`initialize_seeded`, `register_with_backend`, `all_params`,
+`generate_paged_shared`), and cross-module items needing explicit paths
+(`FixtureLogitSource` → `[crate::logit_source::FixtureLogitSource]`;
+the non-existent `LocalTeacher` re-pointed at the production
+implementation `[crate::opd::LiveLocalTeacher]` with a note).
+(3) Feature-gated / private / optional-dependency items → backticks:
+the `tape_forward::*` backward structs and
+`try_tape_cross_entropy_from_logits_kt` (module itself cuda/metal/
+vulkan/rocm-gated), `GpuFfnWeights::gate_proj_t_kt` and marlin's
+`upload_packed` (cuda-gated), `probe_ffi` (`probe`-gated),
+`HipblasLtMatmulHandle` (`hipblaslt`-gated), the optional-backend
+types `DeviceBuffer::as_vulkan`/`as_cuda`,
+`kiln_vulkan_kernel::VulkanBuffer`, `kiln_tensor::CudaStorage`,
+`kiln_marlin_gemm::marlin_w4a16_gemm_kt`, `cuda_zeros_ctx`, and the
+cuda-gated `PagedKvCacheKt`, plus the private
+`crate::api::training::submit_sft` and
+`crate::trainer::label_mask_from_rendered_assistant_spans`, the
+`grpo_pg_loss_from_logits_grad_kt` local fn, and the md-file links in
+`kiln-autograd` tape_scope.rs / kiln-train tape_step.rs.
+(4) Deleted / never-materialized targets → plain text with a brief
+historical note: the stale `opd_tape_shim.rs` Layout bullets (the
+`opd_top_k_reverse_kl_phase_a_per_position` pure-candle reference path
+and the candle `CustomOp1`/`KtForwardOp1` kt-forward-op shim both went
+away with #1082; `try_tape_opd_per_position_cuda` never ported into
+kiln-train; the surviving `phase_b_bwd_kt` and
+`..._via_kt_tape` kt-tape entries named plainly), and the prose
+`[agent]` in kiln-server state.rs mistaken for a link.
+Comment-only change: every diff line is a doc comment (73 changed lines
+across 26 files); zero code touched; §9.9 OPD bench-gate files, the
+protected candle-audit artifacts, and the intentional TODO(#1082)
+backend stubs are untouched; `kiln-flash-attn` / `kiln-conv1d-kernel` /
+`kiln-gdn-kernel` left alone (local doc build needs CUDA).
+Why it mattered: `cargo doc` on the eight crates was drowning in 66
+unresolved-link warnings that obscured real ones, and stale candle-era
+claims sat in module docs.
+Verified BEFORE and AFTER: `cargo doc -p <crate> --no-deps` goes from
+66 unresolved-link warnings to 0 on all eight crates; `cargo test --lib`
+passes on all eight (kiln-core 103, kiln-autograd 272, kiln-blas 23,
+kiln-rocblas 23, kiln-vulkan-blas 16, kiln-model 371, kiln-train 531,
+kiln-server 1189 — 0 failed); `cargo fmt --check` clean on all eight;
+scripts/check_repository_artifacts.py passes; git status shows only the
+26 doc-comment source edits plus this ledger entry.

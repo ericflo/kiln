@@ -6,7 +6,7 @@
 //!
 //! 1. **Trajectory-shape** (this module) — truncation rate, repetition
 //!    rate. Computed from rollout token streams alone; no kernel cost,
-//!    no teacher cost. These drive the [`LengthInflation`] guardrail
+//!    no teacher cost. These drive the [`LengthInflationGuardrail`] guardrail
 //!    (§3.9), which auto-tunes Stable-OPD's `β_kl` and `λ_sft` when
 //!    `RepRate > 0.05` over consecutive validation passes (Luo et al.
 //!    2026).

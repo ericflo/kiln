@@ -1,7 +1,7 @@
 //! kiln-vulkan-blas — Vulkan BLAS layer (extending
 //! `kiln-vulkan-kernel::vk_ops/matmul*`).
 //!
-//! Sibling to [`kiln-blas`] (CUDA) and [`kiln-mps`] (Metal). Per the
+//! Sibling to `kiln-blas` (CUDA) and `kiln-mps` (Metal). Per the
 //! Phase 2 issue bullet:
 //!
 //! > BLAS crate: `kiln-blas` (cublasLt) / `kiln-mps`

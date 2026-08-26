@@ -499,7 +499,7 @@ impl PagedKvCacheKt {
     /// MUST live on the model's *runtime* device (not a compile-time
     /// feature-gated default) so the per-layer K/V `slice_set` writes match
     /// the model's tensors and don't trip `Tensor::slice_set: device
-    /// mismatch`. CUDA routes through [`cuda_zeros_ctx`]; Metal through
+    /// mismatch`. CUDA routes through `cuda_zeros_ctx`; Metal through
     /// `zeros_on(Device::Metal, ..)`; ROCm through `rocm_zeros_ctx`; CPU (and
     /// any GPU backend whose feature isn't compiled in, e.g. Vulkan whose kt
     /// pools are CPU-resident) through host-resident `zeros_cpu`.
