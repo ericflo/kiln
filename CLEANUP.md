@@ -672,3 +672,30 @@ ci.yml's cargo-deny step and CONTRIBUTING.md's instructions match the new
 header; THIRD_PARTY_LICENSES.md's license overview cross-checked against the
 deny.toml allow list (all nine licenses present); `git status` shows only
 deny.toml plus this ledger entry.
+## Cleanup Agent (round 27) — 2026-08-29
+
+Deleted `docs/audits/MACOS_QWEN35_4B_FASTEST_LOG.md` — a 20,526-line raw
+terminal-session transcript of the 2026-05-03 macOS Qwen3.5-4B optimization
+pass (full command inputs + outputs for experiments E001–E0xx). This round's
+steering primary candidate. Investigation confirmed it is redundant retained
+evidence, not load-bearing: (1) zero references to its filename anywhere
+tracked — no doc, script, CI workflow, receipt, or manifest links to it; (2)
+the compact reviewed summary already exists alongside it
+(`MACOS_QWEN35_4B_FASTEST_SHORTLOG.md`, 2,279 lines covering every experiment
+with tests/checks passed), satisfying ARTIFACT_RETENTION.md's requirement that
+"a reviewer can understand and validate without replaying an entire terminal
+session"; (3) the per-experiment compact JSON receipts in
+`MACOS_QWEN35_4B_FASTEST_artifacts/` (982 tracked files) remain untouched as
+the digest-level evidence; (4) the raw siblings from that same session
+(the `.stderr.log`/`.prom` captures under the same `_artifacts/` dir) were
+already purged by `docs/audits/removed-raw-artifacts-2026-07-13-v1.json`,
+establishing clear prior intent that this session's RAW output does not belong
+in Git — the big transcript log is exactly that category per the policy line
+"Do not check in raw server logs ... traces". Git history preserves every byte.
+Why it mattered: −20,526 lines, the single largest LOC win available, removing
+a raw session dump masquerading as an audit document. Verified BEFORE and
+AFTER: `scripts/check_repository_artifacts.py` passes both times (6706 → 6705
+tracked paths); `scripts/qualification/validate_retained_evidence.sh` passes
+both times (all receipts OK — none hash or locate this file); post-deletion
+repo-wide grep finds zero remaining references outside git history and ignored
+agent traces; `git status` shows only the deletion plus this ledger entry.
