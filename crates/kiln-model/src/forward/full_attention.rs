@@ -67,13 +67,13 @@ pub(super) fn q_proj_forward_decode_if(
                 {
                     return Ok(out);
                 }
-                return Ok((base + delta).context("q_proj_forward: add lora delta")?);
+                return (base + delta).context("q_proj_forward: add lora delta");
             }
             // kt-native composite LoRA delta fallback (#1082: compute_lora_delta
             // is kt now — pass kt `x` directly).
             let delta =
                 compute_lora_delta(x, proj, lora_scale).context("q_proj_forward: lora delta")?;
-            return Ok((base + delta).context("q_proj_forward: add lora delta")?);
+            return (base + delta).context("q_proj_forward: add lora delta");
         }
         return Ok(base);
     }
