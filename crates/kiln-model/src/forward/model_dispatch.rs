@@ -478,7 +478,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     sk,
                     // Phase 7 #1082: kt twin threading deferred — caller does not
                     // yet expose `kt_paged_cache` to the inner. `None` keeps the
-                    // `paged_cache.block_size()` read on the candle path (the
+                    // `paged_cache.block_size()` read on the primary path (the
                     // helper short-circuits when kt is `None`).
                     #[cfg(feature = "cuda")]
                     None,
@@ -493,7 +493,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     start_positions,
                     // Phase 7 #1082: kt twin threading deferred — caller does not
                     // yet expose `kt_paged_cache` to the inner. `None` keeps the
-                    // `paged_cache.block_size()` read on the candle path (the
+                    // `paged_cache.block_size()` read on the primary path (the
                     // helper short-circuits when kt is `None`).
                     #[cfg(feature = "cuda")]
                     None,
@@ -1936,7 +1936,7 @@ pub fn model_forward_paged(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::Full,
@@ -1949,10 +1949,10 @@ pub fn model_forward_paged(
 /// through to the per-layer GQA-attention writer.
 ///
 /// Same contract as [`model_forward_paged`] but lets the caller pass a kt
-/// cache that will be written-mirrored alongside the candle [`PagedKvCache`].
+/// cache that will be written-mirrored alongside the [`PagedKvCache`].
 /// When `kt_paged_cache` is `None` (or built features are non-CUDA), behavior
-/// is bit-identical to [`model_forward_paged`] — the candle writer is the only
-/// thing that runs. When `Some(&kt)` is passed AND
+/// is bit-identical to [`model_forward_paged`] — the primary writer is the
+/// only thing that runs. When `Some(&kt)` is passed AND
 /// `accelerator.kt_api_mode = "all"` is on, every paged-KV write inside
 /// [`gqa_attention_paged_with_rope_tables`] mirrors into the kt cache via
 /// `try_kt_paged_kv_write_token_major_native_graph_slot`.
@@ -1961,10 +1961,10 @@ pub fn model_forward_paged(
 ///
 /// Phase 7 #1082 staging step: the writer plumbing (commits `7dd0009c`,
 /// `d67b6096`) and the inner-fn parameter (the commit before this one) are
-/// landed, but no caller passes `Some(&kt)`. This sibling function is the
-/// first public entry point that does — bench/latency code (`kiln-server`)
-/// can opt into the mirrored write path by allocating a kt twin alongside
-/// its `PagedKvCache` and routing through this fn instead of
+/// landed. This sibling function is the first public entry point that
+/// accepts a kt twin — bench/latency code (`kiln-server`) opts into the
+/// mirrored write path by allocating a kt twin alongside its `PagedKvCache`
+/// and routing through this fn instead of
 /// [`model_forward_paged`]. Every other production caller keeps using
 /// [`model_forward_paged`] unchanged, so the kt path stays opt-in.
 ///
@@ -2053,7 +2053,7 @@ pub fn model_forward_paged_normed_hidden(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::HiddenOnly,
@@ -2181,7 +2181,7 @@ pub fn model_forward_paged_last_token(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::LastRowOnly,
@@ -2848,7 +2848,7 @@ pub fn model_forward_paged_last_token_greedy(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::LastRowArgmaxOnly,
@@ -2939,7 +2939,7 @@ pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
         Some(positions_gpu),
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward `None` so the
-        // candle writer remains authoritative (mirrors the logits twin).
+        // primary writer remains authoritative (mirrors the logits twin).
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::HiddenOnly,
@@ -3032,7 +3032,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::Full,
@@ -3284,7 +3284,7 @@ pub fn model_forward_paged_batched_decode_hidden(
             #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
-            // `None` so the candle writer remains authoritative.
+            // `None` so the primary writer remains authoritative.
             #[cfg(feature = "cuda")]
             None,
             LmHeadMode::HiddenOnly,
@@ -3553,7 +3553,7 @@ pub fn model_forward_paged_with_last_hidden(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::FullWithLastHidden,
@@ -3598,7 +3598,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
-        // `None` so the candle writer remains authoritative.
+        // `None` so the primary writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::LastRowWithLastHidden,
@@ -3866,7 +3866,7 @@ pub(super) fn model_forward_paged_inner(
     // Phase 7 #1082: kt twin of `paged_cache` plumbed through to the
     // per-layer `transformer_block_paged_with_rope_tables` so the kt
     // cache can mirror the CUDA-graph paged-KV write performed inside
-    // `gqa_attention_paged_with_rope_tables`. `None` keeps the candle
+    // `gqa_attention_paged_with_rope_tables`. `None` keeps the primary
     // writer authoritative — same gating playbook as `graph_inputs`.
     // CUDA-gated since `PagedKvCacheKt` itself is CUDA-only.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
@@ -4054,9 +4054,9 @@ pub(super) fn model_forward_paged_inner_bounded(
                     graph_inputs,
                     // Phase 7 #1082: forward the inner-fn kt twin
                     // parameter down to the per-layer block call so the
-                    // kt cache mirrors the candle CUDA-graph paged-KV
+                    // kt cache mirrors the primary CUDA-graph paged-KV
                     // write. `None` when the gate is off or the caller
-                    // hasn't migrated; the candle writer is still
+                    // hasn't migrated; the primary writer is still
                     // authoritative either way.
                     #[cfg(feature = "cuda")]
                     kt_paged_cache,
@@ -4072,7 +4072,7 @@ pub(super) fn model_forward_paged_inner_bounded(
                 // decode hot path, start_pos > 0, no MTP, no LoRA, and
                 // qualified resident decode enabled.
                 // Bypasses the legacy pre-norm/residual/post-norm/MLP/final-residual
-                // candle path entirely when active.
+                // path entirely when active.
                 #[cfg(feature = "vulkan")]
                 {
                     if seq_len == 1
@@ -4824,7 +4824,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
-            // `None` so the candle writer remains authoritative.
+            // `None` so the primary writer remains authoritative.
             #[cfg(feature = "cuda")]
             None,
             mode,
@@ -4920,7 +4920,7 @@ pub fn model_forward_paged_streaming_with(
             #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
-            // `None` so the candle writer remains authoritative.
+            // `None` so the primary writer remains authoritative.
             #[cfg(feature = "cuda")]
             None,
             mode,
