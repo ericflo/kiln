@@ -326,8 +326,8 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
 /// Same as [`opd_top_k_reverse_kl_phase_b_bwd_kt`]: CUDA + matching
 /// F32/BF16 `(hidden, head_t)` dtype + `top_k ∈ {16, 32}`. Out-of-
 /// envelope inputs return an `Err` rather than silently falling back;
-/// the production caller is expected to pre-check the envelope (via the
-/// `cuda_kernel_supports` helper) before calling.
+/// the production caller is expected to pre-check the envelope
+/// (`top_k ∈ {16, 32}`, F32/BF16) before calling.
 ///
 /// # Tape integration
 ///

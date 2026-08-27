@@ -1229,8 +1229,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 /// - `grad_loss`: depends on `output_mode`:
 ///   - `ScalarMean`: 0-D or 1-element F32 tensor on CUDA.
 ///   - `PerPosition`: 1-D `[T_active]` F32 tensor on CUDA.
-/// - `top_k`: K, must be in {16, 32} (milestone-5 fast-path set; see
-///   `crate::phase_b::cuda_kernel_supports`).
+/// - `top_k`: K, must be in {16, 32} (milestone-5 fast-path set).
 /// - `output_mode`: scalar-mean vs per-position selector.
 ///
 /// # Returns
@@ -1242,7 +1241,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 /// # Errors
 ///
 /// Returns [`OpdLossError::Msg`] when:
-/// - `top_k` / `dtype` are outside `cuda_kernel_supports`.
+/// - `top_k` / `dtype` are outside the {16, 32} / F32-BF16 envelope.
 /// - any input is non-contiguous / non-CUDA / wrong dtype.
 /// - `grad_loss` shape disagrees with `output_mode`.
 /// - the FFI kernel returns a non-zero status.
@@ -1392,7 +1391,7 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
         active_metadata.is_none(),
     )?;
 
-    // K + dtype gate (mirrors `phase_b::cuda_kernel_supports`).
+    // K + dtype gate.
     let dtype = hidden.dtype();
     if !matches!(dtype, KtDType::F32 | KtDType::BF16) {
         return Err(OpdLossError::msg(format!(

@@ -64,11 +64,7 @@ fn extract_device_name(name_array: &[i8; 256]) -> String {
 
 /// Vulkan device abstraction for Kiln.
 pub struct VulkanDevice {
-    #[allow(dead_code)]
-    entry: ash::Entry,
-    #[allow(dead_code)]
     instance: ash::Instance,
-    #[allow(dead_code)]
     physical_device: vk::PhysicalDevice,
     physical_device_index: usize,
     device: Arc<ash::Device>,
@@ -486,7 +482,6 @@ impl VulkanDevice {
         );
 
         Ok(Self {
-            entry,
             instance,
             physical_device,
             physical_device_index,

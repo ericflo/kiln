@@ -6266,3 +6266,76 @@ delete. This confirms rounds 99–102 were complete.
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 107 —
 headline net **−295** lines.
+
+## Cleanup Agent (round 108 — small-crate allow probes: 4 stale allows, 1 dead field, 4 dead FFI consts, 1 dead fn pair; net −37)
+
+**Date:** 2026-08-27
+
+**Scope:** the 9 remaining undocumented `allow(dead_code|unused)` sites in
+small crates (kiln-vulkan-kernel 4, kiln-rocblas 2, kiln-blas 2,
+kiln-opd-loss-kernel 1) — probed one at a time (remove allow → clippy →
+judge), per the round-104a procedure.
+
+**Verdicts (all 9 resolved by deletion — zero keeps, zero added
+justifications):**
+- **kiln-vulkan-kernel (4 sites, net −6):**
+  - `VulkanBuffer.device` (buffer.rs) — allow STALE: field is read in
+    the `Drop` impl (`destroy_buffer`/`free_memory`) and mmap paths.
+    Allow deleted.
+  - `VulkanDevice.{entry,instance,physical_device}` (device.rs) —
+    `instance` (read in teardown `destroy_instance`) and
+    `physical_device` (read by the `physical_device()` getter) are LIVE;
+    their 2 allows deleted. `entry` (ash::Entry — Copy, no Drop
+    semantics, never read in any build) is a TRUE dead field: field +
+    struct-literal assignment deleted (local `entry` values in the
+    constructors remain — they do the real work).
+  - `tests/support/mod.rs` `vulkan_device_arc` — allow is LEGITIMATE and
+    kept as-is (shared test-support fn: live in `vk_flce_parity.rs`,
+    dead in every other test binary that includes the module — the
+    per-binary dead-code warning is structural). No change.
+- **kiln-rocblas + kiln-blas (2 sites each, net −4 per crate):**
+  `EPI_SILU`/`EPI_BIAS_SILU` wire-code consts are dead in Rust by
+  design — `resolve_epilogue_code` maps
+  `Epilogue::Silu | Epilogue::BiasSilu => Err(UnsupportedEpilogue)`
+  (verified in both crates), so code 4/5 never crosses the FFI; no other
+  Rust reference. Consts + allows deleted. The C++ `KILN_EPI_SILU`
+  protocol constants stay (they document the wire protocol; the C++
+  `resolve_*_epilogue` explicitly returns false for them — unchanged).
+  The `Epilogue::Silu/BiasSilu` enum variants stay (live public API:
+  `name()` tests + BiasSilu callers).
+- **kiln-opd-loss-kernel (1 site → 2 dead fns, net −22):**
+  `cuda_kernel_supports` (both cfg variants) had ZERO call sites
+  repo-wide — kt_api.rs:1395 inlines the same K/dtype gate ("mirrors"
+  comment); every remaining mention was a doc comment. Both variants +
+  their doc block deleted, the now-dead `use kiln_tensor::DType`
+  import deleted, and 5 stale doc references reworded to describe the
+  gate inline (phase_b.rs module doc, kt_api.rs ×3, kt_tape.rs ×1,
+  lib.rs ×1). No behavior change: the gate logic kt_api actually runs
+  is untouched.
+
+**Net:** 7 insertions / 44 deletions = **−37 lines**, 8 files.
+
+**Verification (orchestrator, own runs):**
+- `cargo clippy -p kiln-vulkan-kernel -p kiln-opd-loss-kernel
+  -p kiln-rocblas -p kiln-blas --all-targets`: 0 own-code warnings
+  (remaining warnings are the documented kiln-tensor set).
+- `cargo test -p kiln-vulkan-kernel`: 65+2+4+19 passed / 0 failed.
+- `cargo test -p kiln-opd-loss-kernel`: 33 / 0 / 0.
+- `cargo test -p kiln-blas` and `-p kiln-rocblas`: 23 / 0 / 0 each.
+- `cargo test -p kiln-model` (dependent crate): **394 passed / 0
+  failed / 0 ignored** — baseline intact.
+- `cargo fmt --check` clean; `check_production_file_budget.py` pass;
+  `check_repository_artifacts.py` pass.
+- `grep -rn cuda_kernel_supports crates/` → 0 hits (no broken doc
+  links).
+
+**Campaign state:** the small-crate `allow(dead_code)` surface is now
+fully adjudicated (this round closed the last 9 undocumented sites;
+kiln-flash-attn's 3 cfg_attr sites + kiln-optim's 1 site were already
+ledger-documented/inline-justified — verified this round). Remaining
+un-adjudicated allow surface: kiln-train's 52 (held: net-additive
+class, owner direction is net-removal) + 3 owner-decision dead public
+APIs (awaiting sign-off).
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 108 —
+headline net **−37** lines; zero justification lines added.

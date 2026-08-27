@@ -125,7 +125,6 @@ pub struct VulkanBuffer {
     size: u64,
     allocation_size: u64,
     memory_kind: VulkanBufferMemoryKind,
-    #[allow(dead_code)]
     device: Arc<ash::Device>,
 }
 

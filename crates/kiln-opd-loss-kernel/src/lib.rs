@@ -96,8 +96,8 @@
 //! [§9.2 of `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`]: ../../docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md
 
 // `phase_b` retains only the fused-CUDA backward FFI declarations
-// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) and the `cuda_kernel_supports`
-// envelope check (both pure kt — the candle `DType` reference was ported
+// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) and the top-k/dtype envelope gate
+// (both pure kt — the candle `DType` reference was ported
 // to `kiln_tensor::DType` in the candle-drop). The candle `CustomOp1`
 // wrapper `OpdLossCustomOp`, the candle entry points
 // `opd_top_k_reverse_kl_phase_b` and `_per_position`, the fused-FWD FFI

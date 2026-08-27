@@ -26,8 +26,6 @@
 //!   powers the kt-tape entry
 //!   ([`crate::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`])
 //!   and the direct kt-typed scalar-mean / per-position backward entries.
-//! * [`cuda_kernel_supports`] — the `(K ∈ {16, 32}, dtype ∈ {F32, BF16})`
-//!   envelope used by the call sites above.
 //!
 //! What was removed:
 //!
@@ -52,8 +50,6 @@
 //! The matching `extern "C"` definitions for the deleted kernels in
 //! `csrc/opd_topk_kl.cu` are removed in the same commit so the static
 //! library doesn't carry dead code.
-
-use kiln_tensor::DType;
 
 // FFI declarations for the fused CUDA backward kernel (§9.2 of the
 // grand plan). Linked in only when the `cuda` feature is active — the
@@ -107,22 +103,4 @@ unsafe extern "C" {
         output_mode: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
-}
-
-/// Returns `true` when the fused CUDA backward kernel supports the
-/// requested `(top_k, dtype)` combination. K ∈ {16, 32} is the
-/// milestone-5 fast path (§6 default is 32; the kernel hits that
-/// with 1024 threads per block, the Ampere max). Both kt-shim and
-/// kt-tape call sites pre-check via this helper before borrowing
-/// into the kt bridge and dispatching the fused backward.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-pub(crate) fn cuda_kernel_supports(top_k: usize, dtype: DType) -> bool {
-    let dtype_ok = matches!(dtype, DType::F32 | DType::BF16);
-    dtype_ok && (top_k == 16 || top_k == 32)
-}
-
-#[cfg(not(any(feature = "cuda", feature = "rocm")))]
-#[allow(dead_code)]
-pub(crate) fn cuda_kernel_supports(_top_k: usize, _dtype: DType) -> bool {
-    false
 }
