@@ -334,7 +334,10 @@ fn resolve_adapter_path(input: &str, adapter_dir: Option<&Path>) -> PathBuf {
     }
 }
 
-fn find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf> {
+/// Find the single nested adapter directory under `parent` (a subdirectory
+/// containing both `adapter_config.json` and `adapter_model.safetensors`),
+/// if exactly one exists. Shared with the adapter API module.
+pub(crate) fn find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf> {
     let mut matches = Vec::new();
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
@@ -590,7 +593,9 @@ fn parse_peft_lora_key(key: &str) -> Option<ParsedLoraKey> {
     })
 }
 
-fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+/// Hex-encoded SHA-256 of a file's full contents. Shared with the adapter
+/// API module.
+pub(crate) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
     let digest = Sha256::digest(&bytes);
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())

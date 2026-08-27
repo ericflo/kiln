@@ -740,8 +740,11 @@ async fn main() -> Result<()> {
     // is prompted out-of-distribution — Qwen3.5-4B answers "Hello!" with
     // "毎回毎回毎回..." instead of a real reply because the trained prompt
     // shape is missing the `<think>` prefix.
+    // `load_chat_template_from_model_dir` lives in `cli` (shared with the
+    // `kiln inspect` path): standalone `chat_template.jinja` first, then the
+    // `tokenizer_config.json` `chat_template` field.
     let tokenizer = if let Some(dir) = chat_template_dir.as_deref() {
-        match load_chat_template_from_model_dir(dir) {
+        match cli::load_chat_template_from_model_dir(dir) {
             Ok(Some((source, template))) => {
                 tracing::debug!(
                     source = source,
@@ -1802,29 +1805,6 @@ async fn main() -> Result<()> {
     serve_result?;
     tracing::info!("server stopped cleanly");
     Ok(())
-}
-
-/// Locate the model's chat template, preferring the standalone
-/// `chat_template.jinja` file (modern HF layout, e.g. Qwen3.5) and falling back
-/// to the `chat_template` field in `tokenizer_config.json` (older layout). Returns
-/// `Ok(None)` only when neither file is present, so the caller can warn rather
-/// than silently use the bare ChatML stub.
-fn load_chat_template_from_model_dir(dir: &Path) -> Result<Option<(&'static str, String)>> {
-    let standalone = dir.join("chat_template.jinja");
-    if standalone.exists() {
-        let template = std::fs::read_to_string(&standalone)?;
-        return Ok(Some(("chat_template.jinja", template)));
-    }
-    let config_path = dir.join("tokenizer_config.json");
-    if !config_path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&config_path)?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)?;
-    Ok(parsed
-        .get("chat_template")
-        .and_then(|v| v.as_str())
-        .map(|s| ("tokenizer_config.json", s.to_string())))
 }
 
 fn spawn_backend_prewarm(

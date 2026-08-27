@@ -2302,7 +2302,7 @@ fn load_trajectory_inspect_tokenizer(
             .with_context(|| format!("read chat template {}", path.display()))?;
         tokenizer = tokenizer.with_chat_template(template);
     } else if let Some(dir) = template_dir.as_deref()
-        && let Some((_source, template)) = load_inspect_chat_template_from_model_dir(dir)
+        && let Some((_source, template)) = load_chat_template_from_model_dir(dir)
             .with_context(|| format!("load chat template from {}", dir.display()))?
     {
         tokenizer = tokenizer.with_chat_template(template);
@@ -2311,7 +2311,7 @@ fn load_trajectory_inspect_tokenizer(
     Ok(tokenizer)
 }
 
-fn load_inspect_chat_template_from_model_dir(
+pub fn load_chat_template_from_model_dir(
     dir: &Path,
 ) -> anyhow::Result<Option<(&'static str, String)>> {
     let standalone = dir.join("chat_template.jinja");

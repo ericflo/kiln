@@ -11,7 +11,6 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 #[cfg(test)]
@@ -19,6 +18,7 @@ use uuid::Uuid;
 
 use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
 
+use crate::adapter_verify::{find_single_nested_adapter_dir, sha256_file_hex};
 use crate::error::ApiError;
 use crate::state::{AppState, LoadedAdapterIdentity, ModelBackend};
 
@@ -413,25 +413,6 @@ pub(crate) fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathB
     Err(ApiError::adapter_layout_invalid(detail))
 }
 
-fn find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf> {
-    let mut matches = Vec::new();
-    let entries = std::fs::read_dir(parent).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir()
-            && path.join("adapter_config.json").is_file()
-            && path.join("adapter_model.safetensors").is_file()
-        {
-            matches.push(path);
-        }
-    }
-    if matches.len() == 1 {
-        matches.pop()
-    } else {
-        None
-    }
-}
-
 /// Unload the active LoRA adapter, reverting to base model.
 async fn unload_adapter(
     State(state): State<AppState>,
@@ -812,12 +793,6 @@ fn read_parent_adapter_metadata(path: &Path) -> Option<serde_json::Value> {
         }
     }
     None
-}
-
-fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    let digest = Sha256::digest(&bytes);
-    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Source adapter to include in a merge.
