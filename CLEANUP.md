@@ -4778,3 +4778,194 @@ baseline match — the preserved ```ignore spec block is the crate's
 only ignored doctest), fmt clean, clippy clean (crate), both Python
 gates passed, git status clean; commits `52e0e2109` + `42bf6efc8` +
 `c2ac4d209` + `6a9a1acca` + `ac5a49a4c` + this ledger commit.
+
+## Cleanup Agent (round 94)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** adjudicate the orchestrator-verified
+**62 `candle` references in `crates/kiln-vulkan-kernel/src/`** (across 12
+files at start: `lib.rs` 3, `vk_autograd.rs` 1, `vk_tensor.rs` 19,
+`device.rs` 1, `kernels.rs` 17, `resident.rs` 10, `cmd_batch.rs` 3,
+`vk_paged_kv_cache.rs` 2, `vk_ops/shape.rs` 1, `vk_ops/gdn_chunkwise.rs` 1,
+`vk_ops/gdn_state.rs` 3, `vk_ops/matmul_bf16w.rs` 1 — count
+grep-verified: `grep -ricE candle src/` sums to exactly 62), delete the
+stale set, keep the true references. Same re-verify-first protocol as
+rounds 91–93: every factual claim re-checked against the live tree
+before touching it (candle-free manifest verified, retired symbols
+grep-verified absent, live mirror symbols grep-verified present,
+launch-path behavior verified in the actual dispatch code). Where a
+block mixed true and false content, the true half was kept with minimal
+rewording so it stands alone. Comment-only: zero code lines touched
+(verified by numstat — every changed line is a `//`/`///`/`//!` or `#`
+comment line). Adjacent stale claims of the same class in the crate's
+`tests/`, `examples/`, and `Cargo.toml` were adjudicated in the same
+round (the round-91/92 precedent sweeps the whole crate); the
+`examples/` refs (7) and most `tests/` refs (21) were adjudicated KEEP
+with zero change.
+
+**HEADLINE NET LINES: −12** (37 insertions / 49 deletions across 13
+crate files + the 1-line budget ceiling sync). Reword-heavy round, like
+93: the #1082 provenance labels, the "candle-free" absence claims, and
+the fused-kernel design-intent notes are mostly true and kept per the
+protocol, so the honest delta is the 12 wholly-false or
+internally-inconsistent lines plus one exact-ceiling sync.
+
+**ADJUDICATION TABLE (all 62 `src/` refs, each re-verified against the
+current tree; "KEEP" = zero edit, "REWORD" = minimal reword, "DELETE" =
+false half removed):**
+
+| file:ref(s) | verdict | evidence / action |
+|---|---|---|
+| lib.rs:6 | KEEP | "As of #1082 this crate is candle-free at runtime" — manifest has zero candle deps (normal + dev), Cargo.lock has 0 candle packages; public entries take raw slices/buffers. |
+| lib.rs:8–9 | **DELETE** (net −1) | "The candle-core dev-dependency is only used by in-tree parity tests that build CPU candle tensors" — **false**: no `candle-core` in `[dev-dependencies]`; the crate's tests import `kiln_tensor` (verified), and the retained note itself records the dev-dep as DROPPED. Sentence deleted; the true "candle-free at runtime … shape metadata" half kept. |
+| vk_ops/shape.rs:72 | KEEP | "no-op clone for API symmetry with candle" — verified: `vk_contiguous`'s body is exactly a no-op clone; the symmetry rationale is true design intent. |
+| vk_ops/gdn_chunkwise.rs:2 | REWORD (net 0) | "mirrors candle's `gdn_chunkwise_recurrence` in forward.rs:4679" — symbol **live** (`crates/kiln-model/src/forward/linear_attention.rs:1084`) but `forward.rs` is only 1888 lines, so the pointer was dangling. Reworded to "mirrors kiln-model's `gdn_chunkwise_recurrence`, `forward/linear_attention.rs`". |
+| vk_ops/gdn_state.rs:3 | REWORD (net 0) | "Mirrors candle's `LinearAttentionState` (forward.rs:1207)" — symbol **live** (`forward/linear_state.rs:10`); old pointer dangles (forward.rs:1207 is LoRA code). Reworded to the live file. |
+| vk_ops/gdn_state.rs:5 | REWORD (net 0) | "without bouncing through candle Tensors" — design intent true (raw `Arc<VulkanBuffer>` storage, verified); substrate is kt now → "CPU Tensors". |
+| vk_ops/gdn_state.rs:22 | REWORD (net 0) | "matches candle training-time recurrent dtype" — F32 substance holds (kiln-model normalizes GDN recurrent state to f32, `linear_state.rs` doc); dropped the stale substrate word. |
+| vk_ops/matmul_bf16w.rs:7 | KEEP | "without going through candle Tensor wrapping" — verified: the dispatchers take `Arc<VulkanBuffer>` activations directly. |
+| cmd_batch.rs:473,475,476 | KEEP | "Replaces the previous candle-backed `upload_tensor_f32_buffer` … needless candle dependency at the cmd_batch.rs layer. (#1082)" — #1082 past-tense replacement history; the old candle-backed helper is absent from production code (only the kt-based local test helper of the same name survives in `tests/gdn_parity.rs`). |
+| vk_paged_kv_cache.rs:6 | KEEP | "since #1082 the sole kt-backed cache is CUDA-gated" — verified: `paged_kv_cache_kt.rs` is `cfg(feature = "cuda")` ("the only" kt-backed cache, per its own header). |
+| vk_paged_kv_cache.rs:49 | KEEP | "the deleted candle-typed `kiln_model::paged_kv_cache::PagedKvCache`, removed by #1082" — `struct PagedKvCache` is absent repo-wide (grep-verified). |
+| device.rs:649–652 | **DELETE** (net −4) | "Used to guard kernels (e.g. solve_tri) … PR2 will use this to decline dispatch … falling back to the candle CPU path" — **wholly false against the live tree**: the `max_compute_shared_memory_size()` accessor has **zero callers** repo-wide (grep-verified); the solve_tri dispatch path (`vk_ops/solve_tri.rs`, `gdn_chunkwise.rs`) guards with static shape caps (`chunk≤128 && dv≤256`), not a shared-memory runtime guard; no candle CPU path exists (workspace is candle-erased). The CPU alternative, `vk_solve_tri_cpu_reference`, is documented test/diagnosis-only. Block deleted; the getter's own doc line kept. |
+| vk_tensor.rs:21 | KEEP | "without an explicit candle import" — true: the crate is candle-free and callers use the re-export. |
+| vk_tensor.rs:80 | REWORD (net 0) | "keyed by candle's `TensorId`" — stale attribution: `TensorId` is `kiln_tensor_id::TensorId`, the kiln-owned atomic-counter type (the same file's #1082 block says "Sourced from the dependency-free leaf crate `kiln-tensor-id`"). Reworded to "`TensorId`". |
+| vk_tensor.rs:235–238 | KEEP | "Candle-free F32 fast-path … `VkTensor::from_candle` … deleted in #1082" — `from_candle` absent repo-wide (grep-verified); true deletion history. |
+| vk_tensor.rs:314–315 | KEEP | "Candle-free; mirrors the BF16 path of the removed `Self::from_candle` (deleted by #1082)" — same verification. |
+| vk_tensor.rs:357–358 | KEEP | "requiring callers to import candle. Now backed by the `kiln-tensor-id` leaf crate's atomic counter" — past-tense + verified present (code calls `TensorId::next()`; kiln-tensor-id lib.rs: "single canonical home of TensorId … migration target for candle_core::TensorId"). |
+| vk_tensor.rs:364–365, 385–386 | KEEP | "Candle-free replacement for the `Tensor::from_vec → VkTensor::from_candle → …`" chains — #1082 provenance; `from_candle` verified absent. |
+| vk_tensor.rs:405 | KEEP | "Candle-free general-purpose upload boundary" — true. |
+| vk_tensor.rs:412 | KEEP | "The former candle bridge that also used it was deleted with `kiln-model::vk_forward` in PR7" — verified: kiln-model `model_dispatch.rs:1404` "legacy `vk_forward.rs`, deleted in PR7". |
+| vk_tensor.rs:448–453 | PARTIAL (net −1) | Kept the true half (`to_bytes` is the candle-free counterpart to the now-deleted `to_candle`, verified absent repo-wide). **Deleted** the false example "or hand to a candle `Tensor::from_raw_buffer` at a higher layer that still owns candle" — no workspace crate owns candle (Cargo.lock: 0 candle packages; kiln-model's own manifest: "candle-core is fully dropped"). |
+| kernels.rs:677,681 | KEEP | `dispatch_kernel_bytes` raw-byte contract + "canonical SPIR-V dispatch entry point for #1082 callers that want no candle types in scope" — verified against the body. |
+| kernels.rs:1140 | KEEP | "Candle-free buffer uploads" section header — true. |
+| kernels.rs:1143 | KEEP | "the `candle_bridge` module … gone" — absent (grep-verified). |
+| kernels.rs:1150 | KEEP | "Shared core for the candle-free `upload_*_buffer_from_slice` helpers" — verified: both helpers call it. |
+| kernels.rs:1180–1181 | KEEP | "skipping the candle staging" — verified design (direct slice → bytes → upload in the body). |
+| kernels.rs:1196 | KEEP | "bf16 packing matches the `*_bf16w` variant" — true. |
+| kernels.rs:1216 | KEEP | "f32 weights variant" — true. |
+| kernels.rs:1256 | KEEP | "Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached_bytes`]" — both functions live; true. |
+| kernels.rs:1261 | **DELETE** (net −1) | "The shim reconstructs a CPU Tensor internally so callers can stay candle-free" — **false against the body**: `dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes` is exactly `dispatch_gdn_in_proj_decode_cached_impl(..., true)` + `split_gdn_in_proj_bytes`; no shim, no Tensor construction anywhere in the path; callers (`kiln-model/src/backend/vulkan_gdn.rs:141`, `resident.rs` tests, the microbench) pass and consume raw bytes. Sentence deleted; the true signature description kept. |
+| kernels.rs:1878, 4237 | KEEP | "Replaces the older candle-Tensor split helper. (#1082)" (×2) — the old helpers are absent; true #1082 replacement history. |
+| kernels.rs:4492 | KEEP | "`split_batched_qkv_output` is the candle-free counterpart" — verified: it consumes `Vec<u8>` outputs. |
+| kernels.rs:9499 | REWORD (net 0) | "extracted from candle Tensor dims via the kt boundary" — internally inconsistent (candle dims *via the kt boundary*?): kt is the only tensor substrate left in the workspace (kiln-model dropped candle-core per its own manifest). Reworded to "extracted from kt Tensor dims by the caller". |
+| kernels.rs:10219 | KEEP | "bytes-only variant of the former candle-typed entry point" — #1082 provenance. |
+| kernels.rs:10933 | REWORD (net 0) | "without the candle CPU `var.set` + `update_resident_activation` re-upload" — design intent true (`update_resident_activation` is live in kiln-train `optimizers.rs` and kiln-model `vulkan_residency.rs`); the substrate is kt now → "CPU". |
+| resident.rs:1343 | REWORD (net 0) | "without going through a candle `(x + y)?` (which allocates a fresh CPU Tensor every layer)" — `dispatch_add_resident` verified as the fused add; the "candle" word was the stale half → "CPU `(x + y)?`". |
+| resident.rs:1374 | REWORD (net 0) | "Lifts the gate computation off the candle path" — `dispatch_mul_sigmoid_gate_resident` verified fused → "off the CPU path". |
+| resident.rs:1412–1418 | PARTIAL (net −1) | Kept the true half (avoids `apply_rope`, which materialises ~6 intermediate Tensors — verified in `kiln-model/src/forward/primitives.rs:1051+`). **Deleted** "candle-based" (apply_rope is kt-native: its own #1082 forward-flip comment says "apply_rope is kt-native now") and the self-contradictory "and is currently the only Vulkan-decode RoPE path" clause — this function *is* the Vulkan-decode RoPE path. |
+| resident.rs:2056 | REWORD (net 0) | "without crossing back to the candle Tensor layer" — GPU-side split verified; → "CPU Tensor layer". |
+| resident.rs:2274 | REWORD (net 0) | "four `.narrow().contiguous()` candle ops" — legacy-path ops are kt-typed now → "CPU ops"; the GPU-fusion claim kept. |
+| resident.rs:2445 | REWORD (net 0) | "three `.narrow().contiguous()` candle ops" — same. |
+| resident.rs:2791,2794 | KEEP | "test-only helpers … replaced the legacy candle-based version in #1082 … no candle_core needed" — verified: the helpers are test-only and the manifest needs no candle_core. |
+| vk_autograd.rs:10 | REWORD (net 0) | "keyed by candle's `TensorId`" — same stale attribution as vk_tensor.rs:80 (`TensorId` is `kiln-tensor-id`'s type) → "keyed by `TensorId`". |
+
+**Adjacent sweeps (same class, same round, per the round-91/92 precedent
+— all comment-only):**
+
+| location | verdict | evidence |
+|---|---|---|
+| Cargo.toml:29 (partial), 31–34 | **DELETE** (net −4) | "remaining test files are migrating off candle" — false: the migration is complete (zero candle code refs in the crate's tests/examples, verified). "candle-core is dev-only after #1082 … still build CPU candle tensors" — false: no candle-core dev-dep exists; contradicted by the retained next-line note "(#1082) candle-core dev-dep DROPPED …". Both deleted; the true "kiln-tensor is the in-house CPU oracle" + DROPPED-history notes kept. |
+| tests/gdn_parity.rs:8–11 | KEEP | Header: "went away with the `candle_bridge` module in #1082 … `kiln_tensor` substrate (no candle-core dev-dependency)" — all verified true. |
+| tests/gdn_parity.rs:172, 221, 270–272, 321–322 | REWORD (net 0) | "Test-only candle wrapper" ×4 — **false label**: the file imports `kiln_tensor::{D, DType, Shape, Tensor}` (verified L1–2) and candle-core is not in dev-deps; the wrappers are kt wrappers. Design intent ("keeps the parity tests readable without re-exposing types in the kernel crate's public API") kept, "candle" → "kt". |
+| tests/vk_attention_parity.rs:2 | KEEP | "(candle-free; #1082)" — true. |
+| tests/vk_attention_parity.rs:242 | REWORD (net 0) | "We don't need exact parity here (would require a candle reference)" — the parenthetical cited a substrate that no longer exists anywhere (Cargo.lock: 0 candle packages); the true half (the test only asserts all three grads are present and finite — verified in the body) kept, parenthetical dropped. |
+| tests/vk_gdn_chunkwise_parity.rs:7, 411 | KEEP | "Test factories are candle-free via the kt-native …" / "no candle round-trip required" — both verified true. |
+| tests/vk_gdn_chunkwise_parity.rs:46 | REWORD (net 0) | "mirroring `gdn_single_token_recurrence` in candle" — symbol **live** (`kiln-model/src/forward/linear_attention.rs:981`), now kiln-model's; "in candle" → "in kiln-model". |
+| tests/vk_matmul_parity.rs:2–7, 124, 506 | KEEP | "Fully candle-free … replacing the former candle Var-based oracle. (#1082)" etc. — past-tense provenance + verified "candle-free" claims. |
+| tests/vk_matmul_parity.rs:414 | REWORD (net 0) | "verify all three grads via candle reference" — false against the test body: it cross-checks against `fd_grad` finite-difference numerical gradients ("This replaces the former candle Var-based autograd oracle, leaving the file candle-free. (#1082)" — verified nearby). Reworded to "via the finite-difference reference". |
+| tests/{vk_flce,vk_muon,vk_opd,vk_rmsnorm,vk_softmax,vk_tensor}_parity.rs (11 refs) | KEEP | "candle-free; #1082" / "candle-free via the kt-native …" / "replacing the former candle …" — all verified true (absence claims + past-tense provenance). |
+| examples/{bench_opd_topk_kl_vk,dispatch_test,gdn_chunkwise_prefill_microbench,vk_mlp_probe}.rs (7 refs) | KEEP | "Bypasses candle entirely", "Candle-free via the bytes-based …", "no candle", "candle-free" — all verified true against the bodies. |
+
+**ADJUDICATED-KEEP TOTALS:** of the 62 `src/` refs: 41 KEEP (zero
+edit), 14 REWORD (minimal, net 0), 7 ref-lines DELETEd as wholly-false
+or self-contradictory (lib.rs 2 lines, device.rs 4 lines, vk_tensor.rs
+1 line, kernels.rs 1 line, resident.rs 1 line), plus the adjacent
+Cargo.toml 4-line + clause deletions. Every kept claim above was
+re-verified against the live tree in this round, not carried over.
+
+**DEAD WEIGHT NOTICED (report-only — public API, needs a code round):**
+`VulkanDevice::max_compute_shared_memory_size()` (`src/device.rs`) has
+**zero callers repo-wide** (grep-verified after the stale guard claim
+was deleted); the solve_tri dispatch path guards with static shape caps,
+not a runtime shared-memory check. Candidate for deletion in a code
+round.
+
+**VERIFICATION (all gates green):**
+
+- `cargo test -p kiln-vulkan-kernel` — **187 passed; 0 failed** (exact
+  match to the strict baseline; every edit is a comment, no test content
+  moved).
+- `cargo clippy -p kiln-vulkan-kernel --all-targets` — **zero own-code
+  warnings** (the 14 warnings are all in the `kiln-tensor` dependency —
+  the documented pre-existing set; none point into
+  `crates/kiln-vulkan-kernel`).
+- `cargo fmt -p kiln-vulkan-kernel --check` — clean (exit 0).
+- `python3 scripts/check_repository_artifacts.py` — **passed** (6697
+  tracked paths — unchanged).
+- `python3 scripts/check_production_file_budget.py` — **passed** after
+  the exact-ceiling sync: `kernels.rs` 11277 → 11276 (the round's net
+  −1 line in that file dropped it below the reviewed ceiling; the
+  2da875018 exact-ceiling precedent requires the ceiling to follow the
+  file). 14 reviewed exceptions, 647 files.
+- `git diff --numstat 72c2a2f61..HEAD` — every changed line in a comment
+  (verified per-file before each commit); 37 ins / 49 del = net −12.
+- `git status` — clean after the ledger commit.
+
+**COMMITS:** `95ed93df8` (lib.rs, net −1) + `8063c72cf`
+(vk_ops/gdn_chunkwise.rs, net 0) + `939af6729` (vk_ops/gdn_state.rs,
+net 0) + `415e6d86d` (vk_autograd.rs, net 0) + `e4c09967b`
+(vk_tensor.rs, net −1) + `6d83c0e4f` (device.rs, net −4) + `2362d3d2b`
+(kernels.rs, net −1) + `2d383cd4a` (resident.rs, net −1) + `1e26949b0`
+(Cargo.toml, net −4) + `c367f0128` (tests/gdn_parity.rs, net 0) +
+`245b038c7` (tests/vk_attention_parity.rs, net 0) + `c88db7b4f`
+(tests/vk_gdn_chunkwise_parity.rs, net 0) + `c2ad1adcb`
+(tests/vk_matmul_parity.rs, net 0) + `eb679ba99` (budget ceiling sync
+11277 → 11276) + this ledger commit. One commit per adjudicated file,
+cumulative net −12.
+
+**ROUND-95 RECOMMENDATION (steered by evidence):**
+
+1. **`crates/kiln-conv1d-kernel` (8 candle refs)** — the smallest
+   remaining unswept crate in the round-88 inventory (now:
+   kiln-flash-attn 14, kiln-gdn-kernel 12, kiln-conv1d-kernel 8,
+   kiln-core 6). Smallest next win if the queue orders by effort;
+   otherwise continue inventory order with kiln-flash-attn (14).
+2. **Dead public API candidate (needs a code round, NOT comment-only):**
+   `VulkanDevice::max_compute_shared_memory_size()` — zero callers
+   repo-wide (verified this round); see DEAD WEIGHT NOTICED above.
+3. **kiln-model (46 candle-referencing files)** remains the largest
+   remaining candle surface — still a dedicated campaign, not a single
+   round (carried from rounds 91/93).
+4. The other unswept crates (kiln-flash-attn 14, kiln-gdn-kernel 12,
+   kiln-core 6) are expected to be reword-heavy like this round: most of
+   their refs are true #1082 provenance / "candle-free" absence claims,
+   so expect small honest deltas with the same exact test baselines.
+
+**Signature:** kiln cleanup agent, round 94 of the CLEANUP.md campaign
+— the orchestrator-verified 62 `candle` refs in
+`crates/kiln-vulkan-kernel/src/` adjudicated deletion-first with
+per-claim re-verification against the live tree (retired symbols
+grep-verified absent: `VkTensor::from_candle`, `to_candle`,
+`crate::candle_bridge`, `kiln_model::paged_kv_cache::PagedKvCache`,
+any candle-core dependency in the manifest or Cargo.lock; live mirror
+symbols grep-verified present: `gdn_chunkwise_recurrence`,
+`LinearAttentionState`, `gdn_single_token_recurrence`,
+`apply_rope`, `update_resident_activation`, `dispatch_add_resident`,
+`dispatch_mul_sigmoid_gate_resident`, `vk_solve_tri_cpu_reference`;
+`TensorId` = `kiln_tensor_id::TensorId` per kiln-tensor-id's own
+"single canonical home" contract; `max_compute_shared_memory_size`
+caller-count verified zero); HEADLINE NET LINES **−12** (37 ins / 49
+del, zero code lines) across lib.rs −1, gdn_chunkwise.rs 0,
+gdn_state.rs 0, vk_autograd.rs 0, vk_tensor.rs −1, device.rs −4,
+kernels.rs −1, resident.rs −1, Cargo.toml −4, gdn_parity.rs 0,
+vk_attention_parity.rs 0, vk_gdn_chunkwise_parity.rs 0,
+vk_matmul_parity.rs 0, plus the `kernels.rs` exact-ceiling sync
+11277 → 11276; 41 refs adjudicated KEEP, 14 REWORDed, 7 ref-lines
+deleted; gates: **187/0** tests (exact strict baseline), clippy clean
+(own code), fmt clean, both Python gates passed, git status clean;
+commits `95ed93df8` + `8063c72cf` + `939af6729` + `415e6d86d` +
+`e4c09967b` + `6d83c0e4f` + `2362d3d2b` + `2d383cd4a` + `1e26949b0` +
+`c367f0128` + `245b038c7` + `c88db7b4f` + `c2ad1adcb` + `eb679ba99` +
+this ledger commit.
