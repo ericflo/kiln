@@ -77,7 +77,7 @@ pub struct VkTensorInner {
     pub(crate) requires_grad: bool,
     pub(crate) op_id: u64,
     /// Set on parameter leaves so `backward()` can return gradients
-    /// keyed by candle's `TensorId` (matches the existing optimizer
+    /// keyed by `TensorId` (matches the existing optimizer
     /// dispatch path).
     pub(crate) param_id: Option<TensorId>,
 }
@@ -447,10 +447,9 @@ impl VkTensor {
 
     /// Read back raw little-endian bytes for this tensor. Candle-free
     /// counterpart to the now-deleted `to_candle`: callers that just
-    /// want the flat byte buffer (e.g. to write a safetensors file,
-    /// compare against a reference byte slice, or hand to a candle
-    /// `Tensor::from_raw_buffer` at a higher layer that still owns
-    /// candle) skip the candle round-trip. Bytes are truncated to
+    /// want the flat byte buffer (e.g. to write a safetensors file or
+    /// compare against a reference byte slice) skip the candle round-trip.
+    /// Bytes are truncated to
     /// `num_elements() * dtype.byte_size()` to strip the padding word
     /// that BF16 device buffers may carry. (#1082)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
