@@ -1008,7 +1008,6 @@ fn serialized_counter_matches_json_without_allocating_an_output_buffer() {
     let mut writer = BoundedWriter::new(&mut output, 4, "test output");
     writer.write_all(b"1234").unwrap();
     assert!(writer.write_all(b"5").is_err());
-    drop(writer);
     assert_eq!(output, b"1234");
 }
 
