@@ -172,13 +172,11 @@ impl Tape {
     /// supplies `(output_id → seed_grad)` for **any** tape-recorded
     /// node's output (or for any `TensorId` that appears as an input to
     /// a tape node, in which case it short-circuits into the per-input
-    /// accumulation directly). This is the entry point used by the
-    /// `kiln-kt-bridge::tape_emit` bridge (Phase 6a/CP-4 #1082):
-    /// `loss.backward()` produces candle grads for the candle Tensors
-    /// returned by each tape adapter; the bridge feeds them in as the
-    /// per-tape-output seeds, lets `Tape::backward` walk the tape, and
-    /// merges the resulting per-input kt grads back into candle's
-    /// `GradStore` under the matching candle `TensorId`s.
+    /// accumulation directly). This is the entry point the
+    /// `kiln-kt-bridge::tape_bridge` drivers use (Phase 6a/CP-4 #1082):
+    /// they seed the kt loss root (or a checkpoint segment output) and
+    /// let the walk accumulate per-input kt grads, which they then
+    /// deposit under the ids registered during forward.
     ///
     /// `seeds` may contain entries for `TensorId`s that the tape
     /// never recorded as an output — they're carried through to the
@@ -684,7 +682,7 @@ mod tests {
     fn backward_with_seeds_supports_multi_output_seeding() {
         // CP-4 #1082 bridge precondition: when the kt-tape graph has
         // multiple sub-roots (e.g. two production-caller adapters each
-        // record a node whose candle output flows independently into
+        // record a node whose kt output flows independently into
         // the loss), the bridge feeds *each* output's seed grad as a
         // separate map entry. Confirm the walker honours both seeds
         // and accumulates correctly per input.
@@ -742,7 +740,7 @@ mod tests {
         // Bridge contract: seeds for `TensorId`s that the tape never
         // recorded as outputs are preserved in the returned GradStore.
         // The bridge relies on this so it can ask "what's the grad of
-        // a candle parameter that fed *into* a tape op but had no
+        // a kt parameter that fed *into* a tape op but had no
         // tape op record itself" — i.e., the kt-side input ID grad
         // accumulator behaviour at the leaf nodes.
         let tape = Tape::new();
