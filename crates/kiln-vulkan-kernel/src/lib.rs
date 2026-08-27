@@ -5,8 +5,7 @@
 //!
 //! As of #1082 this crate is candle-free at runtime: every public entry
 //! point operates on raw `&[u8]` / `&[f32]` / `&[half::bf16]` plus shape
-//! metadata. The candle-core dev-dependency is only used by in-tree
-//! parity tests that build CPU candle tensors as a numerical reference.
+//! metadata.
 //!
 //! The `vk_tensor` and `vk_autograd` modules host the vk-native training
 //! stack: a GPU-resident `VkTensor` type and its own eager autograd tape,
