@@ -1257,8 +1257,7 @@ pub fn dispatch_gdn_in_proj_decode_cached_bytes(
 ///
 /// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
 /// `(qkv, z, a, b)` outputs as raw f32 bytes — each shaped
-/// `[batch, 1, *_dim]` in row-major order. The shim reconstructs a CPU
-/// Tensor internally so callers can stay candle-free. (#1082)
+/// `[batch, 1, *_dim]` in row-major order. (#1082)
 #[allow(clippy::too_many_arguments)]
 // Returns (qkv, z, a, b) mirroring the four SoA shader outputs.
 #[allow(clippy::type_complexity)]
@@ -9496,7 +9495,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     dv: usize,
     resident_state: Option<Arc<VulkanBuffer>>,
 ) -> Result<(Vec<u8>, Arc<VulkanBuffer>)> {
-    // Caller-supplied shape values (extracted from candle Tensor dims via the kt boundary).
+    // Caller-supplied shape values (extracted from kt Tensor dims by the caller).
     // Validation that was previously here is the caller's responsibility now, but we still
     // hold derived invariants for the kernel dispatch.
     let (k_batch, k_seq_len, k_heads, k_dk) = (batch, seq_len, q_heads, dk);
@@ -10930,7 +10929,7 @@ pub fn dispatch_sdpa_prefill_f32_bytes(
 /// thread updates both lanes via bf16↔f32 bit-expansion.
 ///
 /// Used by the trainer to run SGD on registry-resident LoRA Vars
-/// (which are BF16 by convention) without the candle CPU
+/// (which are BF16 by convention) without the CPU
 /// var.set + update_resident_activation re-upload.
 pub fn dispatch_sgd_step_bf16(
     vk_device: &VulkanDevice,
