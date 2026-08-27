@@ -2653,3 +2653,88 @@ scripts/check_repository_artifacts.py` passed (6694 tracked paths);
 during the sweep (kiln-core `type_complexity` ×2, kiln-opd-loss-kernel
 `doc_lazy_continuation` ×4, etc.) belong to protected/already-swept crates
 and are out of this round's scope. No uncommitted pile remains.
+
+## Cleanup Agent (round 75) — 2026-08-26 — kiln-vulkan-kernel judgment-keep round: 135 own-code clippy warnings → 0
+
+**Steering:** sweep the `crates/kiln-vulkan-kernel` own-code clippy warning
+set (the round-74 remainder, ~62 lib + ~75 tests/examples). Re-measured on
+the pristine tree: **135 warning lines / 131 distinct sites** across lib,
+bins, examples, and integration tests. Classification per protocol:
+judgment-class lints (flat launch argument lists, SoA output tuples) →
+`#[allow(...)]` + one-line justification (round-67 GDN-ABI precedent),
+signatures NOT reshaped; mechanical lints → fixed properly,
+value-identical; one genuinely dead helper deleted (precedent: rounds
+69/74 dead-helper deletions). No public signature changes anywhere.
+
+**Commits (each verified with `cargo fmt --check`, `cargo test -p
+kiln-vulkan-kernel` 187 passed / 0 failed, then committed):**
+
+| commit | category | effect |
+|---|---|---|
+| `c2e0914d1` | src/ mechanical (32 warnings, 12 files) | `int_plus_one` ×6 (buffer.rs asserts `x >= y+1` → `x > y`), `collapsible_if` ×2 (let-chains, edition 2024), `manual_checked_ops` (`checked_div`), `unnecessary_cast` ×2, `unnecessary_unwrap` (`if let Ok`), `identity_op` ×3 (`batch*1*n` → `batch*n`), `duplicated_attributes` ×2, `needless_question_mark` ×2, `needless_range_loop` ×4, `useless_conversion`, `doc_lazy_continuation` ×2 (wrapped doc line began with `+` — round-74 root-cause family), `let_and_return`, `manual_memcpy` ×2 (`copy_from_slice` / `mask.repeat`), `unnecessary_min_or_max` (`0.max(1)` → `1` + intent comment) |
+| `67eade578` | tests/examples/bin mechanical (41 warnings, 8 files) | `needless_borrow` ×17 (microbench `value(&raw,…)` → `value(raw,…)`), `items_after_test_module` (microbench `fn main` moved above `mod tests`), `identity_op` ×3, `needless_range_loop` ×10 (iterators/enumerate, FLOP order preserved), `manual_is_multiple_of` + `manual_div_ceil` (word padding), `op_ref` ×2, `needless_question_mark`, `needless_borrows_for_generic_args` ×2 (`.expand([…])` by value) |
+| `ebfa5619d` | src/ judgment keeps (45 sites, 15 files) | `too_many_arguments` ×40 + `type_complexity` ×5 kept with one-line justifications (see classification below) |
+| `45b391e9e` | tests/examples judgment keeps + fixes (9 files) | `too_many_arguments` ×9 kept on CPU parity oracles/microbench wrappers, `type_complexity` ×1 kept (cpu_conv_split 7-tuple), `excessive_precision` ×2 fixed (`0.00439453125` → `(9.0 / 2048.0)`, bit-identical: 9·2⁻¹¹ exact), **dead `cpu_sdpa_reference` (50 lines, zero callers) deleted** — SDPA parity lives in vk_sdpa_prefill_kernel_parity |
+| `7b5efa7e0` | policy sync | `contracts/production-file-budget-v1.json`: kernels.rs ceiling 11255 → 11277 |
+
+**Classification decisions (the judgment-keep set):**
+- **`too_many_arguments` ×49 — KEPT.** Flat launch/dispatch/record argument
+  lists where each argument maps 1:1 to a WGSL entry-point binding
+  (round-67 GDN-ABI precedent; same shape as the round-66 kiln-flce-kernel
+  and round-71 kiln-server keeps). 40 src sites (cmd_batch
+  `record_with_pipeline`; kernels: gdn_in_proj impl, linear/full-attn,
+  mlp ×2, conv1d ×3 dispatches; resident: linear-batched-add, l2norm,
+  gdn_qkv_split_batched, paged_kv_write_slot(s); vk_ops: conv1d bwd,
+  gdn_chunk_bwd ×4, gdn_chunk_prep, gdn_chunkwise ×5, gdn_state `zeros`,
+  l2norm bwd, matmul_batched ×6, matmul_bf16w ×2, opd ×3, rmsnorm bwd,
+  rope) + 9 tests/examples sites (CPU parity oracles
+  `cpu_sdpa` ×2 / `cpu_oracle` / `cpu_conv1d_linear_bwd` /
+  `cpu_per_token_recurrence` / `cpu_selected_log_probs_and_grpo` /
+  `dispatch_gdn_recurrent_step_with_options_tensor` and microbench
+  `run_once`/`time_path` — each mirrors the flat ABI of the GPU dispatch
+  under parity test, so reshaping would break the 1:1 audit mapping).
+- **`type_complexity` ×6 — KEPT.** Return tuples that mirror SoA shader
+  outputs: `(qkv, z, a, b)` on
+  `dispatch_gdn_in_proj_decode_cached_bytes` /
+  `_bf16_weights_bytes` / `split_gdn_in_proj_bytes`, the six-output
+  `dispatch_gdn_chunk_prep_bytes`, `flce run_flce_forward` (tensor + raw
+  buffers), and the 7-output `cpu_conv_split` test reference.
+- **Mechanical ×81 sites — FIXED** as listed above (all value-identical;
+  FLOP accumulation order preserved in iterator rewrites).
+- **`excessive_precision` ×2 — FIXED** (self-documenting exact
+  fractions, bit-identical).
+- **`dead_code` ×1 — DELETED** (`cpu_sdpa_reference`, genuinely
+  unreferenced; not feature-gated).
+
+**Policy repair (caught by the standing gate, red before / green
+after):** `crates/kiln-vulkan-kernel/src/kernels.rs` grew
+11255 → 11277 lines from the 12 annotation blocks (8 tma + 4 tc
+allows, each with a one-line justification); ceiling synced to the
+exact re-verified line count per the 2da875018 exact-ceiling
+precedent (same pattern as the kiln-train/src/opd.rs rounds 67–71
+entry).
+
+**Verification (after the final commit, all green):**
+- `cargo clippy -p kiln-vulkan-kernel --all-targets` — **0 own-code
+  warnings** (before: 135 warning lines / 131 distinct sites); rc=0.
+- `cargo test -p kiln-vulkan-kernel` — **187 passed / 0 failed** across
+  all 24 test binaries. Baseline note: the round-74 ledger recorded
+  172 for this crate; the pristine-tree baseline re-measured on this
+  tree (via `git stash`, 1d3bbaf9a) is 187 passed / 0 failed, and the
+  post-sweep count is identical — no test added, dropped, or changed.
+- `cargo check -p kiln-model` — clean (direct downstream consumer).
+- `cargo fmt --check` (workspace) — clean.
+- `python3 scripts/check_repository_artifacts.py` — passed (6694
+  tracked paths, 124708411 bytes).
+- `python3 scripts/check_production_file_budget.py` — passed (647
+  files, 5000-line default, 14 reviewed exceptions) after the ceiling
+  sync.
+- `git status` — clean (ledger commit).
+
+**Remainder:** none inside kiln-vulkan-kernel. Dependency-crate
+warnings observed during the sweep (kiln-tensor `should_implement_trait`,
+`excessive_precision` ×2, `needless_range_loop` ×8,
+`neg_cmp_op_on_partial_ord`) belong to the protected crate and were not
+touched. The protected OPD bench-gate cluster
+(`check_backend_latency_fixtures.py --require-covered`,
+`try_kt_paged_kv_*`) was not touched. No uncommitted pile remains.
