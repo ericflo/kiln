@@ -354,6 +354,9 @@ async fn registration_fails_closed_when_configured_secret_is_missing() {
 }
 
 #[tokio::test]
+// Judgment keep (round 74): the registration guard must serialize these
+// tests, so it intentionally spans the awaits it protects.
+#[allow(clippy::await_holding_lock)]
 async fn registration_uses_scoped_credential_without_persisting_secret_metadata() {
     let _registration_guard = remote_registration_test_guard();
     const ENV: &str = "KILN_TEST_REMOTE_TEACHER_HANDLE_SECRET_716D3C";
@@ -405,6 +408,7 @@ async fn registration_uses_scoped_credential_without_persisting_secret_metadata(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // round-74: same registration-guard serialization as above
 async fn registration_probes_normalizes_and_persists_authoritative_identity() {
     let _registration_guard = remote_registration_test_guard();
     let tokenizer = tokenizer();
@@ -452,6 +456,7 @@ async fn registration_probes_normalizes_and_persists_authoritative_identity() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // round-74: same registration-guard serialization as above
 async fn registration_rejects_stock_fingerprint_without_publishing() {
     let _registration_guard = remote_registration_test_guard();
     let tokenizer = tokenizer();
@@ -477,6 +482,7 @@ async fn registration_rejects_stock_fingerprint_without_publishing() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // round-74: same registration-guard serialization as above
 async fn registration_rejects_tokenizer_drift_after_operational_probe() {
     let _registration_guard = remote_registration_test_guard();
     let tokenizer = tokenizer();
