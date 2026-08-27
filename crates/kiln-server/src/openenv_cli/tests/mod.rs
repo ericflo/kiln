@@ -162,7 +162,7 @@ fn cli_parses_local_and_server_owned_openenv_commands() {
             follow: true,
             json: true,
             ..
-        })) if request == PathBuf::from("run.json") && idempotency_key == "experiment:counter:17"
+        })) if request == Path::new("run.json") && idempotency_key == "experiment:counter:17"
     ));
 
     let status = Cli::try_parse_from([
@@ -215,7 +215,7 @@ fn cli_parses_local_and_server_owned_openenv_commands() {
             json: true,
             ..
         })) if kind == "environment_eval_receipt"
-            && output == PathBuf::from("receipt.json")
+            && output == Path::new("receipt.json")
     ));
 
     let verify = Cli::try_parse_from([
@@ -233,7 +233,7 @@ fn cli_parses_local_and_server_owned_openenv_commands() {
             summary,
             json: true,
             ..
-        })) if summary == PathBuf::from("batch.summary.json")
+        })) if summary == Path::new("batch.summary.json")
     ));
 
     let replay = Cli::try_parse_from([

@@ -5920,7 +5920,7 @@ mode = "disabled"
                     name,
                     url,
                 }
-            ))) if bundle == PathBuf::from("corrections-01.kiln-hf")
+            ))) if bundle == Path::new("corrections-01.kiln-hf")
                 && name == "corrections.peft-01"
                 && url == "http://localhost:8420"
         ));
