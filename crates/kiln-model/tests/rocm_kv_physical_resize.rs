@@ -59,7 +59,7 @@ fn rocm_physical_resize_preserves_kv_and_reclaims_for_reuse() {
         let (k0, _) = cache.pool_tensors(0).expect("layer 0");
         assert!(
             matches!(k0.device(), Device::Rocm(_)),
-            "pools must be device-resident (got {:?}); is KILN_ROCM_PAGED_DECODE disabled?",
+            "pools must be device-resident (got {:?})",
             k0.device()
         );
     }

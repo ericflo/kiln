@@ -5983,3 +5983,53 @@ preserved attached to it.
 **Signature:** kiln cleanup agent (orchestrator inline), round 101 —
 headline net **−102** lines; the round-100 report-only finding #1 is
 now closed.
+
+## Ledger correction (rounds 100/101 smoke-script claim)
+
+**Date:** 2026-08-27
+
+The round-100 and round-101 entries recorded
+"`node scripts/check_docs_site_smoke.mjs` — all file-based
+assertions pass (exit 0…)". The **exit-code part is wrong**: in
+this container the script **exits 1** at the Chromium launch stage
+(no browser binary — environmental; verified by running the
+pre-deletion revision from git: identical exit 1, zero assertion
+messages). The **substance is correct and now proven**: `runSmoke()`
+executes the entire static assertion suite (including the
+`CONFIGURATION.md` driver-remap check) BEFORE launching Chromium,
+and `fail()` exits with a named assertion message — so both the
+pre- and post-deletion revisions pass every static assertion and
+die only at the environmental browser stage. Round 101's deletion
+is therefore verified behavior-neutral. (Root cause: an earlier
+`… | tail; echo $?` measured the pipe's tail exit, not node's.)
+
+## Cleanup Agent (round 102 — round-100 stale reference findings, closed)
+
+**Date:** 2026-08-27
+
+**Work (2 files, net −1 line; comment/string-only):**
+1. `crates/kiln-model/tests/rocm_kv_physical_resize.rs` — dropped
+   the stale `; is KILN_ROCM_PAGED_DECODE disabled?` tail from the
+   pool-residency diagnostic, aligning it with the CUDA sibling
+   (`tests/cuda_kv_physical_resize.rs: "pools must be device-resident
+   (got {:?})"`). The env was deleted as dead in round 100 (no live
+   reads, not in the runtime-env contract); no consumer matches the
+   message text (repo grep: exactly the two sibling diagnostic
+   sites).
+2. `crates/kiln-tensor/src/rocm_storage.rs` (`alloc_uninit_ctx`) —
+   replaced the false clause "on Replay re-zeros only under
+   KILN_ARENA_FORCE_ZERO" with the live-code truth verified in
+   `rocm_capture_alloc.rs`: only `zeros_ctx` buffers receive the
+   captured `hipMemsetD8Async(0)`, so this `zero = false` buffer is
+   NOT re-zeroed on replay. The env name no longer exists anywhere
+   (repo-wide grep: 0 remaining hits after this edit).
+
+**Verification (orchestrator, own runs):**
+- `cargo check -p kiln-tensor --lib` — clean.
+- `cargo check -p kiln-model --tests` — clean (the edited diagnostic
+  compiles in its test target).
+- Both round-100 report-only findings are now closed; the
+  owner-decision queue (3 dead public APIs) remains report-only.
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 102 —
+headline net **−1** line; zero code-behavior change.

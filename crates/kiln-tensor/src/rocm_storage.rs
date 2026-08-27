@@ -350,8 +350,9 @@ impl RocmStorage {
     ) -> Result<Self> {
         Self::validate_context_device(ctx, device_index, "RocmStorage::alloc_uninit_ctx")?;
         // HIP-graph freeze-pointers (R.9): see `zeros_ctx`. `zero = false` here
-        // — the arena hands out an uninitialized Borrowed view on Record, and on
-        // Replay re-zeros only under KILN_ARENA_FORCE_ZERO.
+        // — the arena hands out an uninitialized Borrowed view on Record, and
+        // on Replay this buffer is not re-zeroed (the captured re-zero applies
+        // to `zeros_ctx` buffers only).
         if let Some(result) = crate::rocm_capture_arena_alloc(dtype, n_elements, false) {
             return result;
         }
