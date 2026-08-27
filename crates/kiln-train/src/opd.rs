@@ -5188,7 +5188,7 @@ fn opd_step_forward_backward_tape_authoritative(
 
     let lora_weights = params.as_lora_weights();
 
-    let (loss_val, _loss_kt, grads_by_candle_raw) =
+    let (loss_val, _loss_kt, grad_deposits) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
             kiln_autograd::TapeOptions { detect_anomaly },
             || {
@@ -5330,7 +5330,7 @@ fn opd_step_forward_backward_tape_authoritative(
     // id is `Parameter::tensor_id().as_raw()` (`u64`). Mirrors SFT's
     // `standard_forward_backward_tape_authoritative_kt`.
     let mut grads = kiln_autograd::GradStore::new();
-    for (candle_raw, kt_grad) in grads_by_candle_raw {
+    for (deposit_raw, kt_grad) in grad_deposits {
         // The tape `out` map mixes untagged deposits (frozen base /
         // activations) with namespace-tagged kt-param deposits (the LoRA leaves,
         // via `register_input_mapping_kt`). Only tagged keys are LoRA-param
@@ -5338,7 +5338,7 @@ fn opd_step_forward_backward_tape_authoritative(
         // and rejects untagged ids that happen to collide with a param id
         // (independent counters, both start at 1 — the #1082 grad-shape bug).
         let Some(param_raw) =
-            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(deposit_raw as u64)
         else {
             continue;
         };
@@ -5629,7 +5629,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
             .map_err(|e| anyhow!("checkpointed OPD: seed dtype cast (segment {seg_idx}): {e}"))?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
-        let (kt_grads, candle_grads) =
+        let (kt_grads, grad_deposits) =
             kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
                 kiln_autograd::TapeOptions { detect_anomaly },
                 seed,
@@ -5654,9 +5654,9 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
             .map_err(|e| anyhow!("checkpointed OPD: segment {seg_idx} tape backward: {e}"))?;
 
         let mut segment_grads = kiln_autograd::GradStore::new();
-        for (candle_raw, g) in candle_grads {
+        for (deposit_raw, g) in grad_deposits {
             let Some(param_raw) =
-                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(deposit_raw as u64)
             else {
                 continue;
             };
