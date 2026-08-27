@@ -11,7 +11,6 @@ use kiln_core::model_provenance::BaseWeightShardManifest;
 // (#1082) Candle import surface for forward.rs after the candle-autograd
 // CustomOp islands were removed (the kt tape is the sole grad producer).
 // Bare `Tensor`/`Device`/`DType`/`D` resolve to the kiln-native substrate.
-#[allow(unused_imports)]
 use kiln_tensor::{D, DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
@@ -53,7 +52,6 @@ use kiln_core::block::{BlockTable, contiguous_slot_run_start};
 /// accessors. Always available (the alias itself pulls in no CUDA
 /// toolchain dependency); the accessors and helpers that construct
 /// `KtTensor` device storage are `#[cfg(feature = "cuda")]`.
-#[allow(unused_imports)]
 use kiln_tensor::Tensor as KtTensor;
 
 fn kt_contiguous(t: &Tensor, context: &'static str) -> Result<KtTensor> {
@@ -249,6 +247,9 @@ fn fused_paged_decode_disabled(device: Device) -> bool {
 /// (correct + faster at every context length: ~13 tok/s @32, ~12 @128, ~11 @256
 /// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). The
 /// immutable qualified profile enables the route and its KV-pool contract.
+// Live under `feature = "rocm"` only in the `#[cfg(test)]` qualification test
+// (`paged_kv_cache_kt.rs::rocm_portable_paged_cache_round_trip_stays_device_local`);
+// the cfg_attr is required for the rocm non-test build.
 #[cfg(feature = "rocm")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
@@ -674,7 +675,6 @@ pub(crate) fn try_kt_paged_kv_pool_tensors_present(
 /// constructors, so divergence requires the kt allocator to disagree
 /// with the primary one. Assertion is defense-in-depth.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 #[inline]
 pub(crate) fn try_kt_paged_kv_num_layers(
     candle_num_layers: usize,
@@ -754,6 +754,8 @@ thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
+// Live only under `feature = "vulkan"` (callers in `vulkan_gdn.rs`); dead in
+// the default build — allow required (verified by default-lane probe).
 #[allow(dead_code)]
 pub(crate) fn vulkan_skip_gdn_state_readback_active() -> bool {
     VULKAN_SKIP_GDN_STATE_READBACK_DEPTH.with(|depth| depth.get() > 0)
@@ -921,7 +923,9 @@ fn weighted_lm_head_prep_disabled() -> bool {
     false
 }
 
-// Callers live in cuda/metal-gated tests only, so it is dead everywhere else.
+// Callers live in `#[cfg(test)]` helpers only (forward/tests/mod.rs), so the
+// function is dead in every non-test build — cfg_attr required (verified by
+// default-lane probe; inactive under the cuda/metal test builds that use it).
 #[cfg_attr(
     not(all(test, any(feature = "cuda", feature = "metal"))),
     allow(dead_code)
