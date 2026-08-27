@@ -1760,7 +1760,6 @@ dependencies = [
  "indicatif 0.18.4",
  "kiln-core",
  "kiln-eval",
- "kiln-kt-bridge",
  "kiln-memory",
  "kiln-model",
  "kiln-openenv",
