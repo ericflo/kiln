@@ -6175,3 +6175,38 @@ scripts/ and .github/.
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 105 —
 headline net **−40** lines.
+
+## Cleanup Agent (round 106 — dead Python helpers in repo scripts)
+
+**Date:** 2026-08-27
+
+**Work (2 files, net −37 lines):**
+- `scripts/mtp_reference_dump.py` (−23): deleted dead `to_f32_numpy`
+  (4 lines) + the "Dtype helpers" banner that introduced it (3 lines) +
+  dead `try_load_with_prefixes` (11 lines) + surrounding blank-line
+  pairs.
+- `scripts/c16_plumbing_analyze.py` (−14): deleted dead
+  `violations_to_records` (12 lines) + trailing blank pair.
+
+**Verification (orchestrator, own runs):**
+- Deadness: strict occurrence sweep (file-internal `grep -o | wc -l` =
+  1 = declaration-only) + repo-wide cross-reference check
+  (scripts/, .github/, crates/, docs/) = 0 external refs; no
+  `getattr`/`eval`/`__all__` dynamic dispatch in either file; neither
+  is invoked from the file's `__main__` block.
+- `python3 -m py_compile` — both files compile.
+- Both files are otherwise live (external refs to the FILEs: 78 and 4
+  respectively) — only the 3 functions are dead.
+- Sibling candidates in the same sweep were verified LIVE and kept:
+  `resolve_ref` (json_schema_subset.py, imported cross-file),
+  `fingerprint_base_model` + `validate_owned_launch_args`
+  (vllm_teacher.py, used by bench-concurrent-batch.py),
+  `git_path_is_tracked` / `is_canonical_raw_log_path` /
+  `is_canonical_result_artifact_path`
+  (write_backend_latency_result_artifact.py, imported by
+  import_backend_latency_artifact.py, lock_backend_latency_thresholds.py,
+  check_backend_latency_fixtures.py).
+- `git status` clean (committed).
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 106 —
+headline net **−37** lines.

@@ -303,20 +303,6 @@ def render_summary(verdicts: list[RunVerdict]) -> tuple[str, bool]:
     return "\n".join(lines), all_pass
 
 
-def violations_to_records(v: RunVerdict) -> list[dict]:
-    out: list[dict] = []
-    for h, items in (
-        ("H1", v.h1_violations),
-        ("H2", v.h2_violations),
-        ("H3", v.h3_violations),
-    ):
-        for item in items:
-            rec = {"hypothesis": h, "file": v.file, "run_idx": v.run_idx}
-            rec.update(item)
-            out.append(rec)
-    return out
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter

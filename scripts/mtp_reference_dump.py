@@ -73,16 +73,6 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 
-# -----------------------------------------------------------------------------
-# Dtype helpers
-# -----------------------------------------------------------------------------
-
-def to_f32_numpy(t: torch.Tensor) -> np.ndarray:
-    """Convert a torch tensor to a contiguous float32 numpy array (for the
-    safetensors writer, which wants CPU float32)."""
-    return t.detach().to(torch.float32).cpu().numpy().copy()
-
-
 def st_load_tensor(checkpoint_dir: str, name: str, allow_missing: bool = False) -> Optional[torch.Tensor]:
     """Load a single tensor from a safetensors shard directory by global name.
 
@@ -115,19 +105,6 @@ def st_load_tensor(checkpoint_dir: str, name: str, allow_missing: bool = False) 
         "Check the checkpoint layout — Qwen3.5-4B ships either a `model.` "
         "prefix (plain LM) or a `model.language_model.` prefix (VL-wrapper)."
     )
-
-
-def try_load_with_prefixes(checkpoint_dir: str, suffix: str, prefixes: list[str]) -> tuple[torch.Tensor, str]:
-    """Try loading `suffix` under each prefix until one hits. Returns (tensor, prefix_used)."""
-    last_err = None
-    for p in prefixes:
-        try:
-            t = st_load_tensor(checkpoint_dir, p + suffix)
-            assert t is not None
-            return t, p
-        except KeyError as e:
-            last_err = e
-    raise KeyError(f"Could not find `{suffix}` under any of {prefixes}: {last_err}")
 
 
 # -----------------------------------------------------------------------------
