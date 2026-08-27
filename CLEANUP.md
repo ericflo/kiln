@@ -6969,3 +6969,104 @@ net; the ceiling edit is 1 line replaced, not added).
 **Process note:** the earlier per-crate "16 unused import" audit counts
 were cache re-emission artifacts; the true per-crate debt for the small
 kernel crates is the ~10–19 judgment-class warnings each (see above).
+
+## Cleanup Agent (round 115 — small-crate test-lane judgment-lint closure)
+
+**Date:** 2026-08-27
+
+**Steering:** close the bare (undocumented) warn-by-default clippy warnings in
+the TEST/reference-impl code of the 7 small GPU kernel crates, default-features
+lane, `--all-targets`. Scope: kiln-rmsnorm-kernel, kiln-gdn-kernel,
+kiln-flash-attn, kiln-conv1d-kernel, kiln-opd-loss-kernel, kiln-vulkan-kernel,
+kiln-kt-bridge. Hard rule: only in-crate warnings (`-->` location verified per
+warning); kiln-tensor and all other deps untouched.
+
+**Measurement (round-114 lesson applied, `cargo clean -p <crate>` before every
+run, CUDARC_CUDA_VERSION=12080):** the per-crate "10–19 warnings" premise is a
+diagnostic-cache re-emission artifact — under every one of the 7 crates'
+default-lane builds, ALL 14–18 visible warnings point into `crates/kiln-tensor/`
+(dep lane; the set round 114 queued: needless_range_loop, float precision ×2,
+collapsible_if ×2, partial_cmp ×1, from_str ×1, checked_div ×1, doc-indent ×1,
++2 collapsible_if in cuda-lane files). After this round, in-crate bare
+warnings: **all 7 crates = 0** (gdn was 1, fixed below).
+
+| crate | in-crate before → after | classes fixed | tests (default lane) before → after |
+|---|---|---|---|
+| kiln-rmsnorm-kernel | 0 → 0 | — (already clean) | `test result: ok. 0 passed; 0 failed` (cuda/rocm-gated suites compile empty in this lane) before = after |
+| kiln-gdn-kernel | **1 → 0** | `needless_range_loop` | default lane environmentally link-blocked, identical before/after (no CUDA toolkit: `-lcuda/-lnvrtc/-lcurand/-lcublas/-lcublasLt` absent, round-112 pre-existing); executable lanes: no-default 2/0 → 2/0, rocm 7/0 → 7/0 (5 real ROCm parity passes, 0.26s) |
+| kiln-flash-attn | 0 → 0 | — (already clean) | default lane link-blocked, identical before/after (same missing CUDA libs, pre-existing) |
+| kiln-conv1d-kernel | 0 → 0 | — (already clean) | default lane link-blocked, identical before/after (same missing CUDA libs, pre-existing) |
+| kiln-opd-loss-kernel | 0 → 0 | — (already clean) | `33 passed; 0 failed` + empty suite before = after |
+| kiln-vulkan-kernel | 0 → 0 | — (already clean) | 4 binaries 19/2/4/65 passed, 0 failed; `gdn_qk_norm_recurrent` binary SIGSEGVs — PRE-EXISTING RADV/driver instability, documented in the round-109/110-era ledger entry ("7 kiln-vulkan-kernel test binaries SIGSEGV … Verified identical on the clean pre-edit tree … Pre-existing RADV/driver instability … flagged for the owner"); zero files in this crate touched this round, so before == after trivially |
+| kiln-kt-bridge | 0 → 0 | — (already clean) | `7 passed; 0 failed; 1 ignored` before = after |
+
+**Fix (kiln-gdn-kernel, 2 lines replaced):** `tests/gated_rms_norm_parity.rs:152`
+(`reference_bwd_host`'s s-accumulation loop — a CUDA-gated pure-host F32
+reference, `cuda_available()`-skipped on this host but compiled + clippy-checked
+in the default lane) — `needless_range_loop`. Applied clippy's suggested
+shape, value-preserving: `for h in 0..hidden { … weight_host[h] … }` →
+`for (h, &w) in weight_host.iter().enumerate().take(hidden) { … w … }`.
+`w_host` is built as `fill(_, hidden, _)` (line 217), so `.len() == hidden` and
+element order/count are identical; `&w` keeps the f32 copy bit-exact. clippy's
+`--fix` did not auto-apply (MaybeApplicable `<item>` placeholder because `h` is
+also used arithmetically in `row_off + h`); applied by hand to the suggested
+form.
+
+**KEPT (judgment class, out of the default-lane scope):** 3× `too_many_arguments`
+in kiln-opd-loss-kernel `kt_api.rs` (1256: 8/7, 1283: 9/7, 1363: 9/7) — cuda +
+rocm lanes only. Per campaign precedent (round 66 flce flat-ABI allow
+pattern), NOT restructured; no allow added either, because the established
+style in THIS crate carries no too_many_arguments allows and these are
+non-default-lane. Recorded as follow-up.
+
+**Non-default-lane in-crate debt (recorded for the next lane-precise round;
+not fixed this round — scope was the default-features lane):**
+- rmsnorm cuda lane: 6× `manual_is_multiple_of` (kt_api.rs:521/1241/1876/2203/2269/2340) + 1× unused import `Device` (tests/muon_cuda_parity.rs:22).
+- gdn rocm lane: 2× `needless_range_loop` (tests/rocm_gdn_parity.rs:397/404, the round-112 pre-existing pair).
+- opd-loss rocm lane: 1× `redundant_closure` (kt_tape.rs:653).
+- conv1d rocm lane: 2× manual-slice-copy (tests/rocm_conv1d_parity.rs:128/209) + 1× `needless_range_loop` (:220).
+- flash-attn rocm lane: 18× in src/rocm_sdpa.rs (636 checked_div; 1786/2062/2085/3266/3438 collapsible_if; 2139/2340/2422/2510/4086/4185/4286/4321 is_multiple_of; 2803/3203 too_many_arguments; 3376/3402 unneeded `return`) + 4× in tests/rocm_flash_attn_parity.rs (109/137/216 range-loop; 1149 no-effect).
+
+**Out-of-scope observations (dep crates, not touched):** kiln-tensor's 14–18
+judgment-class warnings (queued round 114) re-emit under every small-crate
+default-lane build — the source of the "10–19 per crate" miscount, correcting
+the round-114 process-note attribution; kiln-rocblas 1× redundant same-type
+raw-pointer cast (hipblaslt_handle.rs:663, rocm lane).
+
+**Gates (own runs):**
+- Per-crate `cargo clean -p` + `cargo clippy -p <crate> --all-targets`
+  (CUDARC_CUDA_VERSION=12080): in-crate 0/0/0/0/0/0/0; every remaining
+  warning's `-->` is inside crates/kiln-tensor/ (dep lane, out of scope).
+- `cargo test -p kiln-gdn-kernel` (default): link-blocked identically
+  before/after (pre-existing, no CUDA toolkit on host).
+- `cargo test -p kiln-gdn-kernel --no-default-features`: 2/0 → 2/0.
+- `cargo test -p kiln-gdn-kernel --no-default-features --features rocm`:
+  7/0 → 7/0 (real ROCm parity).
+- Baselines for the 6 untouched crates: see table (0/0, 33/0, 7/0+1 ignored,
+  vulkan-kernel 90/0 across 4 binaries + the pre-existing SIGSEGV binary;
+  flash-attn/conv1d default-lane link-blocked pre-existing).
+- `cargo fmt --check` → clean (rc=0).
+- `python3 scripts/check_production_file_budget.py` → "production file
+  budget passed: 646 files, 5000-line default, 14 reviewed exceptions"
+  (the gdn edit is 2-for-2 line-neutral; no ceiling sync needed).
+- `python3 scripts/check_repository_artifacts.py` → "repository artifact
+  policy passed: 6694 tracked paths, 125002345 bytes; CSV <= 1048576,
+  each file <= 10485760".
+- `git status` → clean (after ledger commit).
+
+**Net this round:** **0** (2 insertions, 2 deletions in gdn; the edit is a
+line-neutral rewrite).
+
+**Commits:** `4d1a8d15d` refactor(kiln-gdn-kernel): round 115 — close
+test-lane clippy debt (classes fixed: needless_range_loop; 1 warning -> 0
+bare) + this ledger entry. Not pushed.
+
+**Unresolved (not caused by, and not fixable within, this round's scope):**
+1. kiln-tensor's 14–18 judgment-class warnings (default lane; 18 with cuda) —
+   hard-rule excluded crate; the real owner of the "10–19 per crate" numbers.
+2. The non-default-lane in-crate debt listed above (needs a lane-precise
+   follow-up round; the rocm lanes are executable on this host).
+3. 7 kiln-vulkan-kernel test binaries SIGSEGV on this machine's RADV/driver
+   (pre-existing, flagged for the owner since round ~110).
+4. CUDA-lane `cargo test` for the cuda-default crates is link-blocked on this
+   host (no CUDA toolkit) — pre-existing round-112 finding.
