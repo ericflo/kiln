@@ -127,9 +127,13 @@ mod tests {
             .expect("CUDA graph backend should match replay key");
 
         assert_eq!(ReplayPlan::backend(&plan), Backend::Cuda);
-        ReplayPlan::validate_inputs(&plan, ReplayInputs::new(&key, &[input.clone()])).unwrap();
-        let outputs = ReplayPlan::replay(&mut plan, ReplayInputs::new(&key, &[input.clone()]))
-            .expect("shared replay plan should replay scaffold graph");
+        ReplayPlan::validate_inputs(&plan, ReplayInputs::new(&key, std::slice::from_ref(&input)))
+            .unwrap();
+        let outputs = ReplayPlan::replay(
+            &mut plan,
+            ReplayInputs::new(&key, std::slice::from_ref(&input)),
+        )
+        .expect("shared replay plan should replay scaffold graph");
 
         assert_eq!(outputs.replay_count, 1);
         assert_eq!(outputs.resources, vec![input]);
