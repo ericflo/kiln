@@ -2482,26 +2482,22 @@
       "cuda": [
         "kiln-model/cuda",
         "kiln-tensor/cuda",
-        "kiln-train/cuda",
-        "kiln-kt-bridge/cuda"
+        "kiln-train/cuda"
       ],
       "metal": [
         "kiln-model/metal",
         "kiln-tensor/metal",
-        "kiln-kt-bridge/metal",
         "kiln-train/metal"
       ],
       "rocm": [
         "kiln-model/rocm",
         "kiln-tensor/rocm",
-        "kiln-train/rocm",
-        "kiln-kt-bridge/rocm"
+        "kiln-train/rocm"
       ],
       "vulkan": [
         "kiln-model/vulkan",
         "kiln-tensor/vulkan",
-        "kiln-train/vulkan",
-        "kiln-kt-bridge/vulkan"
+        "kiln-train/vulkan"
       ]
     },
     "kiln-tensor": {
