@@ -11,16 +11,6 @@ use super::vulkan::VulkanBackend;
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape};
 use super::{BackendMatmulLayout, requested_matmul_layout};
 
-/// (#1082) Per-dispatch FLOP ceiling for the Vulkan-routed matmul.
-///
-/// Migrated inline from the deleted `backend::vulkan_linear_op` module
-/// (its `candle_core::CustomOp1` training wrapper was removed when the kt
-/// autograd tape became the sole grad producer). The forward-only FLCE
-/// offset path in `linear_prefill_apply_offset` still needs the ceiling to
-/// sub-chunk oversized dispatches. Multi-million-workgroup submissions can
-/// hang Vulkan implementations, so the immutable policy owns the exact limit
-/// and malformed or late process state cannot disable it.
-
 /// FLOP estimate for `[batch, hidden] @ [hidden, out_dim]` (one mul + one
 /// add per inner term).
 fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
@@ -30,6 +20,15 @@ fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
         .saturating_mul(2)
 }
 
+/// (#1082) Per-dispatch FLOP ceiling for the Vulkan-routed matmul.
+///
+/// Migrated inline from the deleted `backend::vulkan_linear_op` module
+/// (its `candle_core::CustomOp1` training wrapper was removed when the kt
+/// autograd tape became the sole grad producer). The forward-only FLCE
+/// offset path in `linear_prefill_apply_offset` still needs the ceiling to
+/// sub-chunk oversized dispatches. Multi-million-workgroup submissions can
+/// hang Vulkan implementations, so the immutable policy owns the exact limit
+/// and malformed or late process state cannot disable it.
 fn max_flop_per_dispatch() -> u64 {
     kiln_vulkan_kernel::kernels::vulkan_kernel_policy().linear_max_flop_per_dispatch
 }

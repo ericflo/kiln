@@ -1052,6 +1052,7 @@ mod tests {
     ///   3. After an explicit in-place sync (`p.slice_set(resolve(...))`,
     ///      the kt analog of candle `Var::set` — id-stable in-place overwrite),
     ///      the param's host storage matches the registry.
+    ///
     /// This is the contract the lazy-sync flow relies on.
     #[test]
     fn lazy_sync_keeps_host_stale_until_explicit_sync() -> Result<()> {

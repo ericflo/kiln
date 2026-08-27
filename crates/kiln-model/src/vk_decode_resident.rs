@@ -1164,8 +1164,8 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 ///   → MLP gate_up + down → +residual
 ///
 /// Lifting all of this into one `CommandBatch` per layer eliminates the
-/// 24 GDN layers x 5 host-side ops (pre-norm + residual + post-norm + MLP
-/// + final-residual) that previously dominated decode ITL (~17 ms /
+/// 24 GDN layers x 5 host-side ops (pre-norm, residual, post-norm, MLP,
+/// and final-residual) that previously dominated decode ITL (~17 ms /
 /// GDN layer = ~408 ms / token in the historical resident-decode profile).
 ///
 /// Returns `Ok(Some(post_block_residual_tensor))` on success;
