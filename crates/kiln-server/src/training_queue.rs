@@ -31,7 +31,7 @@ fn server_gpu_step_coordination(
 }
 
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
-/// + `finished_unix_ms` + the failure detail, and persist a clone to the
+/// and `finished_unix_ms` plus the failure detail, and persist a clone to the
 /// on-disk archive. Archive write failures are logged, never propagated —
 /// disk wedged or quota-exceeded must not derail the worker's reporting path.
 fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState, error: Option<String>) {

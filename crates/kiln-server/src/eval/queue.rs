@@ -174,9 +174,9 @@ pub struct EvalJobInfo {
 }
 
 impl EvalJobInfo {
-    /// Construct a freshly-queued job info. Centralizes the `Instant::now`
-    /// + `chrono::Utc::now()` + default-state plumbing so submission sites
-    /// only have to specify what's actually distinct about the job.
+    /// Construct a freshly-queued job info. Centralizes the `Instant::now()`
+    /// and `chrono::Utc::now()` plumbing plus the default state so submission
+    /// sites only have to specify what's actually distinct about the job.
     pub fn queued(
         job_id: String,
         suite_name: String,

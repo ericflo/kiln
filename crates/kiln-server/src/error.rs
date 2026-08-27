@@ -720,8 +720,8 @@ impl ApiError {
         }
     }
 
-    /// 501 for `POST /v1/agent/judge_drift_check` — the teacher re-scoring
-    /// + agreement comparison land with the trainer body (#31). An honest
+    /// 501 for `POST /v1/agent/judge_drift_check` — teacher re-scoring and
+    /// the agreement comparison land with the trainer body (#31). An honest
     /// not-implemented beats the fake success the endpoint used to return.
     pub fn drift_check_not_implemented() -> Self {
         Self {
