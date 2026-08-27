@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUDA");
@@ -81,7 +81,7 @@ fn main() {
     for arch in cuda_archs.split(';') {
         let arch = arch.trim();
         if !arch.is_empty() {
-            build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            build.flag(format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
         }
     }
 
@@ -201,7 +201,7 @@ fn build_rocm() {
     println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
 }
 
-fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+fn configure_nvcc_from_cuda_root(cuda_root: &Path) {
     if env::var_os("NVCC").is_some() {
         return;
     }
@@ -237,18 +237,17 @@ fn find_cuda_root() -> Option<PathBuf> {
         }
     }
     // Try nvcc in PATH
-    if let Ok(output) = std::process::Command::new("which").arg("nvcc").output() {
-        if output.status.success() {
-            let nvcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // nvcc is typically at <cuda_root>/bin/nvcc
-            let p = PathBuf::from(nvcc_path);
-            if let Some(bin_dir) = p.parent() {
-                if let Some(cuda_dir) = bin_dir.parent() {
-                    if cuda_dir.join("include").join("cuda.h").exists() {
-                        return Some(cuda_dir.to_path_buf());
-                    }
-                }
-            }
+    if let Ok(output) = std::process::Command::new("which").arg("nvcc").output()
+        && output.status.success()
+    {
+        let nvcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // nvcc is typically at <cuda_root>/bin/nvcc
+        let p = PathBuf::from(nvcc_path);
+        if let Some(bin_dir) = p.parent()
+            && let Some(cuda_dir) = bin_dir.parent()
+            && cuda_dir.join("include").join("cuda.h").exists()
+        {
+            return Some(cuda_dir.to_path_buf());
         }
     }
     None
@@ -267,15 +266,15 @@ fn find_rocm_root() -> Option<PathBuf> {
     if default.join("bin").join("hipcc").exists() {
         return Some(default);
     }
-    if let Ok(output) = std::process::Command::new("which").arg("hipcc").output() {
-        if output.status.success() {
-            let hipcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let p = PathBuf::from(hipcc_path);
-            if let Some(bin_dir) = p.parent() {
-                if let Some(rocm_dir) = bin_dir.parent() {
-                    return Some(rocm_dir.to_path_buf());
-                }
-            }
+    if let Ok(output) = std::process::Command::new("which").arg("hipcc").output()
+        && output.status.success()
+    {
+        let hipcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let p = PathBuf::from(hipcc_path);
+        if let Some(bin_dir) = p.parent()
+            && let Some(rocm_dir) = bin_dir.parent()
+        {
+            return Some(rocm_dir.to_path_buf());
         }
     }
     None
