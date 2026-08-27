@@ -735,6 +735,35 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Returns `true` when `value` is a full `sha256:` identity string: the
+/// `sha256:` prefix followed by exactly 64 lowercase hexadecimal bytes
+/// (`[0-9a-f]`).
+///
+/// Single canonical form of the export/artifact identity check that was
+/// previously inlined separately in `api/hf_trl.rs`, `hf_train_cli.rs`,
+/// and `openenv_cli.rs`; each caller keeps its own error message.
+pub(crate) fn is_lower_sha256_identity(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Returns `value` with the `sha256:` prefix added when it is not already
+/// present.
+///
+/// Single canonical form of the `prefixed_sha256`/`rollout_sha256`/
+/// `normalize_sha256` helpers this replaces; the body is byte-identical
+/// to each of them.
+pub(crate) fn with_sha256_prefix(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_string()
+    } else {
+        format!("sha256:{value}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1287,5 +1316,103 @@ cpu MHz: 1200.0
         );
         assert_eq!(descendant.outcome, CommandOutcome::Exited(0));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn is_lower_sha256_identity_matches_the_three_legacy_inline_forms() {
+        // Legacy form inlined in api/hf_trl.rs before consolidation.
+        let legacy_hf_trl = |digest: &str| {
+            !(digest.len() != "sha256:".len() + 64
+                || !digest.starts_with("sha256:")
+                || !digest["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+        };
+        // Legacy form of hf_train_cli.rs::validate_export_sha256.
+        let legacy_hf_train_cli = |digest: &str| {
+            digest.len() == "sha256:".len() + 64
+                && digest.starts_with("sha256:")
+                && digest["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        // Legacy form of openenv_cli.rs::validate_openenv_sha256.
+        let legacy_openenv_cli = |value: &str| {
+            value.len() == "sha256:".len() + 64
+                && value.starts_with("sha256:")
+                && value["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        let cases = [
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "0123456789abcdef".repeat(4)),
+            "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string(),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("sha256:{}", "a".repeat(65)),
+            "a".repeat(64),
+            "sha256:".to_string(),
+            format!("SHA256:{}", "a".repeat(64)),
+            "g".repeat(64),
+        ];
+        for case in &cases {
+            assert_eq!(
+                is_lower_sha256_identity(case),
+                legacy_hf_trl(case),
+                "hf_trl legacy form diverged for {case:?}"
+            );
+            assert_eq!(
+                is_lower_sha256_identity(case),
+                legacy_hf_train_cli(case),
+                "hf_train_cli legacy form diverged for {case:?}"
+            );
+            assert_eq!(
+                is_lower_sha256_identity(case),
+                legacy_openenv_cli(case),
+                "openenv_cli legacy form diverged for {case:?}"
+            );
+        }
+        assert!(is_lower_sha256_identity(&format!(
+            "sha256:{}",
+            "a".repeat(64)
+        )));
+        assert!(!is_lower_sha256_identity(&format!(
+            "sha256:{}",
+            "A".repeat(64)
+        )));
+        assert!(!is_lower_sha256_identity("sha256:short"));
+    }
+
+    #[test]
+    fn with_sha256_prefix_matches_the_legacy_inline_bodies() {
+        // Legacy body shared by state.rs::prefixed_sha256,
+        // api/completions.rs::rollout_sha256, and
+        // execution_provenance.rs::normalize_sha256.
+        let legacy = |value: &str| {
+            if value.starts_with("sha256:") {
+                value.to_string()
+            } else {
+                format!("sha256:{value}")
+            }
+        };
+        let cases = [
+            String::new(),
+            "a".to_string(),
+            "deadbeef".to_string(),
+            "sha256:".to_string(),
+            "sha256:deadbeef".to_string(),
+            format!("sha256:{}", "a".repeat(64)),
+            "A1".to_string(),
+        ];
+        for case in &cases {
+            assert_eq!(
+                with_sha256_prefix(case),
+                legacy(case),
+                "diverged for {case:?}"
+            );
+        }
+        assert_eq!(with_sha256_prefix("deadbeef"), "sha256:deadbeef");
+        assert_eq!(with_sha256_prefix("sha256:deadbeef"), "sha256:deadbeef");
     }
 }

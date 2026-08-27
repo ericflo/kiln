@@ -33,6 +33,7 @@ use crate::latency_observability::BlockingBackendPhase;
 use crate::latency_observability::BlockingBackendPhaseTracker;
 use crate::metrics::Metrics;
 use crate::recent_requests::{DEFAULT_CAPACITY as RECENT_REQUESTS_CAPACITY, RecentRequestsRing};
+use crate::teacher_identity::with_sha256_prefix;
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
 mod prefix_cache_pressure;
@@ -2885,9 +2886,9 @@ impl AppState {
         let base = if let Some(base) = self.base_teacher_identity.as_deref() {
             kiln_train::RolloutBehaviorPolicyIdentityV1 {
                 served_model_id: base.served_model_id().to_string(),
-                base_model_sha256: prefixed_sha256(base.base_model_sha256()),
+                base_model_sha256: with_sha256_prefix(base.base_model_sha256()),
                 adapter: None,
-                inference_config_sha256: prefixed_sha256(base.inference_config_sha256()),
+                inference_config_sha256: with_sha256_prefix(base.inference_config_sha256()),
                 implementation: base.implementation().to_string(),
             }
         } else {
@@ -2923,7 +2924,7 @@ impl AppState {
             })?;
             identity.adapter = Some(kiln_train::RolloutAdapterIdentityV1 {
                 name: name.to_string(),
-                content_sha256: prefixed_sha256(&source.content_revision()),
+                content_sha256: with_sha256_prefix(&source.content_revision()),
             });
         }
         identity.validate()?;
@@ -4559,14 +4560,6 @@ impl AppState {
             max_tracked_eval_jobs: 1024,
             eval_webhook_url: None,
         })
-    }
-}
-
-fn prefixed_sha256(value: &str) -> String {
-    if value.starts_with("sha256:") {
-        value.to_string()
-    } else {
-        format!("sha256:{value}")
     }
 }
 

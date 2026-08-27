@@ -34,6 +34,7 @@ use kiln_train::{
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::teacher_identity::is_lower_sha256_identity;
 
 const EXPORT_REGISTRY_DIR: &str = ".hf_trl_exports";
 const MAX_EXPORT_NAME_BYTES: usize = 128;
@@ -165,12 +166,7 @@ fn parse_delete_if_match(headers: &HeaderMap) -> Result<Option<String>, ApiError
                 "If-Match must be one strong quoted export SHA-256 entity tag",
             )
         })?;
-    if digest.len() != "sha256:".len() + 64
-        || !digest.starts_with("sha256:")
-        || !digest["sha256:".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    if !is_lower_sha256_identity(digest) {
         return Err(ApiError::hf_trl_invalid_request(
             "If-Match must contain a lowercase sha256:<64-hex> export identity",
         ));

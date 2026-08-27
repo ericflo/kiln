@@ -14,6 +14,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::backend::TrainingPrecisionPolicy;
 
 use crate::config::KilnConfig;
+use crate::teacher_identity::with_sha256_prefix;
 
 // The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
 #[allow(clippy::too_many_arguments)]
@@ -51,12 +52,12 @@ pub fn build_execution_provenance(
         ExecutionBackendIdentity {
             name: backend_name.to_string(),
             device: device.short_name(),
-            numerical_runtime_sha256: normalize_sha256(numerical_runtime_sha256),
+            numerical_runtime_sha256: with_sha256_prefix(numerical_runtime_sha256),
         },
         ExecutionBuildIdentity {
             package_version: env!("CARGO_PKG_VERSION").to_string(),
             target: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-            executable_sha256: normalize_sha256(executable_sha256),
+            executable_sha256: with_sha256_prefix(executable_sha256),
             git_commit,
             source_tree_sha256,
             source_dirty,
@@ -84,14 +85,6 @@ pub fn build_execution_provenance(
         },
     )
     .context("construct execution provenance")
-}
-
-fn normalize_sha256(value: &str) -> String {
-    if value.starts_with("sha256:") {
-        value.to_string()
-    } else {
-        format!("sha256:{value}")
-    }
 }
 
 fn effective_kiln_environment() -> BTreeMap<String, String> {

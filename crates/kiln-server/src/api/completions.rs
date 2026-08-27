@@ -56,7 +56,7 @@ use crate::state::{
 use crate::teacher_identity::{
     MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES, MAX_COMPLETION_PROMPT_LOGPROBS,
     MAX_COMPLETION_PROMPT_TOKENS, MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS,
-    PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET,
+    PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET, with_sha256_prefix,
 };
 
 mod adapters;
@@ -1232,14 +1232,6 @@ async fn chat_completions_inner(
 /// Missing `adapter` selects the server default without changing it. Explicit
 /// `null`/`""` selects base for this request. A name selects that adapter for
 /// this request. Only the adapter load/unload endpoints mutate the default.
-fn rollout_sha256(value: &str) -> String {
-    if value.starts_with("sha256:") {
-        value.to_string()
-    } else {
-        format!("sha256:{value}")
-    }
-}
-
 fn build_rollout_provenance(
     state: &AppState,
     req: &ChatCompletionRequest,
@@ -1326,17 +1318,17 @@ fn build_rollout_provenance(
             .context("server base behavior-policy identity is unavailable")?;
         let behavior_policy = kiln_train::RolloutBehaviorPolicyIdentityV1 {
             served_model_id: base.served_model_id().to_string(),
-            base_model_sha256: rollout_sha256(base.base_model_sha256()),
+            base_model_sha256: with_sha256_prefix(base.base_model_sha256()),
             adapter: adapter.map(|adapter| kiln_train::RolloutAdapterIdentityV1 {
                 name: adapter.name.clone(),
-                content_sha256: rollout_sha256(&adapter.content_revision),
+                content_sha256: with_sha256_prefix(&adapter.content_revision),
             }),
-            inference_config_sha256: rollout_sha256(base.inference_config_sha256()),
+            inference_config_sha256: with_sha256_prefix(base.inference_config_sha256()),
             implementation: base.implementation().to_string(),
         };
         let tokenizer = kiln_train::RolloutTokenizerIdentityV1 {
-            vocab_sha256: rollout_sha256(base.tokenizer_vocab_sha256()),
-            config_sha256: rollout_sha256(base.tokenizer_config_sha256()),
+            vocab_sha256: with_sha256_prefix(base.tokenizer_vocab_sha256()),
+            config_sha256: with_sha256_prefix(base.tokenizer_config_sha256()),
             chat_template_sha256: state
                 .tokenizer
                 .chat_template_sha256()

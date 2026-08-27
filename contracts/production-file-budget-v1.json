@@ -49,8 +49,8 @@
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8399,
-      "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
+      "max_lines": 8392,
+      "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent. The 7-line delta is the round-82 consolidation of the private prefixed_sha256 helper into teacher_identity::with_sha256_prefix; this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",

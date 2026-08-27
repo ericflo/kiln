@@ -41,6 +41,7 @@ use crate::openenv_replay::{
     connect_and_reset_with_capacity_checked, encode_replay, replay_openenv,
     sha256_bytes as replay_sha256, verify_openenv_artifacts,
 };
+use crate::teacher_identity::is_lower_sha256_identity;
 
 const MAX_OPENENV_ENVIRONMENTS: usize = 64;
 const MAX_OPENENV_GROUPS: usize = 16_384;
@@ -1556,11 +1557,7 @@ fn manifest_artifact(run: &Value, run_id: &str, kind: &str) -> Result<OpenEnvMan
 
 fn validate_openenv_sha256(label: &str, value: &str) -> Result<()> {
     anyhow::ensure!(
-        value.len() == "sha256:".len() + 64
-            && value.starts_with("sha256:")
-            && value["sha256:".len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        is_lower_sha256_identity(value),
         "OpenEnv {label} SHA-256 is malformed"
     );
     Ok(())

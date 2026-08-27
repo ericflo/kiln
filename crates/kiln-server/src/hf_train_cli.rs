@@ -33,6 +33,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::teacher_identity::is_lower_sha256_identity;
+
 const MAX_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -177,11 +179,7 @@ fn validate_export_name(name: &str) -> Result<()> {
 
 fn validate_export_sha256(digest: &str) -> Result<()> {
     ensure!(
-        digest.len() == "sha256:".len() + 64
-            && digest.starts_with("sha256:")
-            && digest["sha256:".len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        is_lower_sha256_identity(digest),
         "export identity must be lowercase sha256:<64-hex>"
     );
     Ok(())
