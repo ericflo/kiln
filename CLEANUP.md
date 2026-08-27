@@ -5889,3 +5889,61 @@ A). Queue unchanged: `allow(dead_code)` re-adjudication
 crates' 30 sites.
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 99.
+
+## Cleanup Agent (round 100 — CONFIGURATION.md retired-env audit, SALVAGE)
+
+**Date:** 2026-08-27
+
+**Context:** the sub-agent completed the audit work, then the `pi`
+process hung and was killed at the 2700s cap with zero stdout (second
+consecutive hang; a minimal probe confirmed the provider is
+responsive — treat as transient pi/provider stalls). Per the
+round-85/96a salvage protocol the uncommitted pile was verified and
+completed by the orchestrator.
+
+**Work (1 file, net −97 lines: 31 ins / 128 del):**
+`docs/CONFIGURATION.md` — the "retired names" graveyard pruned:
+85 retired env names deleted across the retired-names table
+(9 rows → 4), the kt_api_mode / CUDA-paragraph / ROCm-profile /
+flash-attention / full-attention / graph-stable prose blocks, and
+the "two unused training-kernel controls" history paragraph. Kept:
+the true behavioral prose (typed-profile replacements, the 4
+surviving retired names that are still cited elsewhere in the doc,
+`KILN_W4A16*`, `KILN_DISABLE_PARALLEL_PACK`,
+`KILN_FLASH_ATTN_BWD_DETERMINISTIC`, etc.).
+
+**Verification (orchestrator, own runs):**
+- All 85 deleted names: **none appear in
+  `contracts/runtime-env-direct-reads-v1.json`** (the authoritative
+  live-direct-reads contract).
+- All 85: zero live code reads repo-wide. The only 4 non-zero
+  hits are benign: `KILN_DISABLE_OPD_LOSS_KERNEL` +
+  `KILN_FLCE_ACTIVE_ROW_TILE` appear only in the
+  **dead** `expectedApiSections` const in
+  `scripts/check_docs_site_smoke.mjs` (declared line 1159, referenced
+  NOWHERE in the script — 1 total occurrence); `KILN_ROCM_PAGED_DECODE`
+  only in a kiln-model test error-message string
+  (`tests/rocm_kv_physical_resize.rs`); `KILN_ARENA_FORCE_ZERO` only
+  in a kiln-tensor comment
+  (`src/rocm_storage.rs: "Replay re-zeros only under …"`).
+- `node scripts/check_docs_site_smoke.mjs` — all file-based
+  assertions pass (exit 0; the Chromium page-render stage is
+  skipped in this environment and its term list lives only in the
+  dead const above).
+- `python3 scripts/check_production_file_budget.py` — pass.
+- `python3 scripts/check_repository_artifacts.py` — pass.
+- Markdown/table coherence of the pruned regions — verified by
+  reading.
+
+**Report-only findings for future rounds:**
+1. Dead `expectedApiSections` const (~60 lines) in
+   `scripts/check_docs_site_smoke.mjs` — declared, never referenced;
+   deletion candidate (owner/script-surface round).
+2. Stale test-string hint `KILN_ROCM_PAGED_DECODE` in
+   `crates/kiln-model/tests/rocm_kv_physical_resize.rs` and stale
+   comment `KILN_ARENA_FORCE_ZERO` in
+   `crates/kiln-tensor/src/rocm_storage.rs` — both reference envs
+   that no longer exist (string/comment-only fixes).
+
+**Signature:** kiln cleanup agent (sub-agent work, orchestrator
+salvage + gate), round 100 — headline net **−97** lines.

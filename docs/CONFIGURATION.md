@@ -223,12 +223,10 @@ do not re-read these public environment names.
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | none | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
 
-`accelerator.kt_api_mode` replaces the former `KILN_USE_KT_API_*`,
-`KILN_DISABLE_KT_API_*`, and `KILN_USE_KT_PAGED_KV_*` debugging switches.
-Those per-operation names are not compatibility aliases: they created
-order-dependent route combinations that could not be represented, validated,
-or reported as one startup policy. Use the typed field or its mechanically
-derived canonical environment name instead.
+Per-operation KT debugging switches are not compatibility aliases: they
+created order-dependent route combinations that could not be represented,
+validated, or reported as one startup policy. Use the typed field or its
+mechanically derived canonical environment name instead.
 
 `accelerator.cuda_kernel_profile` owns these twenty-five CUDA model/backend decisions:
 
@@ -260,22 +258,13 @@ derived canonical environment name instead.
 | `paged_decode_dyn_seqlen_batch` | on | off |
 | `gdn_chunk_pre_permute` | on | off |
 
-The CUDA-specific variables `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ`,
-`KILN_DISABLE_CUDA_GDN_AB_IN_PROJ`,
-`KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ`,
-`KILN_DISABLE_CUDA_GDN_PREFILL_GATES`,
-`KILN_DISABLE_FUSED_GDN_DECODE`,
-`KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK`,
-`KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT`,
-`KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM`,
-`KILN_DISABLE_CUDA_LORA_DECODE_ADD`, and
-`KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` no longer control CUDA and
-are not aliases. The same is true of the former CUDA/generic switches for
-direct paged decode, rotary QK, decode QKV preparation, MLP fusion, attention
-sigmoid fusion, RMSNorm forward/backward, L2 QK normalization, dynamic-length
-paged decode, GDN pre-permute, training MLP chunking, and split Q/gate
-training. Use the complete profile; individual route combinations are not a
-supported product configuration.
+The CUDA-specific variable `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ` no longer
+controls CUDA and is not an alias. The same is true of the former CUDA/generic
+switches for direct paged decode, rotary QK, decode QKV preparation, MLP
+fusion, attention sigmoid fusion, RMSNorm forward/backward, L2 QK
+normalization, dynamic-length paged decode, GDN pre-permute, training MLP
+chunking, and split Q/gate training. Use the complete profile; individual
+route combinations are not a supported product configuration.
 
 `accelerator.cuda_marlin_profile` owns the complete CUDA Marlin weight-layout
 choice:
@@ -300,11 +289,6 @@ backward accumulation authority. `fast` is the historical default;
 an alias. This setting concerns CUDA training backward only and does not imply
 that `server.deterministic` makes every accelerator kernel bitwise
 deterministic.
-
-Two unused or unsafe-to-retune training-kernel controls are deleted without
-replacement. `KILN_DISABLE_OPD_LOSS_KERNEL` had no live caller.
-`KILN_FLCE_ACTIVE_ROW_TILE` is fixed at the established bounded 4,096 active
-rows; unsupported shapes continue through the existing backend fallback.
 
 `accelerator.metal_kernel_profile` owns these forty-six Metal backend decisions:
 
@@ -414,15 +398,10 @@ is fixed or owned by the typed backend profile shown above.
 
 | Policy family | Retired names | Product behavior |
 |---|---|---|
-| Decode route and fallback | `KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE`, `KILN_ROCM_PAGED_DECODE`, `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK`, `KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK`, `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK`, `KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK`, `KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY` | CUDA and ROCm direct paged decode follow their installed kernel profiles. Vulkan retains its qualified native route and LoRA-specific counted portable path. Other unsupported decode fallbacks fail closed instead of changing route from process state. |
-| CUDA model routes | `KILN_DISABLE_FUSED_PAGED_DECODE`, `KILN_DISABLE_FUSED_CUDA_ROTARY_QK`, `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP`, `KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL`, `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL`, `KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL`, `KILN_DISABLE_RMSNORM_KERNEL`, `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_DISABLE_FUSED_L2_QK_NORM`, `KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH`, `KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH`, `KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE` | Every listed CUDA decision is a leaf of `accelerator.cuda_kernel_profile`; no hot path reads process environment. |
-| Training geometry | `KILN_DISABLE_CUDA_TRAINING_MLP_CHUNKING`, `KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING`, `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS`, `KILN_GPU_TRAINING_MLP_CHUNK_TOKENS`, `KILN_DISABLE_SPLIT_Q_GATE_TRAINING`, `KILN_DISABLE_CUDA_SPLIT_Q_GATE_TRAINING`, `KILN_DISABLE_VULKAN_SPLIT_Q_GATE_TRAINING`, `KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES` | ROCm uses its complete typed policy. CUDA uses enabled 1,024-token MLP chunks and an unsplit Q/gate output. Vulkan uses enabled split Q/gate output with at most 1,024 features per slice. |
-| Projection residency and loading | `KILN_KEEP_PROJECTION_ORIGINALS`, `KILN_DROP_PROJECTION_ORIGINALS`, `KILN_KEEP_PROJECTION_TRANSPOSES`, `KILN_DISABLE_PARALLEL_PROJECTION_LOAD`, `KILN_DISABLE_PARALLEL_AUX_LOAD`, `KILN_VK_NATIVE_TRAINING` | CUDA and Metal drop redundant original projection tensors after cached transposes are ready; CPU, ROCm, and Vulkan retain originals. Every backend retains cached transposes. Metal parallel projection and auxiliary upload remain enabled. Vulkan training capability is backend-owned, not inferred from environment. |
-| State and precision | `KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER`, `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE`, `KILN_DISABLE_ROCM_BF16_INFERENCE_STATE`, `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE`, `KILN_ALLOW_FP8_ON_METAL` | Qualified device-resident state scatter remains enabled with its replacement fallback. CUDA, ROCm, Metal, and Vulkan advertise native-with-constraints BF16/F16 recurrent state. Metal FP8 KV storage remains declined because its CPU round trip is not a qualified product route. |
-| Fixed optimized paths | `KILN_DISABLE_WEIGHTED_LM_HEAD_PREP`, `KILN_DISABLE_MARLIN_BF16_DROP`, `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP`, `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP`, `KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS` | Weighted LM-head preparation and redundant Marlin transpose release remain enabled. CUDA GDN uses row-wise execution only for genuinely noncontiguous rows. The unqualified Metal streaming-GDN experiment remains disabled. |
-| Diagnostics and legacy routing | `KILN_ARENA_FORCE_ZERO`, `KILN_CUDA_NATIVE_TRAINING` | Capture arenas zero only buffers whose allocation contract requests zero initialization. Server training uses the authoritative shared tensor tape; the obsolete legacy CUDA-native selector remains unavailable. |
-| Metal graph execution | `KILN_METAL_GRAPHS`, `KILN_FORCE_EAGER_DECODE`, `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | The owning runtime options select graph eligibility before `ModelRunner` construction. Eligible Metal runners use stable paged metadata; ineligible runners remain eager. Process state cannot change either decision during decode. |
-| Tape saved-tensor residency | `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS`, `KILN_TAPE_OFFLOAD_MATMUL_A`, `KILN_TAPE_OFFLOAD_MIN_BYTES` | GDN recurrence and matmul saved tensors remain device-resident. The unsupported host-offload experiment is unavailable until a typed training plan owns and qualifies its transfer and memory policy. |
+| CUDA model routes | `KILN_DISABLE_FUSED_PAGED_DECODE`, `KILN_DISABLE_RMSNORM_KERNEL`, `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_DISABLE_FUSED_L2_QK_NORM` | Every listed CUDA decision is a leaf of `accelerator.cuda_kernel_profile`; no hot path reads process environment. |
+| Projection residency and loading | `KILN_KEEP_PROJECTION_ORIGINALS`, `KILN_DROP_PROJECTION_ORIGINALS`, `KILN_VK_NATIVE_TRAINING` | CUDA and Metal drop redundant original projection tensors after cached transposes are ready; CPU, ROCm, and Vulkan retain originals. Every backend retains cached transposes. Vulkan training capability is backend-owned, not inferred from environment. |
+| State and precision | `KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER`, `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE`, `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE` | Qualified device-resident state scatter remains enabled with its replacement fallback. CUDA, ROCm, Metal, and Vulkan advertise native-with-constraints BF16/F16 recurrent state. |
+| Diagnostics and legacy routing | `KILN_CUDA_NATIVE_TRAINING` | Server training uses the authoritative shared tensor tape; the obsolete legacy CUDA-native selector remains unavailable. |
 
 `server.deterministic` remains the public deterministic control, with
 `KILN_SERVER_DETERMINISTIC` as its mechanically derived environment target and
@@ -431,101 +410,26 @@ environment for this policy; without an owning application calling the typed
 configuration hook, deterministic execution defaults to `false`.
 
 `accelerator.rocm_kernel_profile` replaces the model-layer ROCm controls
-`KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP`,
-`KILN_ENABLE_ROCM_GDN_STREAMING_FASTPATHS`,
-`KILN_DISABLE_ROCM_LONG_FLASH_ATTN`,
-`KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL`,
-`KILN_DISABLE_ROCM_TRAINING_MLP_CHUNKING`,
-`KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS`,
-`KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD`,
-`KILN_DISABLE_ROCM_SPLIT_Q_GATE_TRAINING`,
-`KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS`,
-`KILN_DISABLE_ROCM_SPLIT_Q_GATE_F32_OUTPUT`,
-`KILN_DISABLE_ROCM_GQA_SDPA_F32`,
-`KILN_ROCM_TAPE_FLASH_MATERIALIZED`, `KILN_ROCM_W8A16`,
-`KILN_ROCM_W8A8`, `KILN_ROCM_W8A8_SAMPLED_LM_HEAD`, and
-`KILN_DISABLE_ROCM_W8_SWIGLU`, plus the lower-level tensor spellings
-`KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN`,
-`KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS`,
-`KILN_ROCM_PAGED_ATTN_MAX_SPLITS`,
-`KILN_DISABLE_ROCM_GQA_PAGED_ATTN`,
-`KILN_DISABLE_ROCM_GQA_D128_PARALLEL`,
-`KILN_DISABLE_ROCM_GQA_D256_PARALLEL`,
-`KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY`,
-`KILN_ROCM_CONCAT_AXIS0_ROW_COPY`,
-`KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN`,
-`KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS`, and
-`KILN_ROCM_RMSNORM_ROW_TILE_ROWS`. None is an alias. The two default-off
-investigation switches for streaming GDN and materialized tape flash have no
-profile leaf because no qualified product uses them. The default-off axis-zero
-concat experiment and its dead vectorized kernel were also deleted rather than
-promoted.
+`KILN_ROCM_W8A16`, `KILN_ROCM_W8A8`, and `KILN_ROCM_W8A8_SAMPLED_LM_HEAD`.
+None is an alias. The two default-off investigation switches for streaming GDN
+and materialized tape flash have no profile leaf because no qualified product
+uses them. The default-off axis-zero concat experiment and its dead vectorized
+kernel were also deleted rather than promoted.
 
-The context-owned flash-attention subsection replaces or deletes all 50 former
-flash build/runtime spellings: `KILN_ROCM_ATTENTION_COOPERATIVE_YIELD`,
-`KILN_ROCM_ATTENTION_YIELD_MS`, `KILN_ROCM_DISABLE_CK_FMHA`,
-`KILN_ROCM_ENABLE_CK_FMHA`, `KILN_ROCM_ENABLE_CK_FMHA_FWD`,
-`KILN_ROCM_F32_MATMUL_INNER_TILE`,
-`KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA`,
-`KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA_MAX_SEQ`, `KILN_ROCM_FLASH_CK`,
-`KILN_ROCM_FLASH_COLLAPSED_GQA_BWD`,
-`KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA`,
-`KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK`,
-`KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K16`,
-`KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32`,
-`KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32_LOG2`,
-`KILN_ROCM_FLASH_MATMUL_BWD`, `KILN_ROCM_FLASH_NATIVE_BWD`,
-`KILN_ROCM_FLASH_NATIVE_BWD_FORCE`,
-`KILN_ROCM_FLASH_NATIVE_BWD_LONG_MIN_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD`,
-`KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR`,
-`KILN_ROCM_FLASH_NATIVE_FFI_SYNC`, `KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK`,
-`KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK_MIN_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_KEYSPLIT`,
-`KILN_ROCM_FLASH_NATIVE_KEYSPLIT_MIN_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_KEY_TILE`, `KILN_ROCM_FLASH_NATIVE_MAX_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_QUERY_TILE`,
-`KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL`,
-`KILN_ROCM_FLASH_NATIVE_SCALAR`, `KILN_ROCM_FLASH_NATIVE_SCALAR_FORCE`,
-`KILN_ROCM_FLASH_NATIVE_SINGLE_MAX_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_STREAMING`,
-`KILN_ROCM_FLASH_NATIVE_STREAMING_FORCE`,
-`KILN_ROCM_FLASH_NATIVE_STREAMING_MIN_SEQ`,
-`KILN_ROCM_FLASH_NATIVE_TILED`, `KILN_ROCM_FLASH_NATIVE_TILED_FORCE`,
-`KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK`,
-`KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK_MIN_SEQ`, `KILN_ROCM_FLASH_ONLINE`,
-`KILN_ROCM_FLASH_ONLINE_BWD`,
-`KILN_ROCM_FLASH_ONLINE_MATMUL_BATCH_GROUP`,
-`KILN_ROCM_FLASH_USE_WMMA_GQA_R64K16`,
-`KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32`,
-`KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32_LOG2`,
-`KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ`,
-`KILN_ROCM_FLASH_WMMA_GQA_R64K32_LOG2_MIN_SEQ`, and
-`KILN_ROCM_FLASH_WMMA_GQA_R64K32_MIN_SEQ`. None is accepted as an alias.
+The context-owned flash-attention subsection replaces the former flash
+build/runtime spellings; none is accepted as an alias.
 Positive/negative/force combinations collapse into the closed profile;
 cooperative sleeps and forced FFI synchronization are deleted; the unused
 key-split/WMMA branches and numerically incorrect CK backward route are removed
 rather than exposed as policy.
 
-The generic GPU training and fused-route comparison switches in the fixed
-policy table above are no longer migration inputs for any backend. Their ROCm
-decisions remain leaves of the complete typed policy.
-
-`accelerator.full_attention_score_budget_mib` replaces the undocumented
-`KILN_FULL_ATTN_SCORE_BUDGET_MB`, `KILN_ROCM_FLASH_SCORE_BUDGET_MB`,
-`KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS`,
-`KILN_ROCM_FULL_ATTN_SCORE_ELEMENT_CAP`,
-`KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS`,
-`KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB`,
-`KILN_ROCM_FLASH_ONLINE_QUERY_TILE`, and
-`KILN_ROCM_FLASH_ONLINE_KEY_TILE` controls. Those names are intentionally not
-aliases. Previously, model and ROCm flash paths parsed different permissive
-values during execution and recomputed score budgets from changing free-memory
+Previously, model and ROCm flash paths parsed different permissive values
+during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-Policy v16 fixes one bounded ceiling before execution; the ROCm allocator
-governor may still reject a planned operation when its exact working set is no
-longer admissible, but it cannot silently shrink or expand that plan.
+The immutable `accelerator.full_attention_score_budget_mib` ceiling therefore
+fixes one bounded value before execution; the ROCm allocator governor may
+still reject a planned operation when its exact working set is no longer
+admissible, but it cannot silently shrink or expand that plan.
 
 ### Vulkan device policy
 
@@ -976,9 +880,8 @@ for all six phases, and last/peak transient bytes. Every label set is closed;
 request, shape, allocation, and configured-byte values never become labels.
 
 Graph-stable paged metadata is a correctness invariant rather than a knob.
-The runtime no longer reads `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA`, graph
-cache/capture flags, matmul synchronization thresholds, or full-attention
-handoff flags inside decode. The three historical graph variables listed in
+The runtime no longer reads graph cache/capture flags, matmul synchronization
+thresholds, or full-attention handoff flags inside decode. The three historical graph variables listed in
 the table are parsed once by the typed startup loader. Setting both historical
 graph-mode aliases is rejected even when their booleans happen to agree; use
 the canonical enum to state one unambiguous lifecycle.
