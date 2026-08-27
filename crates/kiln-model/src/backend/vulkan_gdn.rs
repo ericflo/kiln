@@ -1106,6 +1106,115 @@ pub(super) fn gdn_recurrent_qk_norm_prefill_native_head_last(
     Ok(Some(out))
 }
 
+pub(super) fn gdn_gates(
+    backend: &VulkanBackend,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !supports_gdn_gates(backend) {
+        return Ok(None);
+    }
+    if !matches!(
+        a.dtype(),
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if a.dims().get(1).copied().unwrap_or_default() > 1
+        && matches!(a.device(), kiln_tensor::Device::Cpu)
+        && a.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
+    // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
+    // extraction + reconstruction run on the kt args.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    let nv = a_log.elem_count();
+    if dt_bias.elem_count() != nv {
+        return Ok(None);
+    }
+    let a_log_buf = backend.cached_f32_weight_buffer_kt(a_log)?;
+    let dt_bias_buf = backend.cached_f32_weight_buffer_kt(dt_bias)?;
+
+    // Output shape matches input shape [B, T, nv]
+    let out_shape = a.dims().to_vec();
+    let a_data = kt_tensor_to_f32_bytes_with_shape(a)?.0;
+    let b_data = kt_tensor_to_f32_bytes_with_shape(b)?.0;
+    let output_dtype = a.dtype();
+    let (beta_b, g_b) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
+        vk_device,
+        &a_data,
+        &b_data,
+        &a_log_buf,
+        &dt_bias_buf,
+        nv,
+        &out_shape,
+    )
+    .context("gdn_gates kernel failed")?;
+    let beta = kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
+    let g = kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
+    Ok(Some((beta, g)))
+}
+
+pub(super) fn gdn_gated_rms_norm(
+    backend: &VulkanBackend,
+    x: &kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    eps: f64,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !supports_gdn_gated_rms_norm(backend) {
+        return Ok(None);
+    }
+    if !matches!(
+        x.dtype(),
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if x.dims().get(1).copied().unwrap_or_default() > 1
+        && matches!(x.device(), kiln_tensor::Device::Cpu)
+        && x.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
+    // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
+    // extraction + reconstruction run on the kt args.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    let hidden = weight.elem_count();
+    if hidden == 0 || !x.elem_count().is_multiple_of(hidden) {
+        return Ok(None);
+    }
+    let weight_buf = backend.cached_f32_weight_buffer_kt(weight)?;
+
+    // Output shape matches x shape
+    let out_shape = x.dims().to_vec();
+    let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+    let z_data = kt_tensor_to_f32_bytes_with_shape(z)?.0;
+    let output_dtype = x.dtype();
+    let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
+        vk_device,
+        &x_data,
+        &z_data,
+        &weight_buf,
+        hidden,
+        eps as f32,
+        &out_shape,
+    )
+    .context("gdn_gated_rms_norm kernel failed")?;
+    let out =
+        kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?.to_device(x.device())?;
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,113 +1538,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-pub(super) fn gdn_gates(
-    backend: &VulkanBackend,
-    a: &kiln_tensor::Tensor,
-    b: &kiln_tensor::Tensor,
-    a_log: &kiln_tensor::Tensor,
-    dt_bias: &kiln_tensor::Tensor,
-) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-    // kt guards read directly off the kt args before the bridge.
-    if !supports_gdn_gates(backend) {
-        return Ok(None);
-    }
-    if !matches!(
-        a.dtype(),
-        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
-    ) {
-        return Ok(None);
-    }
-    if a.dims().get(1).copied().unwrap_or_default() > 1
-        && matches!(a.device(), kiln_tensor::Device::Cpu)
-        && a.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
-    {
-        return Ok(None);
-    }
-    // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
-    // extraction + reconstruction run on the kt args.
-    let vk_device = backend
-        .vulkan_device()
-        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-    let nv = a_log.elem_count();
-    if dt_bias.elem_count() != nv {
-        return Ok(None);
-    }
-    let a_log_buf = backend.cached_f32_weight_buffer_kt(a_log)?;
-    let dt_bias_buf = backend.cached_f32_weight_buffer_kt(dt_bias)?;
-
-    // Output shape matches input shape [B, T, nv]
-    let out_shape = a.dims().to_vec();
-    let a_data = kt_tensor_to_f32_bytes_with_shape(a)?.0;
-    let b_data = kt_tensor_to_f32_bytes_with_shape(b)?.0;
-    let output_dtype = a.dtype();
-    let (beta_b, g_b) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
-        vk_device,
-        &a_data,
-        &b_data,
-        &a_log_buf,
-        &dt_bias_buf,
-        nv,
-        &out_shape,
-    )
-    .context("gdn_gates kernel failed")?;
-    let beta = kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
-    let g = kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
-    Ok(Some((beta, g)))
-}
-
-pub(super) fn gdn_gated_rms_norm(
-    backend: &VulkanBackend,
-    x: &kiln_tensor::Tensor,
-    z: &kiln_tensor::Tensor,
-    weight: &kiln_tensor::Tensor,
-    eps: f64,
-) -> Result<Option<kiln_tensor::Tensor>> {
-    // kt guards read directly off the kt args before the bridge.
-    if !supports_gdn_gated_rms_norm(backend) {
-        return Ok(None);
-    }
-    if !matches!(
-        x.dtype(),
-        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
-    ) {
-        return Ok(None);
-    }
-    if x.dims().get(1).copied().unwrap_or_default() > 1
-        && matches!(x.device(), kiln_tensor::Device::Cpu)
-        && x.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
-    {
-        return Ok(None);
-    }
-    // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
-    // extraction + reconstruction run on the kt args.
-    let vk_device = backend
-        .vulkan_device()
-        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-    let hidden = weight.elem_count();
-    if hidden == 0 || !x.elem_count().is_multiple_of(hidden) {
-        return Ok(None);
-    }
-    let weight_buf = backend.cached_f32_weight_buffer_kt(weight)?;
-
-    // Output shape matches x shape
-    let out_shape = x.dims().to_vec();
-    let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-    let z_data = kt_tensor_to_f32_bytes_with_shape(z)?.0;
-    let output_dtype = x.dtype();
-    let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
-        vk_device,
-        &x_data,
-        &z_data,
-        &weight_buf,
-        hidden,
-        eps as f32,
-        &out_shape,
-    )
-    .context("gdn_gated_rms_norm kernel failed")?;
-    let out =
-        kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?.to_device(x.device())?;
-    Ok(Some(out))
 }
