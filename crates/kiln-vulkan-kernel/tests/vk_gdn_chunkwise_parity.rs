@@ -43,7 +43,7 @@ fn assert_close(label: &str, got: &[f32], want: &[f32], tol: f32) {
 }
 
 /// Per-token reference, mirroring `gdn_single_token_recurrence` in
-/// candle. Mutates `state` in place.
+/// kiln-model. Mutates `state` in place.
 ///
 /// q, k: [B, nv, T, dk]   — batch flat indexing: ((b*nv+h)*T+t)*dk+i
 /// v: [B, nv, T, dv]
