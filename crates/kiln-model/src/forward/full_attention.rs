@@ -1073,23 +1073,23 @@ pub fn gqa_attention_core_prefill(
         // needed) — q/k/v + the attn output stay kt, the downstream reshape
         // chains kt-native to o_proj.
         #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
-        if crate::tape_forward::tape_scope_active() {
-            if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_kt(
+        if crate::tape_forward::tape_scope_active()
+            && let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_kt(
                 &q,
                 &k,
                 &v,
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            )? {
-                let (rb, rs, rh, rd) = attn_output.dims4()?;
-                let flat = rh * rd;
-                return require_active_tape_output(
-                    crate::tape_forward::try_tape_reshape_kt(&attn_output, vec![rb, rs, flat])
-                        .context("gqa flash output try_tape_reshape_kt")?,
-                    "GQA flash-attention output reshape",
-                );
-            }
+            )?
+        {
+            let (rb, rs, rh, rd) = attn_output.dims4()?;
+            let flat = rh * rd;
+            return require_active_tape_output(
+                crate::tape_forward::try_tape_reshape_kt(&attn_output, vec![rb, rs, flat])
+                    .context("gqa flash output try_tape_reshape_kt")?,
+                "GQA flash-attention output reshape",
+            );
         }
         // (#1082) Deleted the dead candle-CustomOp `cuda_flash_attention_training_bf16`
         // branch: the kt tape's `try_tape_flash_attn_kt` above is the sole
@@ -1862,25 +1862,25 @@ pub fn gqa_attention_pre_o(
         // (e.g. Qwen3.5-4B default) chains straight through to o_proj.
         // #1082 seam flip: kt-native flash-attn + reshape recorders — no kt->candle->kt.
         #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
-        if crate::tape_forward::tape_scope_active() {
-            if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_kt(
+        if crate::tape_forward::tape_scope_active()
+            && let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_kt(
                 &q,
                 &k,
                 &v,
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            )? {
-                let (rb, rs, rh, rd) = attn_output.dims4()?;
-                let flat = rh * rd;
-                let attn_kt = require_active_tape_output(
-                    crate::tape_forward::try_tape_reshape_kt(&attn_output, vec![rb, rs, flat])
-                        .context("full-attention flash output try_tape_reshape_kt")?,
-                    "full-attention flash output reshape",
-                )?;
-                let attn_kt = attention_output_gate_decode_if(false, attn_kt, gate.as_ref())?;
-                return Ok(attn_kt);
-            }
+            )?
+        {
+            let (rb, rs, rh, rd) = attn_output.dims4()?;
+            let flat = rh * rd;
+            let attn_kt = require_active_tape_output(
+                crate::tape_forward::try_tape_reshape_kt(&attn_output, vec![rb, rs, flat])
+                    .context("full-attention flash output try_tape_reshape_kt")?,
+                "full-attention flash output reshape",
+            )?;
+            let attn_kt = attention_output_gate_decode_if(false, attn_kt, gate.as_ref())?;
+            return Ok(attn_kt);
         }
         // (#1082) Deleted the dead candle-CustomOp `cuda_flash_attention_training_bf16`
         // branch: `try_tape_flash_attn_kt` above is the sole flash-attn autograd
@@ -2091,13 +2091,12 @@ pub fn gqa_attention_output_projection(
         && !attn_output.track_op()
         && matches!(attn_output.device(), Device::Rocm(_))
         && let Some(o_w8) = attn_weights.o_proj_w8.as_ref()
+        && let Ok((_, seq_len, hidden)) = attn_output.dims3()
+        && seq_len == 1
+        && hidden == o_w8.k
     {
-        if let Ok((_, seq_len, hidden)) = attn_output.dims3() {
-            if seq_len == 1 && hidden == o_w8.k {
-                return crate::rocm_w8_proj::matmul_bf16(attn_output, o_w8)
-                    .context("rocm w8 full-attn output projection");
-            }
-        }
+        return crate::rocm_w8_proj::matmul_bf16(attn_output, o_w8)
+            .context("rocm w8 full-attn output projection");
     }
     linear_with_lora_t_backend_decode_if(
         Some(backend),

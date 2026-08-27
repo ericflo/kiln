@@ -471,10 +471,9 @@ pub(super) fn lm_head_argmax_with_backend(
         && matches!(logits_1d.device(), Device::Cuda(_))
         && matches!(logits_1d.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && logits_1d.is_contiguous()
+        && let Some(token) = try_kt_argmax_1d(&logits_1d)?
     {
-        if let Some(token) = try_kt_argmax_1d(&logits_1d)? {
-            return Ok(token);
-        }
+        return Ok(token);
     }
     // #1082: kt `argmax` returns I64 indices (candle returned U32). Read i64 and
     // narrow to the u32 token id. (The CUDA fast paths above return early; this
@@ -806,36 +805,35 @@ pub(crate) fn lm_head_sample_backend_decode_profiled_if(
             && SP::min_p_is_disabled(params.min_p)
             && params.temperature.is_finite()
             && params.temperature > 0.0
+            && let Some(lm_head_w8) = weights.lm_head_w8.as_ref()
         {
-            if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
-                let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-                let dims = normed.dims();
-                let lead: usize = dims[..dims.len().saturating_sub(1)].iter().product();
-                if lead == 1
-                    && normed.dtype() == DType::BF16
-                    && !normed.track_op()
-                    && matches!(normed.device(), Device::Rocm(_))
-                {
-                    let normed = normed
-                        .contiguous()
-                        .context("rocm w8 sampled lm_head normed contiguous")?;
-                    let profiled = crate::rocm_w8_proj::gumbel_sample_bf16_profiled(
-                        &normed,
-                        lm_head_w8,
-                        &history_indices,
-                        &history_counts,
-                        params.repetition_penalty,
-                        params.presence_penalty,
-                        params.frequency_penalty,
-                        params.temperature,
-                        seed,
-                    )
-                    .context("rocm w8 sampled lm_head gumbel sample")?;
-                    return Ok(Some(ProfiledBackendSample {
-                        value: profiled.value,
-                        readback_duration: Some(profiled.readback_duration),
-                    }));
-                }
+            let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+            let dims = normed.dims();
+            let lead: usize = dims[..dims.len().saturating_sub(1)].iter().product();
+            if lead == 1
+                && normed.dtype() == DType::BF16
+                && !normed.track_op()
+                && matches!(normed.device(), Device::Rocm(_))
+            {
+                let normed = normed
+                    .contiguous()
+                    .context("rocm w8 sampled lm_head normed contiguous")?;
+                let profiled = crate::rocm_w8_proj::gumbel_sample_bf16_profiled(
+                    &normed,
+                    lm_head_w8,
+                    &history_indices,
+                    &history_counts,
+                    params.repetition_penalty,
+                    params.presence_penalty,
+                    params.frequency_penalty,
+                    params.temperature,
+                    seed,
+                )
+                .context("rocm w8 sampled lm_head gumbel sample")?;
+                return Ok(Some(ProfiledBackendSample {
+                    value: profiled.value,
+                    readback_duration: Some(profiled.readback_duration),
+                }));
             }
         }
     }

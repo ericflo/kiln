@@ -369,28 +369,25 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
         let cuda_policy = crate::cuda_policy::current_cuda_kernel_policy();
-        if cuda_policy.fused_rmsnorm && cuda_policy.rmsnorm_backward {
-            if !x.track_op() && !weight.track_op() {
-                if let (Some(x_kt), Some(w_kt)) =
-                    (try_borrow_kt_cuda(x), try_borrow_kt_cuda(weight))
-                {
-                    if kiln_rmsnorm_kernel::supports_rmsnorm_kt(&x_kt, &w_kt) {
-                        // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-                        // the same `kiln_fused_rmsnorm` FFI symbol. Result is kt
-                        // — return it directly (no candle round-trip).
-                        let out_kt =
-                            kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
-                                .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
-                        return Ok(out_kt);
-                    }
-                }
-            }
-            // #1082 DoD-100 (step 3a): the candle `fused_rmsnorm_via_kt_forward_op`
-            // fallback arm was deleted here. It was reached only as a last resort
-            // With no tape scope, envelope misses fall through to the portable
-            // forward below. Active training returned through a recorder before
-            // consulting these inference kill switches.
+        if cuda_policy.fused_rmsnorm
+            && cuda_policy.rmsnorm_backward
+            && !x.track_op()
+            && !weight.track_op()
+            && let (Some(x_kt), Some(w_kt)) = (try_borrow_kt_cuda(x), try_borrow_kt_cuda(weight))
+            && kiln_rmsnorm_kernel::supports_rmsnorm_kt(&x_kt, &w_kt)
+        {
+            // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
+            // the same `kiln_fused_rmsnorm` FFI symbol. Result is kt
+            // — return it directly (no candle round-trip).
+            let out_kt = kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
+                .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
+            return Ok(out_kt);
         }
+        // #1082 DoD-100 (step 3a): the candle `fused_rmsnorm_via_kt_forward_op`
+        // fallback arm was deleted here. It was reached only as a last resort
+        // With no tape scope, envelope misses fall through to the portable
+        // forward below. Active training returned through a recorder before
+        // consulting these inference kill switches.
     }
     #[cfg(feature = "metal")]
     {
@@ -865,26 +862,25 @@ pub fn rotary_embedding_from_tensor(
 
     #[cfg(feature = "cuda")]
     {
-        if !crate::tape_forward::tape_scope_active() && !cuda_fused_rotary_qk_disabled() {
-            if let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
+        if !crate::tape_forward::tape_scope_active()
+            && !cuda_fused_rotary_qk_disabled()
+            && let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
                 try_borrow_kt_cuda(q),
                 try_borrow_kt_cuda(k),
                 try_borrow_kt_cuda(&cos),
                 try_borrow_kt_cuda(&sin),
-            ) {
-                if kiln_rmsnorm_kernel::supports_rotary_qk_kt(
-                    &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
-                ) {
-                    // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in the
-                    // same `kiln_fused_rotary_qk` FFI symbol.
-                    // #1082 forward-flip: kt-native — return kt directly.
-                    let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
-                        &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
-                    )
+            )
+            && kiln_rmsnorm_kernel::supports_rotary_qk_kt(
+                &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+            )
+        {
+            // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in the
+            // same `kiln_fused_rotary_qk` FFI symbol.
+            // #1082 forward-flip: kt-native — return kt directly.
+            let (rq_kt, rk_kt) =
+                kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk: {e}"))?;
-                    return Ok((rq_kt, rk_kt));
-                }
-            }
+            return Ok((rq_kt, rk_kt));
         }
     }
 
@@ -948,27 +944,26 @@ pub(super) fn rotary_embedding_from_tables(
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     {
-        if !crate::tape_forward::tape_scope_active() && !cuda_fused_rotary_qk_disabled() {
-            if let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
+        if !crate::tape_forward::tape_scope_active()
+            && !cuda_fused_rotary_qk_disabled()
+            && let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
                 try_borrow_kt_cuda(q),
                 try_borrow_kt_cuda(k),
                 try_borrow_kt_cuda(cos),
                 try_borrow_kt_cuda(sin),
-            ) {
-                if kiln_rmsnorm_kernel::supports_rotary_qk_kt(
-                    &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
-                ) {
-                    // Phase 7 (#1082): kt-only. Same FFI symbol as the
-                    // kt composite path.
-                    // #1082 forward-flip: kt-native — return the kt outputs
-                    // directly (no candle round-trip).
-                    let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
-                        &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
-                    )
+            )
+            && kiln_rmsnorm_kernel::supports_rotary_qk_kt(
+                &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+            )
+        {
+            // Phase 7 (#1082): kt-only. Same FFI symbol as the
+            // kt composite path.
+            // #1082 forward-flip: kt-native — return the kt outputs
+            // directly (no candle round-trip).
+            let (rq_kt, rk_kt) =
+                kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk2: {e}"))?;
-                    return Ok((rq_kt, rk_kt));
-                }
-            }
+            return Ok((rq_kt, rk_kt));
         }
     }
 

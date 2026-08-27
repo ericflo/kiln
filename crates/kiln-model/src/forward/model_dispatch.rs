@@ -2989,17 +2989,16 @@ pub(crate) fn lm_head_argmax_from_hidden_eager(
     }
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
     #[cfg(feature = "rocm")]
-    if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
-        if normed.dtype() == DType::BF16
-            && !normed.track_op()
-            && matches!(normed.device(), Device::Rocm(_))
-        {
-            let normed = normed
-                .contiguous()
-                .context("rocm w8 lm_head argmax normed contiguous")?;
-            return crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
-                .context("rocm w8 lm_head argmax");
-        }
+    if let Some(lm_head_w8) = weights.lm_head_w8.as_ref()
+        && normed.dtype() == DType::BF16
+        && !normed.track_op()
+        && matches!(normed.device(), Device::Rocm(_))
+    {
+        let normed = normed
+            .contiguous()
+            .context("rocm w8 lm_head argmax normed contiguous")?;
+        return crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
+            .context("rocm w8 lm_head argmax");
     }
     lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
@@ -4253,24 +4252,23 @@ pub(super) fn model_forward_paged_inner_bounded(
                 }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 #[cfg(feature = "rocm")]
-                if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
-                    if normed.dtype() == DType::BF16
-                        && !normed.track_op()
-                        && matches!(normed.device(), Device::Rocm(_))
-                    {
-                        let normed = normed
-                            .contiguous()
-                            .context("rocm w8 lm_head argmax normed contiguous")?;
-                        let token = crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
-                            .context("rocm w8 lm_head argmax")?;
-                        return Ok(PagedForwardProgress {
-                            logits: None,
-                            hidden: None,
-                            token: Some(token),
-                            state: None,
-                            layers_processed,
-                        });
-                    }
+                if let Some(lm_head_w8) = weights.lm_head_w8.as_ref()
+                    && normed.dtype() == DType::BF16
+                    && !normed.track_op()
+                    && matches!(normed.device(), Device::Rocm(_))
+                {
+                    let normed = normed
+                        .contiguous()
+                        .context("rocm w8 lm_head argmax normed contiguous")?;
+                    let token = crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
+                        .context("rocm w8 lm_head argmax")?;
+                    return Ok(PagedForwardProgress {
+                        logits: None,
+                        hidden: None,
+                        token: Some(token),
+                        state: None,
+                        layers_processed,
+                    });
                 }
                 lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
             };

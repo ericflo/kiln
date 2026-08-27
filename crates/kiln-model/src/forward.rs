@@ -140,12 +140,10 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
             && x.is_contiguous()
             && !x.track_op()
             && x.rank() > 0
-        {
-            if let Some(out) =
+            && let Some(out) =
                 try_kt_sigmoid_composite(x).context("cuda_sigmoid try_kt_sigmoid_composite")?
-            {
-                return Ok(out);
-            }
+        {
+            return Ok(out);
         }
     }
     let neg_x = {
@@ -837,12 +835,10 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
             && x.is_contiguous()
             && !x.track_op()
             && x.rank() > 0
-        {
-            if let Some(out) =
+            && let Some(out) =
                 try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")?
-            {
-                return Ok(out);
-            }
+        {
+            return Ok(out);
         }
     }
     let sig = cuda_sigmoid(x)?;
@@ -1352,20 +1348,20 @@ fn attention_output_gate_decode_if(
         // autograd branch: the kt tape records the sigmoid/mul gate via the
         // plain `cuda_sigmoid` + mul composite (kt ops record onto the active
         // tape), so the candle CustomOp island is dead.
-        if !cuda_fused_attn_sigmoid_mul_disabled() && !attn_output.track_op() && !gate.track_op() {
-            if let (Some(x_kt), Some(g_kt)) =
+        if !cuda_fused_attn_sigmoid_mul_disabled()
+            && !attn_output.track_op()
+            && !gate.track_op()
+            && let (Some(x_kt), Some(g_kt)) =
                 (try_borrow_kt_cuda(&attn_output), try_borrow_kt_cuda(gate))
-            {
-                if kiln_rmsnorm_kernel::supports_sigmoid_mul_kt(&x_kt, &g_kt) {
-                    // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-                    // the same `kiln_fused_sigmoid_mul` FFI symbol. Result is
-                    // kt — return it directly (no candle round-trip).
-                    kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
-                    let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
-                        .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
-                    return Ok(out_kt);
-                }
-            }
+            && kiln_rmsnorm_kernel::supports_sigmoid_mul_kt(&x_kt, &g_kt)
+        {
+            // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
+            // the same `kiln_fused_sigmoid_mul` FFI symbol. Result is
+            // kt — return it directly (no candle round-trip).
+            kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
+            let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
+                .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
+            return Ok(out_kt);
         }
     }
 
@@ -1514,10 +1510,9 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         // forward-only ops (rms_norm, sigmoid, etc.). Inference / tape paths
         // (track_op == false) keep the kt-API fast path unchanged.
         && !x.track_op()
+        && let Some(out) = try_kt_softmax_last_dim(x)?
     {
-        if let Some(out) = try_kt_softmax_last_dim(x)? {
-            return Ok(out);
-        }
+        return Ok(out);
     }
     // ROCm: route through the native `rocm_softmax_last_axis` kernel (on-device,
     // device_ptr-based) instead of the `max_keepdim`-composite below. The
@@ -1532,10 +1527,9 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
         && !x.track_op()
+        && let Ok(out) = kiln_tensor::rocm_softmax_last_axis(x)
     {
-        if let Ok(out) = kiln_tensor::rocm_softmax_last_axis(x) {
-            return Ok(out);
-        }
+        return Ok(out);
     }
     // Phase 7 (#1082): when stable KT routes are enabled and `x` is a contiguous CUDA
     // tensor of {F32, BF16, F16}, route the

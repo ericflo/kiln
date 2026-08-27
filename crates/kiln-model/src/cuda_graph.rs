@@ -878,14 +878,14 @@ impl CudaGraphRunner {
             // stream, but the captured graph launches on its non-default capture
             // stream. Sync the default stream so the refreshed token/position/
             // metadata are visible before replay (else stale reads → garbage).
-            if let Some(idx) = captured.token_buffer.device().index() {
-                if let Err(e) = kiln_tensor::cuda_synchronize_default_stream_for(
+            if let Some(idx) = captured.token_buffer.device().index()
+                && let Err(e) = kiln_tensor::cuda_synchronize_default_stream_for(
                     idx,
                     kiln_tensor::CudaSyncReason::GraphBoundary,
-                ) {
-                    tracing::warn!(batch_size, error = %e, "batched: sync before graph launch failed, falling back to eager");
-                    return Ok(None);
-                }
+                )
+            {
+                tracing::warn!(batch_size, error = %e, "batched: sync before graph launch failed, falling back to eager");
+                return Ok(None);
             }
             // Step (4): launch. The timer spans only the native replay launch
             // and its existing completion boundary; eager LM-head/sampling work

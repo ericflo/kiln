@@ -1989,13 +1989,12 @@ impl LinearBackend for CudaBackend {
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
+                && let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)?
             {
-                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                    out_shape.push(out_n);
-                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                    return Ok(Some(kt_out2d.reshape(out_shape)?));
-                }
+                let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                out_shape.push(out_n);
+                CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(kt_out2d.reshape(out_shape)?));
             }
 
             let out2d = x2d.matmul(weight_t)?;
@@ -2024,13 +2023,13 @@ impl LinearBackend for CudaBackend {
                     .contiguous()
                     .context("linear_prefill_apply non-contig x: contiguous failed")?;
                 let x2d = x_c.reshape((lead, k))?;
-                if x2d.is_contiguous() {
-                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                        let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                        out_shape.push(out_n);
-                        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                        return Ok(Some(kt_out2d.reshape(out_shape)?));
-                    }
+                if x2d.is_contiguous()
+                    && let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)?
+                {
+                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                    out_shape.push(out_n);
+                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Some(kt_out2d.reshape(out_shape)?));
                 }
             }
             x.broadcast_matmul(weight_t)?

@@ -531,12 +531,11 @@ pub(super) fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Ten
                 && lhs2d.dtype() == rhs.dtype()
                 && lhs2d.is_contiguous()
                 && rhs.is_contiguous()
+                && let Some(out2d) = try_kt_matmul(&lhs2d, rhs)?
             {
-                if let Some(out2d) = try_kt_matmul(&lhs2d, rhs)? {
-                    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
-                    out_shape.push(out_n);
-                    return Ok(out2d.reshape(out_shape)?);
-                }
+                let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+                out_shape.push(out_n);
+                return Ok(out2d.reshape(out_shape)?);
             }
 
             let out2d = lhs2d.matmul(rhs)?;

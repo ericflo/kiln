@@ -2009,13 +2009,12 @@ impl LinearBackend for RocmBackend {
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
+                && let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)?
             {
-                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                    out_shape.push(out_n);
-                    ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                    return Ok(Some(kt_out2d.reshape(out_shape)?));
-                }
+                let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                out_shape.push(out_n);
+                ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(kt_out2d.reshape(out_shape)?));
             }
 
             let out2d = x2d.matmul(weight_t)?;
@@ -2044,13 +2043,13 @@ impl LinearBackend for RocmBackend {
                     .contiguous()
                     .context("linear_prefill_apply non-contig x: contiguous failed")?;
                 let x2d = x_c.reshape((lead, k))?;
-                if x2d.is_contiguous() {
-                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                        let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                        out_shape.push(out_n);
-                        ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                        return Ok(Some(kt_out2d.reshape(out_shape)?));
-                    }
+                if x2d.is_contiguous()
+                    && let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)?
+                {
+                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                    out_shape.push(out_n);
+                    ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Some(kt_out2d.reshape(out_shape)?));
                 }
             }
             x.broadcast_matmul(weight_t)?
@@ -2123,15 +2122,16 @@ impl LinearBackend for RocmBackend {
             return Ok(None);
         }
 
-        if let Some(qkv_w8) = qkv_w8 {
-            if hidden == qkv_w8.k && qkv_w8.n == qkv_dim {
-                let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
-                    .context("rocm w8 full-attn Q/K/V projection")?;
-                let q_raw = qkv.narrow(2, 0, q_dim)?;
-                let k_raw = qkv.narrow(2, q_dim, k_dim)?;
-                let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
-                return Ok(Some((q_raw, k_raw, v)));
-            }
+        if let Some(qkv_w8) = qkv_w8
+            && hidden == qkv_w8.k
+            && qkv_w8.n == qkv_dim
+        {
+            let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
+                .context("rocm w8 full-attn Q/K/V projection")?;
+            let q_raw = qkv.narrow(2, 0, q_dim)?;
+            let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+            return Ok(Some((q_raw, k_raw, v)));
         }
 
         let Some(qkv_weight_t) = qkv_weight_t else {

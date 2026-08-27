@@ -14,12 +14,12 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12236,
+      "max_lines": 12233,
       "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The line growth is the cleanup-campaign `#[allow]`-with-evidence annotations: 31 lines from rounds 67\u201371 (2026-08-26/27) plus 4 lines from round 76 (the vk_batch_sampling_contexts type_complexity allow + its 3-line rationale, matching its non-vulkan sibling) plus 14 lines from round 104b (three verified-required cfg_attr keeps with justifications, net of one redundant allow deleted). This exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
-      "max_lines": 10862,
+      "max_lines": 10854,
       "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The line growth is the cleanup-campaign `#[allow]`-with-evidence annotations: the 29-line delta from rounds 67\u201371 (2026-08-26/27) plus the 59-line round 104a delta (29 cfg_attr(not(rocm)) allow justifications). This ceiling sync repairs the round 104a missed sync and follows the 2da875018 precedent."
     },
     {

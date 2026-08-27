@@ -35,10 +35,9 @@ pub(super) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     if crate::kt_api_policy::stable_routes_enabled()
         && matches!(x_f32.device(), Device::Cuda(_))
         && x_f32.is_contiguous()
+        && let Some(out) = try_kt_l2_normalize(&x_f32, 1e-6)?
     {
-        if let Some(out) = try_kt_l2_normalize(&x_f32, 1e-6)? {
-            return Ok(out);
-        }
+        return Ok(out);
     }
     // Phase 7 (#1082): when stable KT routes are enabled and the F32 input is a
     // contiguous CUDA tensor, route the `sqr().sum_keepdim(-1)`
@@ -231,22 +230,20 @@ pub(super) fn gdn_qk_norm_forward(
         if crate::cuda_policy::current_cuda_kernel_policy().fused_l2_qk_norm
             && fused_forward_only_allowed
             && input_dtype == DType::BF16
+            && let (Some(q_kt), Some(k_kt)) = (try_borrow_kt_cuda(q), try_borrow_kt_cuda(k))
+            && kiln_rmsnorm_kernel::supports_l2_qk_norm_kt(&q_kt, &k_kt)
         {
-            if let (Some(q_kt), Some(k_kt)) = (try_borrow_kt_cuda(q), try_borrow_kt_cuda(k)) {
-                if kiln_rmsnorm_kernel::supports_l2_qk_norm_kt(&q_kt, &k_kt) {
-                    // Phase 7 (#1082): kt-only. Same closeout pattern as
-                    // conv1d (2ebcfb08), marlin (0841c266), GDN (86c7f134),
-                    // flash-attn (9ac211e9). Bit-exact: bottoms out in the
-                    // same `kiln_fused_l2_qk_norm` FFI symbol.
-                    // #1082: keep the fused L2-QK-norm output as kt — this fn
-                    // returns kt and the fallback below is kt, so the candle
-                    // copy-out is gone.
-                    let (q_out, k_out) =
-                        kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
-                            .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
-                    return Ok((q_out, k_out));
-                }
-            }
+            // Phase 7 (#1082): kt-only. Same closeout pattern as
+            // conv1d (2ebcfb08), marlin (0841c266), GDN (86c7f134),
+            // flash-attn (9ac211e9). Bit-exact: bottoms out in the
+            // same `kiln_fused_l2_qk_norm` FFI symbol.
+            // #1082: keep the fused L2-QK-norm output as kt — this fn
+            // returns kt and the fallback below is kt, so the candle
+            // copy-out is gone.
+            let (q_out, k_out) =
+                kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
+                    .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
+            return Ok((q_out, k_out));
         }
     }
 

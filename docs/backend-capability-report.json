@@ -20,10 +20,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 2168,
+          "line": 2167,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 2198,
+          "paired_method_line": 2197,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -35,10 +35,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 2164,
+          "line": 2163,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 2172,
+          "paired_method_line": 2171,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },

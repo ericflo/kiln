@@ -331,20 +331,18 @@ impl Drop for ModelRunner {
                 self.weights.embed_tokens.device(),
                 kiln_tensor::Device::Rocm(_)
             )
-        {
-            if let Some(storage) = self
+            && let Some(storage) = self
                 .weights
                 .embed_tokens
                 .storage()
                 .as_any()
                 .downcast_ref::<kiln_tensor::RocmStorage>()
-            {
-                // Drop runs before struct fields. Bridge the process-wide
-                // backend quarantine into the low-level device quarantine so
-                // weights, graph state, workspaces, and streams retain unknown
-                // in-flight resources instead of freeing them during shutdown.
-                storage.context().quarantine_execution();
-            }
+        {
+            // Drop runs before struct fields. Bridge the process-wide
+            // backend quarantine into the low-level device quarantine so
+            // weights, graph state, workspaces, and streams retain unknown
+            // in-flight resources instead of freeing them during shutdown.
+            storage.context().quarantine_execution();
         }
     }
 }
@@ -2416,16 +2414,15 @@ impl ModelRunner {
     pub fn ensure_backend_healthy(&self) -> Result<()> {
         self.backend_health.ensure_healthy()?;
         #[cfg(feature = "rocm")]
-        if let kiln_tensor::Device::Rocm(device_index) = self.weights.embed_tokens.device() {
-            if kiln_tensor::rocm_cleanup_quarantined(device_index)
+        if let kiln_tensor::Device::Rocm(device_index) = self.weights.embed_tokens.device()
+            && kiln_tensor::rocm_cleanup_quarantined(device_index)
                 .context("query ROCm cleanup quarantine")?
-            {
-                let reason =
-                    "ROCm synchronization recovery failed; execution and cleanup are quarantined"
-                        .to_string();
-                self.backend_health.quarantine(reason.clone());
-                anyhow::bail!(reason);
-            }
+        {
+            let reason =
+                "ROCm synchronization recovery failed; execution and cleanup are quarantined"
+                    .to_string();
+            self.backend_health.quarantine(reason.clone());
+            anyhow::bail!(reason);
         }
         Ok(())
     }

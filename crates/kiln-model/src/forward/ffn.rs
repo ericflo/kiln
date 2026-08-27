@@ -88,22 +88,16 @@ pub fn swiglu_ffn_gated_hidden(
             && !gpu_fused_mlp_silu_mul_disabled(gate.device())
             && !gate.track_op()
             && !up.track_op()
-        {
-            if let (Some(gate_kt), Some(up_kt)) =
+            && let (Some(gate_kt), Some(up_kt)) =
                 (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
-            {
-                if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
-                    // Phase 7 (#1082): kt-only. Same FFI symbol as the
-                    // kt composite path. Result is kt — return it directly.
-                    let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
-                        .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
-                    synchronize_tensor_ready_for_model_handoff(
-                        "mlp gated-hidden fused silu*mul",
-                        &out_kt,
-                    )?;
-                    return Ok(out_kt);
-                }
-            }
+            && kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt)
+        {
+            // Phase 7 (#1082): kt-only. Same FFI symbol as the
+            // kt composite path. Result is kt — return it directly.
+            let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
+            synchronize_tensor_ready_for_model_handoff("mlp gated-hidden fused silu*mul", &out_kt)?;
+            return Ok(out_kt);
         }
     }
     let gate = cuda_silu(&gate)?;
@@ -577,48 +571,41 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
         && !x.track_op()
         && let (Some(gate_up_w8), Some(down_w8)) =
             (mlp.gate_up_proj_w8.as_ref(), mlp.down_proj_w8.as_ref())
+        && gate_up_w8.n % 2 == 0
     {
-        if gate_up_w8.n % 2 == 0 {
-            let g_dim = gate_up_w8.n / 2;
-            if crate::rocm_w8_proj::swiglu_bf16_enabled(gate_up_w8) {
-                if let Some(hidden) = {
-                    kiln_nvtx::range!(c"kiln/mlp/gate_up_swiglu_w8");
-                    crate::rocm_w8_proj::swiglu_bf16(x, gate_up_w8)?
-                } {
-                    synchronize_tensor_ready_for_model_handoff(
-                        "mlp gate_up_swiglu_w8 hidden",
-                        &hidden,
-                    )?;
-                    let out = {
-                        kiln_nvtx::range!(c"kiln/mlp/down_w8");
-                        crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
-                    };
-                    return Ok(out);
-                }
+        let g_dim = gate_up_w8.n / 2;
+        if crate::rocm_w8_proj::swiglu_bf16_enabled(gate_up_w8)
+            && let Some(hidden) = {
+                kiln_nvtx::range!(c"kiln/mlp/gate_up_swiglu_w8");
+                crate::rocm_w8_proj::swiglu_bf16(x, gate_up_w8)?
             }
-            let gate_up = {
-                kiln_nvtx::range!(c"kiln/mlp/gate_up_w8");
-                crate::rocm_w8_proj::matmul_bf16(x, gate_up_w8)?
+        {
+            synchronize_tensor_ready_for_model_handoff("mlp gate_up_swiglu_w8 hidden", &hidden)?;
+            let out = {
+                kiln_nvtx::range!(c"kiln/mlp/down_w8");
+                crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
             };
-            synchronize_tensor_ready_for_model_handoff("mlp gate_up_w8", &gate_up)?;
-            if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up)
-                .filter(|t| kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim))
-            {
-                let hidden = {
-                    kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
-                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(&gate_up_kt, g_dim)
-                        .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}"))?
-                };
-                synchronize_tensor_ready_for_model_handoff(
-                    "mlp gate_silu_hidden_mul_packed",
-                    &hidden,
-                )?;
-                let out = {
-                    kiln_nvtx::range!(c"kiln/mlp/down_w8");
-                    crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
-                };
-                return Ok(out);
-            }
+            return Ok(out);
+        }
+        let gate_up = {
+            kiln_nvtx::range!(c"kiln/mlp/gate_up_w8");
+            crate::rocm_w8_proj::matmul_bf16(x, gate_up_w8)?
+        };
+        synchronize_tensor_ready_for_model_handoff("mlp gate_up_w8", &gate_up)?;
+        if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up)
+            .filter(|t| kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim))
+        {
+            let hidden = {
+                kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
+                kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(&gate_up_kt, g_dim)
+                    .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}"))?
+            };
+            synchronize_tensor_ready_for_model_handoff("mlp gate_silu_hidden_mul_packed", &hidden)?;
+            let out = {
+                kiln_nvtx::range!(c"kiln/mlp/down_w8");
+                crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
+            };
+            return Ok(out);
         }
     }
     if !tape_scope_active
@@ -696,76 +683,64 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
             && !has_mlp_gate_up_lora
             && !has_marlin
             && !gpu_fused_mlp_gate_up_prefill_disabled(x.device())
+            && let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref()
+            && x.dtype() == DType::BF16
+            && !x.track_op()
+            && cuda_or_rocm_device(x.device())
+            && gate_up_proj_t.dtype() == DType::BF16
+            && !gate_up_proj_t.track_op()
+            && cuda_or_rocm_device(gate_up_proj_t.device())
+            && gate_up_proj_t.is_contiguous()
+            && let (Ok(g_dim), Ok(u_dim)) = (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1))
         {
-            if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
-                if x.dtype() == DType::BF16
-                    && !x.track_op()
-                    && cuda_or_rocm_device(x.device())
-                    && gate_up_proj_t.dtype() == DType::BF16
-                    && !gate_up_proj_t.track_op()
-                    && cuda_or_rocm_device(gate_up_proj_t.device())
-                    && gate_up_proj_t.is_contiguous()
-                {
-                    if let (Ok(g_dim), Ok(u_dim)) = (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1)) {
-                        let gu_dims = gate_up_proj_t.dims();
-                        if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim && g_dim == u_dim {
-                            let gate_up = {
-                                kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
-                                if let Some(backend) = backend {
-                                    if let Some(out) =
-                                        runtime_matmul_no_broadcast_copy(backend, x, gate_up_proj_t)
-                                            .context("fused MLP gate+up runtime matmul request")?
-                                    {
-                                        out
-                                    } else {
-                                        broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
-                                            .context("cuda fused MLP gate+up prefill matmul")?
-                                    }
-                                } else {
-                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
-                                        .context("cuda fused MLP gate+up prefill matmul")?
-                                }
-                            };
-                            synchronize_tensor_ready_for_model_handoff(
-                                "mlp gate_up_fused_prefill",
-                                &gate_up,
-                            )?;
-                            if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up).filter(|t| {
-                                kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim)
-                            }) {
-                                let hidden = {
-                                    kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
-                                    // #1082: keep the silu*mul output as kt — the
-                                    // down-proj path is kt now, so the candle copy-out
-                                    // is gone.
-                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(
-                                        &gate_up_kt,
-                                        g_dim,
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}")
-                                    })?
-                                };
-                                synchronize_tensor_ready_for_model_handoff(
-                                    "mlp gate_silu_hidden_mul_packed",
-                                    &hidden,
-                                )?;
-                                let out = {
-                                    kiln_nvtx::range!(c"kiln/mlp/down");
-                                    mlp_proj_forward_decode_if(
-                                        backend,
-                                        use_metal_decode_gemv,
-                                        &hidden,
-                                        &mlp.down_proj_t,
-                                        mlp.down_proj_marlin.as_ref(),
-                                        lora_layer.and_then(|l| l.down_proj.as_ref()),
-                                        lora_scale,
-                                    )?
-                                };
-                                return Ok(out);
-                            }
+            let gu_dims = gate_up_proj_t.dims();
+            if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim && g_dim == u_dim {
+                let gate_up = {
+                    kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
+                    if let Some(backend) = backend {
+                        if let Some(out) =
+                            runtime_matmul_no_broadcast_copy(backend, x, gate_up_proj_t)
+                                .context("fused MLP gate+up runtime matmul request")?
+                        {
+                            out
+                        } else {
+                            broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
+                                .context("cuda fused MLP gate+up prefill matmul")?
                         }
+                    } else {
+                        broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
+                            .context("cuda fused MLP gate+up prefill matmul")?
                     }
+                };
+                synchronize_tensor_ready_for_model_handoff("mlp gate_up_fused_prefill", &gate_up)?;
+                if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up)
+                    .filter(|t| kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim))
+                {
+                    let hidden = {
+                        kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
+                        // #1082: keep the silu*mul output as kt — the
+                        // down-proj path is kt now, so the candle copy-out
+                        // is gone.
+                        kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(&gate_up_kt, g_dim)
+                            .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}"))?
+                    };
+                    synchronize_tensor_ready_for_model_handoff(
+                        "mlp gate_silu_hidden_mul_packed",
+                        &hidden,
+                    )?;
+                    let out = {
+                        kiln_nvtx::range!(c"kiln/mlp/down");
+                        mlp_proj_forward_decode_if(
+                            backend,
+                            use_metal_decode_gemv,
+                            &hidden,
+                            &mlp.down_proj_t,
+                            mlp.down_proj_marlin.as_ref(),
+                            lora_layer.and_then(|l| l.down_proj.as_ref()),
+                            lora_scale,
+                        )?
+                    };
+                    return Ok(out);
                 }
             }
         }
@@ -781,10 +756,11 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
     // `accelerator.kt_api_mode = "disabled"`.
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-        if !has_mlp_lora && !has_marlin {
-            if let Some(out) = try_kt_swiglu_ffn(x, mlp)? {
-                return Ok(out);
-            }
+        if !has_mlp_lora
+            && !has_marlin
+            && let Some(out) = try_kt_swiglu_ffn(x, mlp)?
+        {
+            return Ok(out);
         }
     }
     let (gate, up): (Tensor, Tensor) = swiglu_ffn_split_gate_up(

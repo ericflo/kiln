@@ -101,10 +101,10 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     // compatibility precondition fails. `flat` is already a kt tensor,
     // so the candle->kt bridge is gone — pass it to the kt helper directly.
     #[cfg(feature = "cuda")]
-    if flat.is_contiguous() {
-        if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)? {
-            return Ok(idx);
-        }
+    if flat.is_contiguous()
+        && let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)?
+    {
+        return Ok(idx);
     }
     // ROCm fast path: `argmax` runs on-device (ArgmaxOp::rocm_fwd) and yields an
     // I64 scalar; read it back directly. The generic `.to_dtype(U32)` path below
@@ -148,10 +148,10 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     // any compatibility precondition fails. `logits` is already a kt
     // tensor, so the candle->kt bridge is gone.
     #[cfg(feature = "cuda")]
-    if logits.is_contiguous() {
-        if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
-            return Ok(ids);
-        }
+    if logits.is_contiguous()
+        && let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)?
+    {
+        return Ok(ids);
     }
     let vocab_dim = dims.len() - 1;
     // ROCm fast path: read the on-device I64 argmax indices directly. The
