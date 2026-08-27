@@ -111,10 +111,10 @@ pub struct VulkanBackend {
     /// cache constructs it for the active model geometry.
     pub(super) vk_paged_kv_cache: OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
     /// Set of full-attention layer indices whose K/V state has already
-    /// been seeded into the Vulkan-resident paged cache from the legacy
-    /// candle pool. Each full-attention layer is seeded once at the
-    /// first call to the resident block helper for that layer; subsequent
-    /// decode steps only do per-token slot writes.
+    /// been seeded into the Vulkan-resident paged cache from the kt
+    /// paged cache (`PagedKvCacheKt`). Each full-attention layer is seeded
+    /// once at the first call to the resident block helper for that
+    /// layer; subsequent decode steps only do per-token slot writes.
     pub(super) seeded_full_attn_layers: Mutex<HashSet<usize>>,
     /// Batched resident decode rows whose prompt K/V blocks have been seeded.
     /// Keyed by `(full_attention_layer_idx, decode_row_id)`.
