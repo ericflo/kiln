@@ -6066,3 +6066,29 @@ headline net **−1** line; zero code-behavior change.
 
 **Signature:** kiln cleanup agent (sub-agent), round 103 —
 headline net **−28** code lines; zero code-behavior change.
+
+## round 104a — re-adjudicate every `#[allow(dead_code)]` site in the kiln-model GPU-policy/graph files
+**scope**: 7 kiln-model files, 62 allow sites total — `cuda_policy.rs` (3), `cuda_marlin_policy.rs` (3), `cuda_training_policy.rs` (3), `rocm_policy.rs` (3), `rocm_w8_proj.rs` (1), `cuda_graph.rs` (20), `rocm_graph.rs` (29). No other crate, no other file.
+**baseline** (pre-change, clean tree at `a75d77efd`): `cargo test -p kiln-model` = **394 passed / 0 failed** (371 lib + 22 + 1); `cargo clippy -p kiln-model` = **0 kiln-model own-code warnings** (pre-existing dependency warnings in kiln-core/kiln-tensor unchanged); `cargo fmt -p kiln-model --check` clean.
+
+**work** (7 commits, one per file):
+1. `3c0350128` cuda_policy.rs (net +1) — delete the redundant allow on `current_cuda_kernel_policy` (live in **both** lanes: called from non-gated `forward.rs`/`capability.rs`); keep the impl-block + install-function allows (dead in the default lane — the `cuda_policy` re-export is `#[cfg(feature = "cuda")]`-gated, so the module is private in a default build — live under the cuda lane); add justifications to the two keeps.
+2. `b1822e69c` cuda_marlin_policy.rs (net +4) — same shape: delete redundant `current_cuda_marlin_policy` allow (live in both lanes); keep the two required allows; justify.
+3. `2c6f3136f` cuda_training_policy.rs (net +7) — all 3 allows required; per-site probes: removing **any** one re-fires dead_code with a cascade through the static → enum → struct chain (`current_cuda_training_policy` is only called from the `any(cuda, rocm)`-gated `tape_forward`); justify all 3.
+4. `3c8a920af` rocm_policy.rs (net +7) — all 3 allows required (rocm-gated re-export ⇒ items private in a default build; `PORTABLE_ROCM_KERNEL_POLICY`'s only external consumer is a rocm-gated kiln-server test); justify all 3.
+5. `ffce26d8a` rocm_w8_proj.rs (net +3) — `observe_batch_rows` allow required (dead in the default lane); live under the rocm lane via `argmax_batch_bf16` + `sample_batch_bf16_profiled`; justify.
+6. `84f9c8c8c` cuda_graph.rs (net −17) — delete 19 redundant allows on `#[cfg(feature = "cuda")]`-gated batched-decode items (`CudaBatchedGraphKey` + impl, 4 `update_batched_*` methods, 9 `new_batched_*` methods, `persistent_batched_state`): in a default build the items **do not exist**, so the allows were inert; in the cuda lane every item is live via `generate.rs paged_batched_decode_step_profiled_inner` → `decode_step_paged_batched` → `try_capture_batched` → the helpers (static call-graph trace — see environment note below). Keep the one `CudaGraphRunner.policy` field allow (the struct is **not** feature-gated, so the field exists in a default build and is only read by cuda-gated cache-boundary code) + justify.
+7. `545020427` rocm_graph.rs (net +59) — all 29 `cfg_attr(not(feature = "rocm"), allow(dead_code))` allows verified **individually required** by per-site probes (each removal re-fires a dead_code warning, 1–2 each); add justifications to all 29 citing the rocm-lane capture/replay/fallback telemetry paths (`RocmGraphCounters` recorders, `RocmGraphPhaseTimer`, fallback stats, generation counters, eager position-buffer forwards, `memory_probe_selector`).
+
+**sites adjudicated: 62 → kept 41 (all justified this round), deleted 21 (1+1+19), truly dead 0.**
+
+**environment note (cuda lane)**: the cuda lane **cannot compile in this environment** — `cudarc`'s build script requires `nvcc`, which is absent; earlier `cargo clippy --features cuda` runs that "looked clean" were actually failed builds misread as zero warnings. All cuda-lane liveness claims this round rest on static call-graph tracing from non-gated `generate.rs` entry points, cross-checked against the cuda-gated dispatch in `forward/`. The rocm lane **does** compile (rocm feature gates `rocm`-crate API use only) and was probed empirically: with all 29 rocm_graph allows removed, the only dead-code finding is the pre-existing `RocmGraphFallbackReason::MultiRowBatchUnsupported` variant (constructed solely in `#[cfg(test)]` helper code — pre-existing rocm-lane warning, unchanged by this round, out of the default-lane gate).
+
+**verification** (final state, all 7 commits in): `cargo test -p kiln-model` = **394 passed / 0 failed — identical to baseline**; `cargo clippy -p kiln-model` (default lane) = **0 kiln-model own-code warnings** (dependency warnings unchanged); `cargo fmt -p kiln-model --check` clean; `cargo clippy -p kiln-model --features rocm` compiles with dead-code findings unchanged from baseline; `git status` clean.
+
+**net lines**: **88 insertions / 21 deletions = net +67** — every insertion is a justification comment; every deletion is an allow proven redundant. Zero behavior change, zero public API deleted.
+
+**lesson recorded**: a *mass-removal* probe (drop all 29, count warnings) can **under-report**: for rocm_graph.rs it hid the 10 `RocmGraphCounters` method warnings (struct-level deadness masks method-level findings), so 10 allows were first deleted and had to be restored. **Per-site probing (one allow removed at a time, clippy, restore) is mandatory before declaring an allow redundant.**
+
+**Signature:** kiln cleanup agent (sub-agent), round 104a —
+headline: 62/62 sites adjudicated, 21 redundant allows deleted, 41 kept and all newly justified, net +67 comment lines, all gates identical to baseline.
