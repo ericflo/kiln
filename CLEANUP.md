@@ -2807,3 +2807,125 @@ counts with per-file round-76 deltas in the rationale.
 **Remainder:** none inside kiln-model. The `try_kt_paged_kv_*`
 family, benchmarks, and protected crates were not touched. No
 uncommitted pile remains.
+
+## docs/ tree audit (round 62 follow-up) — 2026-08-26 — docs/plans/ classification: 4 landed docs archived (ECHO pair, confidence-hardening goal, MTP plan), 3 kept unlanded; 18 live references re-pointed; 0 deletions; link + orphan sweeps clean
+
+Applied the round-62 playbook to the whole `docs/` tree, starting with the
+full `docs/plans/` classification (all 7 docs read and judged against the
+live tree), then the stale-reference sweep, the orphan scan, and the
+stale-state-claim pass.
+
+**Archived (landed, per doc):**
+
+- `docs/plans/echo-integration-plan.md` → `docs/archive/echo/` (commit
+  `4ade9b975`). ECHO-by-default is the documented product behavior in the
+  live tree: `kiln-train::echo` + `trajectory_mask` are live modules still
+  cited by their own doc comments; `LossConfig::default()` is on-by-default
+  (λ=0.05) in README + `docs/ECHO_GUIDE.md`; CHANGELOG carries the
+  "Unreleased — ECHO" section. Landing commits verified in history:
+  `8a9181a70` (#1502), `7c746208d` (#1512 ECHO-by-default on the fused GRPO
+  tape root), `a8de9dd85` (#1518), `0e0606f73` (#1531 OPD composition — the
+  plan's Phase 4), docs truth passes `7bd4a2e56` (#1511), `13528aa25`
+  (#1536). The "Status: Draft" header line describes 2026-05-18, not today.
+- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md` →
+  same directory, same commit. Its own §5 marks Phases 0–3 ✅ SHIPPED and
+  Phase 4 landed via #1531. Moved with the integration plan so its relative
+  sibling link stays valid (round-62 precedent).
+- `docs/plans/confidence-hardening-goal.md` →
+  `docs/archive/confidence-hardening/` (commit `9f65f586a`). Self-declared
+  `Status: Complete`; every checklist item checked with source-bound
+  receipts (verified present: `qualification/receipts/{cuda,metal,rocm,vulkan}/`
+  + `benchmarks/receipts/`); closure commit `fb723bd61` (2026-07-29); hosted
+  `backend_build=all` CI run 30498143581 from `f19d2591ab8e` green. The
+  permanent narrative stays live in `docs/qualification.md`.
+- `docs/plans/mtp-training-plan.md` → `docs/archive/mtp-training/` (commit
+  `2715f1d42`). Plan scope (PR-A + PR-B) is implemented: `dc6b8df44`
+  (#1508), `ca3e8794e` (#1515); `run_mtp_alignment_phase` is live in
+  `crates/kiln-train/src/trainer/reporting.rs`, called from `sft.rs`;
+  per-adapter acceptance counters + `/v1/stats/mtp-acceptance` at `195e52122`
+  (#1530); operator validation at `406161719` (#1516); ROCm Muon path at
+  `abf665759`. Banner + README name the three still-open "Follow-ups after
+  PR-B" owner workstream items (GRPO/OPD phase hookup — only `sft.rs` calls
+  the phase today; `kiln self-improve` auto-inclusion; dashboard view) so
+  nothing is silently closed.
+
+**Kept (unlanded or live-consumed, NOT marked stale):**
+
+- `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
+  — self-declared "Aspirational design record with a partially implemented
+  bounded path"; owner's OPD roadmap; referenced by the protected §9.9 OPD
+  gate workflow (`opd-bench-gate.yml`) and live code comments.
+- `docs/plans/opd-onpolicy-roadmap.md` — open "what's needed" roadmap for
+  the same unlanded OPD work.
+- `docs/plans/public-site-audit-and-copyediting-plan.md` — "living
+  execution plan"; **actively parsed** by `scripts/check_docs_site_smoke.mjs`
+  (checklist-route table + route-count assertion) and cited by
+  `CONTRIBUTING.md`. Moving it would break a live consumer; kept.
+
+**Reference updates (commit `4ade9b975`):** 18 live in-tree references to
+the ECHO pair re-pointed to `docs/archive/echo/`: 5 kiln-train doc/line
+comments (`lib.rs` ×2, `trajectory.rs`, `trajectory_mask.rs` ×2), 10
+capability/skill files (`.agents/skills/capability-creator/resources/
+agentic-grpo-mode.md`, `pi-code-search`, `pi-diff-patch-apply`,
+`pi-precondition-check`, `pi-script-fixup`, `pi-terminal-bench-lite`
+capability + `dynamics_holdout.py` calibration gate ×2, `capabilities/lib/
+README.md`, `capabilities/lib/agentic-grpo-notes.md` ×2 (both ECHO docs),
+`capabilities/lib/pi_trajectory.py`), and `docs/ECHO_GUIDE.md` (relative
+link). Internal cross-refs inside the two archived docs also re-pointed.
+Left untouched per protocol: `capabilities/caps/pi-doctest/archive/
+kiln-polish-prerequisites.md` (frozen archive record — rounds 4/6 precedent)
+and the two historical CHANGELOG lines (owner-managed). No CI workflow,
+docs-site manifest (`docs/site/docs-manifest.json` checked — none of the
+four docs appear), or script referenced the archived files.
+
+**Stale cross-reference sweep (b):** relative-link audit of 125 live md
+files (docs/ top level + plans + desktop + papers + root md; frozen
+archive/audit/site surfaces excluded per rounds 4/6/26) found **zero
+dangling links** outside: `THIRD_PARTY_LICENSES.md` (cargo-about generated
+content — round-4 precedent, intentionally checked in), `_site/`
+(gitignored build output — untracked, out of scope), and one regex false
+positive in `docs/EVAL_GUIDE.md`. All targets of every fixed reference
+verified to exist after the moves.
+
+**Orphan scan (c):** repo-wide inbound-reference count for every tracked
+live docs file. Zero-reference files: `docs/VIGNETTES.md` (companion §15
+reproduction recipe for the KEPT OPD grand plan; all its scripts/recipes
+live — KEEP), `docs/TRAJECTORY_TURN_THROUGHPUT.md` (active bench recipe;
+its config keys `prefix_aware_admission` / `prefill_admission_quantum` /
+`rowwise_decode` verified live in `crates/kiln-server/src/api/config.rs` +
+`batching_engine.rs` — KEEP), `docs/papers/echo/echo_blog_post.md` (paired
+corpus doc with the cited `echo_paper.md`, referenced as "paper + blog" by
+the live code + the archived plans — KEEP). **No deletions this round** —
+every zero-reference file is a live recipe or corpus member, and the four
+archived plans were the only actionable orphans.
+
+**Stale state claims (d) — owner attention items (NOT rewritten):**
+1. The three MTP "Follow-ups after PR-B" (GRPO/OPD phase, self-improve,
+   dashboard) are now open workstream items living inside an archived doc —
+   if they matter they deserve a live home (e.g. a line in the OPD/roadmap
+   docs or KILN_IMPROVEMENT_ISSUES).
+2. `docs/VIGNETTES.md` and `docs/TRAJECTORY_TURN_THROUGHPUT.md` are
+   navigation orphans — nothing links to them (no README, no manifest, no
+   code). Content verified current; worth a link from the relevant guide or
+   a deliberate deprecation decision.
+3. `docs/papers/echo/echo_blog_post.md` is zero-referenced (its sibling
+   `echo_paper.md` is cited by live code); either cite it or note it as
+   optional reading.
+
+**Per-category commits:** `4ade9b975` (ECHO pair: move + banners + archive
+README + 18 reference re-points, 17 files); `9f65f586a` (confidence-
+hardening: move + banner + README, 2 files); `2715f1d42` (MTP plan: move +
+banner + README, 2 files); this ledger entry (commit to follow). Each
+category committed independently — no uncommitted pile.
+
+**Verification (per commit, all green):** `cargo fmt --check` (workspace)
+clean on all three; `python3 scripts/check_repository_artifacts.py` passed
+(6694 → 6695 → 6696 tracked paths, exactly the 3 new archive READMEs);
+`python3 scripts/check_production_file_budget.py` passed (647 files, 14
+reviewed exceptions) all three times; `cargo test -p kiln-train`
+**531 passed / 0 failed** after the ECHO commit (doc-comment-only .rs
+changes; baseline count preserved); `git status` clean after each commit and
+after this entry. `git grep` confirms zero remaining stale references to
+`docs/plans/{echo-integration-plan, grand-plan-for-extraordinarily-great-
+echo, confidence-hardening-goal, mtp-training-plan}` outside the two
+protocol-exempt historical/frozen sites above.
