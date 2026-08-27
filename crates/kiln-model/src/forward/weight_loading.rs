@@ -350,6 +350,9 @@ impl ProjectionLoadCache {
         self.policy.drop_projection_transposes
     }
 
+    // Sole caller is the `#[cfg(feature = "metal")]` branch of
+    // `projection_tensors_for_load_batch`; dead in non-metal builds —
+    // cfg_attr required (verified by default-lane probe).
     #[cfg_attr(not(feature = "metal"), allow(dead_code))]
     fn parallel_transposed_projection_upload(&self) -> bool {
         self.policy.parallel_transposed_projection_upload_enabled()
