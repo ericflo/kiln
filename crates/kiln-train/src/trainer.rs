@@ -31,10 +31,9 @@ use kiln_model::backend::{
     TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
-    GpuAttentionWeights, GpuWeights, LinearAttentionState,
-    StreamingPrefillExecutionPolicy, model_forward_kt_with_policy,
-    model_forward_no_head_with_policy, model_forward_paged_normed_hidden,
-    model_forward_segment_with_policy, rms_norm,
+    GpuAttentionWeights, GpuWeights, LinearAttentionState, StreamingPrefillExecutionPolicy,
+    model_forward_kt_with_policy, model_forward_no_head_with_policy,
+    model_forward_paged_normed_hidden, model_forward_segment_with_policy, rms_norm,
 };
 // GPU-feature kt-tape composites: consumed only by the cuda/metal/vulkan/rocm
 // forward paths (trainer/forward_backward.rs); trainer/tests/mod.rs imports its
