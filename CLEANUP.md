@@ -4205,3 +4205,155 @@ at the end, and re-run the two budget scripts. Keep the `metal_rt/*`
 `method_api.rs` / `operators.rs` / `shape.rs` parity-surface refs, the
 `UnaryOp`/dtype-coverage facts, and all #1082-labeled migration history
 exactly as-is — those were adjudicated KEEP this round with evidence.
+
+## Cleanup Agent (round 90)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** workspace-wide dead-dependency hunt with the
+strict proof protocol (re-derive the candidate list properly — the
+orchestrator's hyphen-buggy scan is not evidence). All 33 crates,
+all declared deps ([dependencies], [dev-dependencies],
+[build-dependencies], optional, feature-gated, target-specific) were
+adjudicated by searching src/, tests/, examples/, benches/, build.rs
+for the real identifier (hyphen→underscore), with feature-gate,
+re-export, proc-macro, and dev-dep surface awareness.
+
+**HEADLINE NET LINES: −13** (17 deletions − 4 insertions, all
+proven removals: 2 dead deps + their orphaned comment block + 2 lock
+edges + the four feature lines rewritten to drop the forwarding
+entries. Zero rewording.)
+
+**DEAD (2) — removed:**
+
+| crate | dep | verdict | proof of absence |
+|---|---|---|---|
+| kiln-mps | cc (build-dep) | **DEAD** | build.rs is pure `std::env` + `println!` framework-link flags (read in full, 33 lines); zero `cc` identifiers in build.rs or any surface. `cargo check -p kiln-mps` + `--features probe` clean, 14/0 tests, before AND after. No crate depends on kiln-mps. |
+| kiln-server | kiln-kt-bridge (dep) | **DEAD** | Zero `kiln_kt_bridge` identifiers in src/, tests/, examples/, benches/, or build.rs — a case-sensitive grep for both `kt_bridge` and `kt-bridge` over the entire crate tree matches ONLY the manifest itself (the dep line + the four `kiln-kt-bridge/<backend>` feature entries). No `pub use` (no API break — nothing re-exports it), no proc-macro, no feature-gated code. kt-typed calls reach kiln-model's public surface directly; kiln-kt-bridge is kiln-model's own dependency (still in graph via kiln-model/kiln-train/kiln-rmsnorm-kernel — `cargo tree -i` confirmed). |
+
+**LIVE (248)** — full per-dep table (every dep named; top hit cited;
+all counts from the identifier audit, word-boundary, all .rs surfaces):
+
+| crate | dep (verdict) | citation |
+|---|---|---|
+| kiln-autograd | half LIVE | 157 hits, src/backwards/activation.rs:8 et al. |
+| | kiln-tensor LIVE | 119 hits, src/backward_op.rs:2 et al. |
+| kiln-blas | cc LIVE (build-dep) | build.rs:1 (`cc::Build`) |
+| | cudarc LIVE (opt) | 22 hits, src/cublaslt_handle.rs:10, tests/cublaslt_handle_smoke.rs:11 |
+| | half LIVE | tests/cublaslt_handle_smoke.rs:1 |
+| | kiln-resource LIVE | src/algo_cache.rs:4 |
+| | serde LIVE | examples/cublaslt_mlp_probe.rs:24 `use serde::Serialize` + 2× `#[derive(Serialize)]` (proc-macro case, manually checked) |
+| | serde_json LIVE | src/algo_cache.rs:4 |
+| kiln-conv1d-kernel | cc LIVE | build.rs:2 |
+| | half LIVE | tests/kt_v2_smoke.rs:1, tests/rocm_conv1d_parity.rs:1 |
+| | kiln-kt-bridge LIVE | src/kt_api.rs:13 |
+| | kiln-tensor LIVE | src/kt_api.rs:5, tests |
+| kiln-core | serde/serde_json/thiserror/tokenizers/sha2 LIVE | 82/138/5/5/4 hits, src/config.rs, src/sampling.rs, src/block.rs, src/tokenizer.rs, src/config_hashes.rs |
+| | uuid LIVE | src/request.rs:1 |
+| | minijinja + minijinja-contrib LIVE | src/tokenizer.rs:1-18 |
+| | rayon LIVE | src/tokenizer.rs:1 |
+| | kiln-tensor LIVE (opt) | 13 hits, src/device_buffer.rs:13 |
+| | kiln-vulkan-kernel LIVE (opt) | 4 hits, src/device_buffer.rs:4 |
+| kiln-eval | kiln-core/serde/serde_json/thiserror/regex LIVE | 8/235/426/6/8 hits, src/result.rs, src/data_identity.rs, src/scorers/* |
+| | chrono, uuid, clap, futures, reqwest, tokio LIVE | examples/trace_api_eval.rs (examples are the consumer surface) |
+| | unicode-normalization LIVE | src/scorers/exact_match.rs:1 |
+| | rand + rand_core LIVE | src/synthesis.rs, src/production_trace.rs |
+| | tempfile LIVE (dev) | src/builtin.rs, src/suite.rs (cfg(test)) |
+| kiln-flash-attn | cc LIVE | build.rs:2 |
+| | half/kiln-kt-bridge/kiln-memory/kiln-tensor LIVE | 3/185/11/100 hits, src/kt_api.rs:53, src/rocm_sdpa.rs |
+| kiln-flce-kernel | kiln-tensor/kiln-autograd LIVE | 48/6 hits, src/kt_api.rs:33, src/kt_tape.rs:3 |
+| kiln-gdn-kernel | cc/half/kiln-kt-bridge/kiln-tensor LIVE | 2/4/207/22 hits, src/kt_api.rs:206, tests |
+| kiln-graph | kiln-tensor/thiserror LIVE | 13 hits; thiserror src/error.rs:1 |
+| kiln-graph-cuda/metal/vulkan | kiln-graph + kiln-tensor LIVE ×3 crates | 2-3 hits each, src/lib.rs |
+| kiln-hip | (no deps) | — |
+| kiln-kt-bridge | kiln-tensor/kiln-autograd LIVE | 54/8 hits, src/lib.rs:28, src/tape_bridge.rs:8 |
+| kiln-marlin-gemm | cc/half/kiln-kt-bridge/kiln-tensor LIVE | 2/7/8/19 hits, build.rs:1, src/kt_api.rs:8 |
+| kiln-memory | tracing LIVE | 8 hits, src/governor.rs:8 |
+| kiln-model | 36/36 LIVE | min: kiln-resource src/transposed_weight_cache.rs:1; kiln-tensor-id src/backend/cuda_rocm_common.rs:2; objc2 src/backend/metal.rs:1; console src/loader.rs:1; thiserror src/weight_upload.rs:1; max: kiln-tensor 4,800, anyhow 2,331, kiln-core 237, kiln-nvtx 245, safetensors 200; optional/feature-gated deps all cited in src (cudarc 22, bytemuck 27, half 135, kiln-conv1d 8, kiln-flash-attn 29, kiln-gdn 56, kiln-marlin 4, kiln-rmsnorm 56, kiln-hip 12, kiln-graph-metal 7, kiln-vulkan-kernel 222, kiln-autograd 35, kiln-tensor-id 2, objc2-metal 98) |
+| kiln-mps | kiln-blas LIVE | 10 hits, src/lib.rs:7, src/backend_matmul.rs:2 |
+| kiln-nvtx | (no deps) | — |
+| kiln-opd-loss-kernel | cc/half/kiln-autograd/kiln-tensor LIVE | 2/1/5/47 hits, build.rs:2, src/kt_tape.rs:1, src/kt_api.rs:28 |
+| | kiln-kt-bridge LIVE (opt) | 2 hits, src/kt_api.rs:2 (feature-gated code = live per protocol) |
+| kiln-openenv | anyhow/futures/jsonschema/reqwest/serde/serde_json/thiserror/tokio/tokio-tungstenite LIVE | 1/3/4/12/48/40/3/46/2 hits, src/client.rs et al. |
+| | sha2 LIVE | src/client.rs:1 |
+| | axum LIVE (dev) | 7 hits, src/client.rs:5, tests/authenticated_openenv.rs:2 |
+| kiln-optim | half/kiln-param/kiln-tensor/thiserror LIVE | 34/18/81/1 hits, src/adamw.rs:17 et al. |
+| | kiln-autograd/bytemuck/serde/serde_json LIVE (dev) | 4/1/1/1 hits, tests/tied_weights.rs:1, tests/adamw_pytorch_oracle.rs:1 |
+| kiln-param | kiln-tensor LIVE | 12 hits, src/parameter.rs:5 |
+| kiln-resource | libc LIVE | 9 hits, src/lib.rs:9 |
+| | rustix LIVE (target-specific linux/android/apple section — parser gap, manually verified) | src/lib.rs:166-171 `rustix::fs::renameat_with` |
+| kiln-rmsnorm-kernel | cc/half/kiln-autograd/kiln-kt-bridge/kiln-tensor LIVE | 5/21/4/111/55 hits, build.rs:3, src/kt_api.rs:16 |
+| kiln-rocblas | cc LIVE (build-dep) | build.rs:1 |
+| | kiln-hip LIVE (opt) | 3 hits, src/hipblaslt_handle.rs:3 |
+| | kiln-resource/serde/serde_json LIVE | 4/1/5 hits, src/algo_cache.rs:4; serde examples/hipblaslt_mlp_probe.rs:26 (proc-macro case, manually checked) |
+| kiln-scheduler | kiln-core/tracing LIVE | 5/6 hits, src/scheduler.rs:5-6 |
+| kiln-server | 42/42 LIVE (after the one deletion) | min: socket2 src/main.rs:1; portable-pty src/api/terminal.rs:1; filetime src/api/completions/adapters.rs:2; max: tokio 785, kiln-train 776, kiln-eval 375, kiln-model 515, axum 640, serde_json 1,526; dev-only: safetensors 130 (cfg(test) modules), tokenizers 3, tower/filetime/tempfile shared with deps |
+| kiln-tensor | kiln-tensor-id/kiln-memory/thiserror/half/bytemuck/safetensors LIVE | 3/7/4/613/42/52 hits, src/tensor_id.rs:3, src/device.rs:7, src/error.rs:3, src/dtype.rs:3, src/element.rs:8 |
+| | cc LIVE (build-dep) | build.rs:2 |
+| | cudarc/objc2/objc2-metal/objc2-foundation/kiln-blas/kiln-vulkan-kernel/kiln-hip/kiln-rocblas LIVE (opt, per-feature) | 124/56/53/8/4/91/15/3 hits, src/cuda_matmul.rs:4, src/metal_kernels.rs:18, src/rocm_matmul.rs:3, src/active_rocm_stream.rs:1, src/device_op.rs:1 |
+| | kiln-autograd LIVE (dev) | 8 hits, src/tensor.rs:5, tests/training_full_block.rs:1 |
+| kiln-tensor-id | (no deps) | — |
+| kiln-train | 33/33 LIVE | min: console src/trainer/training_support.rs:1; uuid src/checkpoint.rs:1; thiserror src/logit_source.rs:1; libc src/trainer/grpo_jsonl.rs:2; tracing-subscriber examples/cuda_grpo_ablation.rs:2; max: serde_json 731, anyhow 1,051, kiln-tensor 550, kiln-kt-bridge 54, kiln-memory 44; optional: kiln-vulkan-kernel (subtable) 35 hits, src/grpo_tape_shim.rs:17 et al. |
+| kiln-vulkan-blas | kiln-blas/kiln-resource LIVE | 6/1 hits, src/lib.rs:3, src/pipeline_cache.rs:1 |
+| | kiln-vulkan-kernel LIVE (opt, `vulkan` feature) — **judged LIVE per the directive's feature rule ("a dep only used by a feature that nothing else enables is still live")** | zero code refs; feature `vulkan = ["dep:kiln-vulkan-kernel"]` is the consumer. FLAGGED: no workspace crate depends on kiln-vulkan-blas at all — orphan-member report item below. |
+| kiln-vulkan-kernel | kiln-tensor-id/anyhow/half/bytemuck/tracing/ash/libc/libloading LIVE | 1/783/42/134/26/60/1/3 hits, src/vk_tensor.rs:1, src/buffer.rs:20, src/vk_raw.rs:1,3 |
+| | kiln-tensor/serde/serde_json LIVE (dev) | 3/5/5 hits, tests/gdn_parity.rs:3, tests/vk_flce_parity.rs:5, examples/vk_mlp_probe.rs:4 |
+
+**Totals: 250 deps adjudicated across 33 crates → 248 LIVE + 2 DEAD.**
+
+**Landed as** 4 commits (A1 pattern: manifest commit, then lock as its
+own commit, per crate):
+`c9cc96b96` kiln-mps manifest (−3 lines: comment-free section header +
+dep line), `72b59abab` kiln-mps lock (−1), `c2803b908` kiln-server
+manifest (−8: dep line + 7-line orphaned comment block that described
+only that dep; +4/−4 on the four feature lines where only the
+`kiln-kt-bridge/<backend>` forwarding entries were dropped),
+`567f30cbb` kiln-server lock (−1).
+
+**Verification (all green):**
+- kiln-mps: `cargo check` (default + `--features probe`) clean before
+  AND after; `cargo test -p kiln-mps` 14/0 before AND after; no
+  dependents; `cc` stays in the lock graph via the nine other kernel
+  crates' build-dependencies.
+- kiln-server: `cargo check -p kiln-server` clean (21.9 s); full suite
+  `cargo test -p kiln-server` = **1388 passed / 0 failed / 3 ignored —
+  exact steering baseline**; `cargo clippy -p kiln-server
+  --all-targets` = 0 own-code warnings (the 19 visible warnings are
+  kiln-tensor's pre-existing judgment set, none reference
+  kt-bridge); `cargo tree -i kiln-kt-bridge` confirms it remains in
+  the graph via kiln-model/kiln-train/kiln-rmsnorm-kernel — kiln-server
+  now only reaches it transitively; `git status` clean.
+- `cargo fmt --check` clean repo-wide; `scripts/check_repository_
+  artifacts.py` pass (6,697 tracked paths); `scripts/check_production_
+  file_budget.py` pass (647 files, 14 exceptions) — neither manifest is
+  in the budget scope, no ceiling re-sync needed.
+- No public API change: kiln-server never re-exported kiln-kt-bridge
+  (zero identifiers); no behavior change (manifest-only deletions).
+
+**Report items (owner/roadmap class, NOT acted on):**
+1. **kiln-vulkan-blas is an orphan workspace member** — no crate in the
+   workspace depends on it (only doc-comment mentions in kiln-blas,
+   kiln-rocblas, kiln-mps, kiln-tensor). Its `vulkan` feature (and
+   through it its only optional dep, kiln-vulkan-kernel) is enabled by
+   nothing and referenced by no code. Same class: **kiln-mps** (no
+   dependents; its `probe` feature enabled by nothing). Both are
+   Phase-2.x scaffold crates from the #1082 plan. Removing a whole
+   member is an owner decision (their README-level docs describe the
+   intended future probes), so it is queued, not deleted.
+2. The kiln-tensor **107-ref stale-comment set stays the round-91
+   deletion target** — it was triaged with patterns + authorities in
+   round 89's queue; this round's PRIMARY finished and committed first,
+   and the SECONDARY cap ("do not let this eat the PRIMARY verification
+   budget") plus the one-focused-cleanup rule made queuing the right
+   call.
+3. Method note for future dead-dep rounds: the audit script
+   (per-crate identifier grep across all .rs surfaces, word-boundary,
+   hyphen→underscore) plus the four manual checks (proc-macro derive
+   usage like `serde`/`thiserror`, target-specific sections like
+   kiln-resource's rustix, build-dep usage in build.rs, and
+   feature-forwarding entries in [features]) caught everything; the
+   orchestrator's original "0 uses" list was not relied on.
+
+**Signature:** kiln cleanup agent, round 90 of the CLEANUP.md campaign —
+HEADLINE NET LINES **−13**; 250 deps adjudicated (248 LIVE / 2 DEAD);
+commits `c9cc96b96`, `72b59abab`, `c2803b908`, `567f30cbb`.
