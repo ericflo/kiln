@@ -8325,7 +8325,7 @@ mod tests {
         };
         let total_vram = 48u64 * 1024 * 1024 * 1024;
         let model_bytes = 8u64 * 1024 * 1024 * 1024;
-        let bytes_per_block = 1u64 * 1024 * 1024; // 1 MiB
+        let bytes_per_block: u64 = 1024 * 1024; // 1 MiB
         let suggested = 8192;
         let msg = format_oom_remediation_message(
             &failure,

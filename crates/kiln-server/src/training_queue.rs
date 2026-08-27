@@ -1142,6 +1142,11 @@ impl TrainingQueue {
         self.queue.len()
     }
 
+    /// Whether the queue is empty (not including the currently running job).
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Remove a queued job by ID. Returns true if found and removed.
     pub fn remove(&mut self, job_id: &str) -> bool {
         let before = self.queue.len();
@@ -5852,7 +5857,7 @@ mod tests {
             let mut logprobs = Vec::with_capacity(positions.len() * top_k);
             for _ in positions {
                 indices.extend(0..top_k as u32);
-                logprobs.extend(std::iter::repeat(-(top_k as f32).ln()).take(top_k));
+                logprobs.extend(std::iter::repeat_n(-(top_k as f32).ln(), top_k));
             }
             Ok(kiln_train::LogprobBatch::TopK(kiln_train::TopKLogprobs {
                 indices,
@@ -6787,10 +6792,7 @@ mod tests {
     #[test]
     fn kv_shrink_target_preserves_one_block_floor() {
         let gb = 1024 * 1024 * 1024;
-        assert_eq!(
-            kv_shrink_target_for_training(4, gb, 20 * gb, 1 * gb),
-            Some(1)
-        );
+        assert_eq!(kv_shrink_target_for_training(4, gb, 20 * gb, gb), Some(1));
     }
 
     #[test]
