@@ -455,8 +455,10 @@ pub struct PagedKvCacheKt {
     generation: AtomicU64,
     /// Whether FP8 quantization is enabled. When true, pool dtype is U8.
     fp8: bool,
-    /// Per-layer FP8 scale factors `(k_scale, v_scale)`. Updated on
-    /// writes by the FP8 path (writers land in a follow-up PR).
+    /// Per-layer FP8 scale factors `(k_scale, v_scale)`. Populated by the
+    /// constructors; the FP8 write path (which would update + read them) lands
+    /// in a follow-up PR — until then the field is written but never read, so
+    /// the allow is required (verified by default-lane probe).
     #[allow(dead_code)]
     fp8_scales: Vec<(f32, f32)>,
     /// The original compute dtype for dequantization. Distinct from the
