@@ -14,17 +14,17 @@
 //! `[rank, out_features]` — not on the original `A: [rank, in_features]`
 //! and `B: [out_features, rank]` `Var`s the optimiser iterates.
 //!
-//! The kt `Tape` ↔ candle `GradStore` bridge in
-//! `kiln_kt_bridge::tape_bridge` requires `(kt_input_id, candle_input_id)`
-//! pairs to share a shape, so composing through transposes would either
-//! leak per-transpose intermediate IDs into the optimiser, or force a new
-//! `TransposeBackward` substrate + a tape-recorded `transpose` op (a much
-//! bigger surface). A single fused node sidesteps the whole detour: it
-//! takes `[base, x, A, B]` in their original layouts and emits per-input
-//! gradients in those same layouts, so the adapter just maps each
-//! Var-side `candle_id` straight onto the kt input id. This mirrors the
-//! `MulSigmoidGateBackward` (swiglu) and `RmsNormBackward` precedents —
-//! single fused tape node for a fused forward.
+//! The kt tape bridge in `kiln_kt_bridge::tape_bridge` deposits each
+//! recorded input's gradient under its registered leaf id, so the
+//! recorded inputs must be the original `A`/`B` leaves themselves:
+//! composing through transposes would key gradients on transposed-view
+//! IDs that the optimiser can't match to its `Parameter`s. A single
+//! fused node sidesteps that detour: it takes `[base, x, A, B]` in
+//! their original layouts and emits per-input gradients in those same
+//! layouts, so the adapter maps each leaf id straight onto the recorded
+//! input id. This mirrors the `MulSigmoidGateBackward` (swiglu) and
+//! `RmsNormBackward` precedents — single fused tape node for a fused
+//! forward.
 //!
 //! # Backward math
 //!
