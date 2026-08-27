@@ -121,7 +121,7 @@ pub struct WeightSource {
 /// A loaded tensor: raw bytes with shape and dtype metadata.
 ///
 /// This is a CPU-side representation. The forward pass will convert these
-/// to GPU tensors (candle Tensor or raw CUDA buffers).
+/// to GPU tensors (kt Tensor or raw CUDA buffers).
 #[derive(Clone)]
 pub struct WeightTensor {
     pub data: WeightData,
