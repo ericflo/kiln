@@ -1650,7 +1650,6 @@ dependencies = [
 name = "kiln-mps"
 version = "0.5.2"
 dependencies = [
- "cc",
  "kiln-blas",
 ]
 
