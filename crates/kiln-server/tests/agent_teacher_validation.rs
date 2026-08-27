@@ -93,8 +93,7 @@ fn write_minimal_adapter(root: &std::path::Path, name: &str) {
     let tensor =
         safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
             .unwrap();
-    let weights =
-        safetensors::tensor::serialize([("ignored.weight", tensor)].into_iter(), None).unwrap();
+    let weights = safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
     std::fs::write(adapter.join("adapter_model.safetensors"), weights).unwrap();
 }
 
