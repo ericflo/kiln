@@ -15,10 +15,11 @@ cc = "1"
 # (#1082) candle-drop: this crate is now 100% candle-free (the first
 # kernel-crate candle drop). The candle-typed glue (Phase A reference,
 # the `CustomOp1` kt-forward-op shim, the kt-tape production-caller
-# adapters) moved UP into `kiln-train::opd_candle_shim`, which keeps
-# candle. `candle-core`, `anyhow`, and `tracing` were the deps those
-# moved paths needed; with them gone the kept code (`kt_api`, `kt_tape`,
-# `phase_b`, `lib.rs`) is pure `kiln_tensor` + `kiln_autograd`.
+# adapters) moved UP into `kiln-train::opd_tape_shim` (itself since
+# candle-free in the #1082 finale). `candle-core`, `anyhow`, and
+# `tracing` were the deps those moved paths needed; with them gone the
+# kept code (`kt_api`, `kt_tape`, `phase_b`, `lib.rs`) is pure
+# `kiln_tensor` + `kiln_autograd`.
 #
 # kt-typed parallel surface (see `kt_api`). The forward path is pure
 # kt-tensor ops; the backward kt entry point
@@ -41,18 +42,19 @@ kiln-autograd = { workspace = true }
 # probe in cudarc's build.rs. Gated under the `cuda` feature
 # along with `kiln-tensor/cuda`.
 #
-# (#1082) candle-drop: `default-features = false` opts OUT of
-# kt-bridge's now-optional `candle` feature. This crate uses ONLY the
-# kt-native bridge surface (BridgeError + alloc_cuda_tensor +
+# (#1082) candle-drop: `default-features = false` is retained now that
+# kt-bridge is fully candle-free (its `default` is empty and the former
+# `candle` feature is gone). This crate uses ONLY the kt-native bridge
+# surface (BridgeError + alloc_cuda_tensor +
 # cuda_input_device_ptr + cuda_output_device_ptr +
 # cuda_storage_and_byte_offset — see `kt_api.rs`), none of which touch
-# candle. With this opt-out, `cargo tree -p kiln-opd-loss-kernel
+# candle. With kt-bridge candle-free, `cargo tree -p kiln-opd-loss-kernel
 # --features cuda` is candle-free, completing this crate's candle drop
-# at the dependency-graph level too. Every OTHER kt-bridge consumer
-# keeps the default (candle-on), so the blast radius is contained.
+# at the dependency-graph level too; every other kt-bridge consumer
+# likewise opts out (`default-features = false`).
 # NOTE: declared as a DIRECT path dep (not `workspace = true`) because Cargo
 # forbids a member overriding `default-features = false` on a workspace-inherited
-# dependency. This is the only crate that opts out of kt-bridge's candle feature.
+# dependency.
 kiln-kt-bridge = { path = "../kiln-kt-bridge", optional = true, default-features = false }
 half = "2"
 
@@ -63,8 +65,8 @@ half = "2"
 # backward dispatch is gated out. kiln-train re-exports this feature via
 # its own `cuda` feature so `cargo build --features cuda` activates it.
 #
-# (#1082) Enables `kiln-kt-bridge?/cuda` (the candle-free CUDA helpers)
-# but deliberately NOT `kiln-kt-bridge?/candle`, so the kt-bridge
+# (#1082) Enables `kiln-kt-bridge?/cuda` (the candle-free CUDA helpers);
+# kt-bridge itself is fully candle-free (#1082 finale), so the kt-bridge
 # pulled in here stays candle-free.
 cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
 
@@ -73,8 +75,9 @@ cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
 # hipcc + links it through the backend-neutral kt-bridge device-pointer
 # seam (`device_input_ptr` / `device_output_ptr` / `alloc_device_tensor_like`
 # / `device_stream_raw_of`). Each `<dep>/cuda` is swapped to `<dep>/rocm`.
-# Enables `kiln-kt-bridge?/rocm` (the candle-free ROCm helpers) but NOT
-# `kiln-kt-bridge?/candle`, so the kt-bridge pulled in here stays candle-free.
+# Enables `kiln-kt-bridge?/rocm` (the candle-free ROCm helpers); kt-bridge
+# itself is fully candle-free (#1082 finale), so the kt-bridge pulled in
+# here stays candle-free.
 rocm = ["kiln-tensor/rocm", "dep:kiln-kt-bridge", "kiln-kt-bridge?/rocm"]
 
 # (#1082 Metal lane) Compiles the kt-native OPD forward / loss surface

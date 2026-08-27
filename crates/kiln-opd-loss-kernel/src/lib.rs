@@ -68,20 +68,18 @@
 //!
 //! # Phase A vs Phase B
 //!
-//! Mirrors `kiln-flce-kernel`'s split:
+//! Mirrors `kiln-flce-kernel`'s historical split (both legs now
+//! collapsed to the kt-typed Phase B path):
 //!
-//! - **Phase A** ([`opd_top_k_reverse_kl_phase_a_per_position`]) — pure-
-//!   candle reference implementation. Builds `[T_active, K]` student
-//!   logits via per-token gather + batched matmul, runs the renormalised
-//!   reverse-KL in candle ops, and lets candle autograd handle the
-//!   backward. Now used only as the fallback path inside the kt-forward-op
-//!   shim ([`opd_top_k_reverse_kl_per_position_via_kt_forward_op`]) when
-//!   the kt envelope (`{K∈16,32} × {F32,BF16} × CUDA`) doesn't apply.
-//! - **Phase B** (kt-shim
-//!   [`opd_top_k_reverse_kl_per_position_via_kt_forward_op`] and kt-tape
-//!   [`opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]) — both
-//!   run the kt composite forward and dispatch the fused CUDA backward
-//!   via the surviving FFI symbols `kiln_opd_topk_kl_bwd_{bf16,f32}`
+//! - **Phase A** — the pure-candle reference implementation (built
+//!   `[T_active, K]` student logits via per-token gather + batched
+//!   matmul, ran the renormalised reverse-KL in candle ops, and let
+//!   candle autograd handle the backward). Deleted in the #1082 candle
+//!   drop (2026-05-28); it is no longer part of this crate.
+//! - **Phase B** — the live kt-typed path
+//!   ([`opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]): it
+//!   runs the kt composite forward and dispatches the fused CUDA
+//!   backward via the surviving FFI symbols `kiln_opd_topk_kl_bwd_{bf16,f32}`
 //!   declared in [`phase_b`]. The candle `CustomOp1` wrapper that
 //!   previously hosted this (`OpdLossCustomOp` / `opd_top_k_reverse_kl_phase_b`)
 //!   was deleted in (#1082, 2026-05-28); see
@@ -114,7 +112,7 @@
 // `kt_forward_op.rs`), and the kt-tape production-caller adapters
 // (`try_tape_opd_per_position_cuda` / `try_tape_opd_scalar_mean_cuda`,
 // `tape_forward.rs`) — moved UP into `kiln-train::opd_tape_shim`
-// (which legitimately keeps candle). They call the kt-typed building
+// (itself since candle-free). They call the kt-typed building
 // blocks below (`kt_api`, `kt_tape`) across the crate boundary.
 mod phase_b;
 
@@ -132,10 +130,10 @@ pub use kt_api::{
     opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt,
 };
 
-/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
+/// Phase 6a/CP-4 (#1082): kt-tape entry that drops the candle
 /// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
 /// directly. Same FFI symbols on the backward, same envelope. See
-/// `kt_tape.rs` for the pilot port rationale (mirroring the rmsnorm
+/// `kt_tape.rs` for the port rationale (mirroring the rmsnorm
 /// sibling in commit `895162ca`).
 mod kt_tape;
 pub use kt_tape::{

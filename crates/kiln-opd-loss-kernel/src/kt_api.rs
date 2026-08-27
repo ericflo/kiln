@@ -1,5 +1,6 @@
-//! `kiln_tensor::Tensor`-typed surface alongside the candle-typed
-//! OPD top-K reverse-KL API.
+//! `kiln_tensor::Tensor`-typed OPD top-K reverse-KL API (the crate's
+//! only surface — the candle-typed API was deleted in the #1082
+//! candle drop).
 //!
 //! # Status
 //!
@@ -11,10 +12,11 @@
 //! Like kiln-flce-kernel, the (#1082) candle-drop moved this crate's
 //! candle-typed glue UP into `kiln-train::opd_tape_shim`: the Phase A
 //! reference path (`candle_core::Tensor` gather + matmul + log-softmax)
-//! and the candle `CustomOp1` kt-forward-op shim that wraps this kt
-//! surface for candle autograd. The raw CUDA FFI in `phase_b.rs` is only
-//! the inner kernel dispatch and is now pure-kt (it takes device
-//! pointers via `kiln-kt-bridge`, no candle storage conversions).
+//! and the (since-deleted) candle `CustomOp1` kt-forward-op shim that
+//! once wrapped this kt surface for candle autograd. The raw CUDA FFI in
+//! `phase_b.rs` is only the inner kernel dispatch and is now pure-kt (it
+//! takes device pointers via `kiln-kt-bridge`, no candle storage
+//! conversions).
 //!
 //! The kt-typed surface this module defines is therefore the
 //! *migration target*: when Phase B's `forward_inner` /
@@ -31,10 +33,7 @@
 //! 2. [`opd_top_k_reverse_kl_kt`] — kt-typed scalar-mean forward
 //!    entry point. Re-implements the gather, matmul, log-softmax,
 //!    and reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
-//!    Phase A candle reference (the per-position variant
-//!    `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_phase_a_per_position`
-//!    — the scalar-mean phase_a entry was deleted in #1082 since the
-//!    only callers were internal dead code).
+//!    (now-deleted, #1082) Phase A candle reference.
 //! 3. [`opd_top_k_reverse_kl_per_position_kt`] — kt-typed per-
 //!    position forward entry point. Same forward kernel as the
 //!    scalar entry point but without the final `mean_all`.
@@ -42,13 +41,12 @@
 //!    entry point. Reuses the same forward kernel and additionally
 //!    computes student / teacher entropy over the K-support.
 //!
-//! Forward only — backward is still TBD via the same kiln-autograd
-//! hooks the FLCE kt-typed backward is waiting on; the candle
-//! kt-shim (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`)
-//! continues to own production gradient flow until that lands.
-//! Historical: pre-`#1082`-2026-05-28 the candle `CustomOp1`
-//! `OpdLossCustomOp` (in `phase_b.rs`) wrapped the backward; that
-//! wrapper was deleted once production migrated to the kt-shim. The
+//! This module is forward+backward: the kt-typed backward entries
+//! ([`opd_top_k_reverse_kl_phase_b_bwd_kt`] and the device-agnostic
+//! [`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`]) are wired and are
+//! the production gradient path. Historical: pre-`#1082`-2026-05-28 the
+//! candle `CustomOp1` `OpdLossCustomOp` (in `phase_b.rs`) wrapped the
+//! backward; that wrapper was deleted in the #1082 candle drop. The
 //! fused backward FFI symbols `kiln_opd_topk_kl_bwd_{bf16,f32}`
 //! survive in the trimmed `phase_b.rs` and are still called from
 //! `opd_top_k_reverse_kl_phase_b_bwd_kt` below. (#1082)
@@ -80,9 +78,9 @@ use kiln_kt_bridge::BridgeError;
 
 /// Error type for the kiln-tensor-typed OPD loss surface.
 ///
-/// Mirrors `kiln-flce-kernel::kt_api::FlceError` — kept separate
-/// from `anyhow::Error` (the candle-typed surface's error) so Phase 7
-/// can delete candle without rewriting any kt-typed call site.
+/// Mirrors `kiln-flce-kernel::kt_api::FlceError` — kept separate from
+/// `anyhow::Error` (the candle-typed surface's error, since deleted in
+/// #1082) so the kt-typed call sites stay independent of it.
 #[derive(Debug)]
 pub enum OpdLossError {
     /// Generic message error for shape / dtype validation failures
@@ -155,10 +153,10 @@ pub struct OpdActiveMetadata {
 
 /// Validate the shape / dtype contract on the kt-typed entry points
 /// and return the `(T, H, V, T_active, K)` quintuple for downstream
-/// code. Mirrors the candle-typed `crate::validate_inputs` but uses
-/// `kiln_tensor::Tensor::shape()` (slice) rather than candle's
-/// `Tensor::dims()` (slice), and returns [`OpdLossError`] instead of
-/// `anyhow::Error`.
+/// code. Mirrors the (now-deleted, #1082) candle-typed
+/// `crate::validate_inputs`, but uses `kiln_tensor::Tensor::shape()`
+/// (slice) rather than candle's `Tensor::dims()` (slice), and returns
+/// [`OpdLossError`] instead of `anyhow::Error`.
 fn validate_inputs_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -475,7 +473,8 @@ fn validate_opd_active_metadata(
 ///
 /// Computes the per-position reverse KL over the teacher's K
 /// support, returning a 1-D `[T_active]` F32 tensor of KL values.
-/// Mirrors the candle reference `per_position_phase_a` one-for-one:
+/// Mirrors the (now-deleted, #1082) candle reference
+/// `per_position_phase_a` one-for-one:
 ///
 ///   1. Squeeze hidden batch dim 0; index_select active rows from
 ///      hidden → `[T_active, H]` F32.
@@ -589,9 +588,8 @@ fn per_position_forward_kt(
 /// `opd_top_k_reverse_kl` dispatch entry; the candle-typed scalar-mean
 /// surface that wrapped this via `OpdLossCustomOp` was also deleted in
 /// (#1082, 2026-05-28) along with the rest of `phase_b.rs`'s candle
-/// surface — production callers run the kt-shim per-position entry
-/// `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
-/// + `mean_all` instead.)
+/// surface — production callers run the kt-tape entry
+/// [`crate::opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape`] instead.)
 ///
 /// - `hidden`: `[1, T, H]` student hidden states.
 /// - `head_t`: `[H, V]` transposed LM head (matches kiln's
@@ -616,17 +614,15 @@ fn per_position_forward_kt(
 ///
 /// # Backward
 ///
-/// Backward is not yet implemented in the kt-typed scalar-mean path
-/// — the per-position kt-typed backward
-/// [`opd_top_k_reverse_kl_phase_b_bwd_kt`] is wired, but a scalar-
-/// mean wrapper around it would need a `mean_all` autograd recorder
-/// that we haven't yet implemented in `kiln_autograd`. Production
-/// callers go through the candle kt-shim
-/// `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
-/// (per-position) + `mean_all` instead. (Historical: pre-`#1082`
-/// 2026-05-28 the candle `CustomOp1` `OpdLossCustomOp` owned this
-/// entry's backward via `apply_op1`; that wrapper was deleted with
-/// the rest of `phase_b.rs`'s candle surface.)
+/// Backward is wired: the scalar-mean path is the fused unit-grad
+/// backward `opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt`
+/// (plus the device-agnostic
+/// [`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`]), and production
+/// callers go through the kt-tape entry
+/// [`crate::opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape`]. (Historical:
+/// pre-`#1082` 2026-05-28 the candle `CustomOp1` `OpdLossCustomOp`
+/// owned this entry's backward via `apply_op1`; that wrapper was
+/// deleted with the rest of `phase_b.rs`'s candle surface.)
 pub fn opd_top_k_reverse_kl_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -762,14 +758,15 @@ pub fn opd_top_k_reverse_kl_per_position_with_metadata_kt(
     Ok((per_token, Some(active_metadata)))
 }
 
-/// kt-typed parallel of [`crate::PerPositionMetrics`].
+/// kt-typed parallel of the (now-deleted, #1082) candle-typed
+/// `PerPositionMetrics` struct.
 ///
 /// Three parallel `[T_active]` arrays carrying the per-position
 /// distribution-alignment diagnostics (§3.8 of the OPD grand plan).
 /// Lengths are all equal to the number of active positions.
 ///
-/// Mirrors the candle-typed [`crate::PerPositionMetrics`] struct so
-/// the Phase B kt-rewrite has a stable target type to populate.
+/// Mirrors the (now-deleted, #1082) candle-typed `PerPositionMetrics`
+/// struct so the Phase B kt-rewrite has a stable target type to populate.
 #[derive(Debug, Clone, Default)]
 pub struct PerPositionMetricsKt {
     /// Per-position student entropy over the teacher's K support, in
@@ -851,11 +848,11 @@ fn read_f32_vec(t: &KtTensor) -> Result<Vec<f32>, OpdLossError> {
 ///   H(q_hat)[t] = -sum_k q_hat[t, k] * log_q_hat[t, k]
 ///
 /// where `p_hat`, `q_hat` are the student / teacher distributions
-/// renormalised over the K support (see the candle reference
-/// [`crate::compute_per_position_metrics`] for the definition).
+/// renormalised over the K support (see the (now-deleted, #1082)
+/// candle reference `compute_per_position_metrics` for the definition).
 ///
-/// # Shape contract (matches the candle-typed
-/// [`crate::compute_per_position_metrics`] entry point)
+/// # Shape contract (matches the (now-deleted, #1082) candle-typed
+/// `compute_per_position_metrics` entry point)
 ///
 /// - `hidden`: `[1, T, H]` student hidden states.
 /// - `head_t`: `[H, V]` transposed LM head.
@@ -947,8 +944,8 @@ pub fn compute_per_position_metrics_kt(
 /// when the trainer hands out a per-token upstream gradient).
 ///
 /// Kept public so call sites on the kt substrate don't have to drag
-/// in the candle-typed `phase_b::OpdLossOutput`. The two enums are
-/// 1:1 isomorphic; convert between them with a match.
+/// in the (now-deleted, #1082) candle-typed `phase_b::OpdLossOutput`
+/// (the two were 1:1 isomorphic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpdLossOutputKt {
     /// Mean over active positions; `grad_loss` is a 0-D or 1-element
@@ -1215,12 +1212,9 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 /// kernel.
 ///
 /// Wraps the same FFI symbols
-/// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) the candle backward path uses
-/// (`crate::phase_b::OpdLossCustomOp::cuda_kernel_backward`), so the
-/// two are bit-exact by construction. Substrate-only: this entry
-/// point does not migrate the `CustomOp1::bwd` body — a follow-up
-/// task wires the bridge through `OpdLossCustomOp::bwd` once this
-/// kt-typed substrate is in place.
+/// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) the (now-deleted, #1082) candle
+/// backward path used (via `OpdLossCustomOp::cuda_kernel_backward`),
+/// so the two are bit-exact by construction.
 ///
 /// # Shape contract
 ///
@@ -1612,7 +1606,8 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
 
     // -- 6. Dispatch the FFI --------------------------------------------
     //
-    // Same kernel symbols the candle path uses; bit-exact by
+    // Same kernel symbols the (now-deleted, #1082) candle path used;
+    // bit-exact by
     // construction. The output buffer is freshly zero-allocated via
     // `alloc_device_tensor_like`, so the kernel's writes land in a clean
     // F32/BF16 tile of the expected size.

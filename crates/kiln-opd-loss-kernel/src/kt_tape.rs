@@ -6,9 +6,10 @@
 //!
 //! # Why this module exists
 //!
-//! The existing `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
-//! wraps the kt-tensor forward + the CUDA analytic backward inside a candle
-//! `CustomOp1` (`KtForwardOp1`). It used to keep the candle dependency alive
+//! The kiln-train candle shim that once wrapped the kt-tensor forward +
+//! the CUDA analytic backward inside a candle `CustomOp1`
+//! (`KtForwardOp1`) was deleted in the #1082 candle drop. It used to
+//! keep the candle dependency alive
 //! in the opd-loss-kernel crate, but (#1082) relocated it (and the rest of
 //! the candle glue) UP into `kiln-train::opd_tape_shim` so this crate is
 //! now candle-free — even though both
@@ -18,12 +19,12 @@
 //! [`crate::opd_top_k_reverse_kl_kt`]) + the kt-typed backward
 //! ([`crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`]).
 //!
-//! This module is the parallel entry that drops the candle CustomOp
+//! This module drops the candle CustomOp
 //! wrapper and records the backward directly onto a
 //! `kiln_autograd::Tape`. Same FFI symbols (`kiln_opd_topk_kl_bwd_{bf16,f32}`),
-//! same envelope, same numerical contract. The only difference is who owns
-//! the autograd recording: candle's `BackpropOp` chain (legacy) vs. kiln's
-//! `Tape::record` (new).
+//! same envelope, same numerical contract. It supersedes the
+//! (now-deleted, #1082) candle `BackpropOp` chain, which previously
+//! owned the autograd recording.
 //!
 //! # Numerical contract
 //!
@@ -47,20 +48,20 @@
 //!
 //! # Phase-B only
 //!
-//! Phase A (pure-candle reference) does not get a kt-tape port — it
-//! has no CUDA backward kernel; its candle-autograd flow falls out of
-//! the candle ops directly and is the parity oracle, not a production
-//! path. The kt-tape entry only covers the Phase B fused CUDA backward.
+//! Phase A (the (now-deleted, #1082) pure-candle reference) did not get
+//! a kt-tape port — it had no CUDA backward kernel; its candle-autograd
+//! flow fell out of the candle ops directly and was the parity oracle,
+//! not a production path. The kt-tape entry only covers the Phase B
+//! fused CUDA backward.
 //!
-//! # Production caller migration
+//! # Production caller
 //!
-//! Out of scope for this commit ((#1082)). The production caller in
-//! `kiln-train` still uses the candle CustomOp path
-//! (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
-//! Migration lands once the wider kiln-train autograd substrate adopts
-//! kt-tape — keeping the two paths in parallel for now matches the
-//! "parallel shim, flip when ready" rollout cadence the issue
-//! authorises.
+//! This kt-tape module is now the production path. The historical
+//! candle `CustomOp1` path in `kiln-train` (the
+//! `opd_top_k_reverse_kl_per_position_via_kt_forward_op` shim) was
+//! deleted in the #1082 candle drop; kiln-train now records the kt-tape
+//! entries directly (e.g.
+//! `opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt`).
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_tensor::{
@@ -135,9 +136,9 @@ fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor, top_k: usize) -> bool {
 ///
 /// On `apply(grad_loss)` it calls
 /// [`opd_top_k_reverse_kl_phase_b_bwd_kt`], which dispatches the same
-/// FFI symbols (`kiln_opd_topk_kl_bwd_{bf16,f32}`) the candle
-/// `OpdLossCustomOp::bwd` path uses and returns `d_hidden` of shape
-/// `[1, T, H]` in the input dtype.
+/// FFI symbols (`kiln_opd_topk_kl_bwd_{bf16,f32}`) the (now-deleted,
+/// #1082) candle `OpdLossCustomOp::bwd` path used and returns
+/// `d_hidden` of shape `[1, T, H]` in the input dtype.
 ///
 /// # Tape input (`input_count = 1`)
 ///
@@ -198,7 +199,7 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
         //    route through the perf-tuned fused FFI kernel
         //    `kiln_opd_topk_kl_bwd_{f32,bf16}` via
         //    `opd_top_k_reverse_kl_phase_b_bwd_kt`. Bit-identical to the
-        //    candle/kt-tape CUDA paths — unchanged.
+        //    (now-deleted, #1082) candle CUDA path — unchanged.
         //
         //  - CPU / Metal storage: route through the device-agnostic
         //    analytic kt-composite `..._bwd_composite_kt`, which derives
@@ -308,14 +309,15 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
 }
 
 /// kt-tape Phase-B per-position forward+backward — Phase 6a/CP-4
-/// successor to
+/// successor to the (now-deleted, #1082)
 /// `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`.
 ///
 /// Runs the kt-typed Phase-A forward via
 /// [`opd_top_k_reverse_kl_per_position_kt`], then records a tape node
 /// whose backward calls
 /// [`opd_top_k_reverse_kl_phase_b_bwd_kt`] on the same FFI symbols
-/// as the candle Phase-B `CustomOp1`. No candle types touched — the
+/// as the (now-deleted, #1082) candle Phase-B `CustomOp1`. No candle
+/// types touched — the
 /// input, output, and recorded saved tensors are all
 /// `kiln_tensor::Tensor`.
 ///
@@ -324,8 +326,8 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
 /// Same as [`opd_top_k_reverse_kl_phase_b_bwd_kt`]: CUDA + matching
 /// F32/BF16 `(hidden, head_t)` dtype + `top_k ∈ {16, 32}`. Out-of-
 /// envelope inputs return an `Err` rather than silently falling back;
-/// the production caller is expected to pre-check exactly like the
-/// existing kt-forward-op shim does.
+/// the production caller is expected to pre-check the envelope (via the
+/// `cuda_kernel_supports` helper) before calling.
 ///
 /// # Tape integration
 ///
@@ -743,8 +745,8 @@ mod tests {
             // Pick K unique indices < vocab_size per active row. We just
             // step through [0, vocab_size) modulo K positions; the
             // backward kernel doesn't require uniqueness for parity,
-            // but mirroring the candle reference's preferred contract
-            // keeps the parity tests well-defined.
+            // but mirroring the (now-deleted, #1082) candle reference's
+            // preferred contract keeps the parity tests well-defined.
             let mut indices = Vec::with_capacity(active_count * top_k);
             let mut logprobs = Vec::with_capacity(active_count * top_k);
             for _row in 0..active_count {

@@ -23,12 +23,11 @@
 //!   `kiln_opd_topk_kl_bwd_{bf16,f32}` — still called by the
 //!   kt-typed backward
 //!   [`crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`], which
-//!   powers both the kt-tape pilot
+//!   powers the kt-tape entry
 //!   ([`crate::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`])
-//!   and the candle kt-forward-op shim
-//!   (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
+//!   and the direct kt-typed scalar-mean / per-position backward entries.
 //! * [`cuda_kernel_supports`] — the `(K ∈ {16, 32}, dtype ∈ {F32, BF16})`
-//!   envelope used by both call sites above.
+//!   envelope used by the call sites above.
 //!
 //! What was removed:
 //!
@@ -38,7 +37,8 @@
 //! * `OpdLossOutput` enum (scalar-mean vs per-position output mode).
 //! * `opd_loss_phase_b_backward_via_kt_bridge` +
 //!   `opd_bwd_kt_bridge_disabled` (the on-by-default bridge into the
-//!   kt-typed backward — now reached only through the kt-shim).
+//!   kt-typed backward, which is now reached directly via the kt-typed
+//!   backward entries).
 //! * Fused-FWD FFI declarations
 //!   `kiln_opd_topk_kl_fwd_{bf16,f32}` — only called by the deleted
 //!   `OpdLossCustomOp::cuda_kernel_forward`. The production path runs
@@ -71,9 +71,9 @@ use kiln_tensor::DType;
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     // crate-visible so `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`
-    // can call the same FFI symbols the (removed) candle path used.
-    // Bit-exact by construction across the kt-shim and kt-tape paths
-    // since they share these symbols.
+    // can call the same FFI symbols the (removed, #1082) candle path
+    // used. Bit-exact by construction across the kt-tape and direct
+    // kt-typed backward paths since they share these symbols.
     pub(crate) fn kiln_opd_topk_kl_bwd_bf16(
         hidden: *const core::ffi::c_void,
         head_t: *const core::ffi::c_void,
