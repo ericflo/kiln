@@ -818,6 +818,9 @@ pub(super) fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor>
     Ok(kiln_tensor::ops::gt(&rows, &cols)?)
 }
 
+// Called only by the `#[cfg(feature = "cuda")]` / `#[cfg(feature = "metal")]`
+// GDN tests (tests/mod.rs); dead in default-lane test builds — allow required
+// (verified by default-lane test probe).
 #[cfg(test)]
 #[allow(dead_code)]
 pub(super) fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
@@ -886,6 +889,9 @@ pub(super) fn gdn_backward_chunk_masks(
     })
 }
 
+// No callers in any lane (the reference tests build masks via
+// `causal_lower_tri_bool` directly) — dead in every test build; allow
+// required (verified by default-lane test probe).
 #[cfg(test)]
 #[allow(dead_code)]
 pub(super) fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
@@ -956,6 +962,9 @@ pub(super) fn compute_w_chunk_fallback(
     Ok(Tensor::cat(&w_rows, 2)?)
 }
 
+// Reference implementation of the chunked GDN body with no current callers
+// (production uses the fused kernel path) — dead in the non-test build;
+// allow required (verified by default-lane probe).
 #[allow(dead_code)]
 pub(super) fn compute_chunk_body_reference(
     a_strict: &Tensor,
