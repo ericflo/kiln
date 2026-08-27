@@ -69,9 +69,10 @@ fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
 
 /// kt-native SiLU tape recorder (#1082 seam flip). Takes the kt activation
 /// directly and records a `SiluBackward` onto the active tape with
-/// **no candle round-trip**. Bottoms out in the same `kiln_tensor::ops::silu`
-/// + `SiluBackward` as a direct composite, so forward + backward are
-/// bit-identical (guarded by `tape_forward_parity` + the SFT FD test).
+/// **no candle round-trip**. Bottoms out in the same
+/// `kiln_tensor::ops::silu` + `SiluBackward` as a direct composite, so
+/// forward + backward are bit-identical (guarded by `tape_forward_parity` +
+/// the SFT FD test).
 /// Chaining is preserved: the returned kt is a recorded tape-node output, so
 /// a downstream kt-native op consumes it directly.
 ///

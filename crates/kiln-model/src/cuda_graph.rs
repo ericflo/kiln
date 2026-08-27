@@ -2702,9 +2702,10 @@ impl CudaGraphRunner {
     }
 
     /// #1082 box-102 FIX: graph-stable `[1, 1, hidden_size]` PRE-final-norm
-    /// hidden buffer. The captured `HiddenOnly` forward writes here; final_norm
-    /// + lm_head run eagerly on it after replay (the lm_head GEMV is not
-    /// graph-replay-safe). Dtype matches the model's hidden dtype (bf16).
+    /// hidden buffer. The captured `HiddenOnly` forward writes here;
+    /// final_norm + lm_head run eagerly on it after replay (the lm_head
+    /// GEMV is not graph-replay-safe). Dtype matches the model's hidden
+    /// dtype (bf16).
     #[cfg(feature = "cuda")]
     fn new_output_hidden(
         config: &ModelConfig,

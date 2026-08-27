@@ -3783,6 +3783,7 @@ fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket() -> Result<
 ///   2. drive `CudaGraphRunner::decode_step_paged` through the same three
 ///      positions against a second fresh prefix-only cache: call 1 = eager
 ///      warmup, call 2 = stream capture, call 3 = graph replay.
+///
 /// We assert (a) a graph was actually captured (guards against a silent
 /// eager fallback making the comparison vacuous), and (b) the replay
 /// logits match the eager reference with token/argmax parity + a

@@ -1,17 +1,17 @@
 use super::*;
 
-/// Pre-allocated lm-head output buffer installed by the captured-graph
-/// runner. When present, [`try_kt_lm_head`] writes the matmul result
-/// directly into this kt Tensor via [`kiln_tensor::cuda_matmul_into`]
-/// instead of allocating a fresh per-call output. The buffer's device
-/// pointer is then stable across captured-graph replays, so the
-/// downstream `slice_set(&logits, …)` records a memcpy whose source
-/// address remains valid on every replay.
-///
-/// This is the lm-head twin of `kiln_gdn_kernel::with_decode_gates_recurrent_outputs`
-/// — the same pre-allocate-outside-capture / install-via-thread-local
-/// trick that fixed the GDN decode kernel's intra-capture allocation
-/// hazard (`cuda_graph.rs:1592-1601` documentation). Phase 5 #1082.
+// Pre-allocated lm-head output buffer installed by the captured-graph
+// runner. When present, [`try_kt_lm_head`] writes the matmul result
+// directly into this kt Tensor via [`kiln_tensor::cuda_matmul_into`]
+// instead of allocating a fresh per-call output. The buffer's device
+// pointer is then stable across captured-graph replays, so the
+// downstream `slice_set(&logits, …)` records a memcpy whose source
+// address remains valid on every replay.
+//
+// This is the lm-head twin of `kiln_gdn_kernel::with_decode_gates_recurrent_outputs`
+// — the same pre-allocate-outside-capture / install-via-thread-local
+// trick that fixed the GDN decode kernel's intra-capture allocation
+// hazard (`cuda_graph.rs:1592-1601` documentation). Phase 5 #1082.
 #[cfg(feature = "cuda")]
 thread_local! {
     static LM_HEAD_OUTPUT_BUFFER: std::cell::RefCell<Option<Tensor>> =

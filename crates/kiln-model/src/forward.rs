@@ -1651,8 +1651,8 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 /// `kiln/sum_axis_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 ///
-/// Distinct from [`try_kt_sum_last_dim_keepdim`] (the trailing-axis
-/// + keepdim variant). The kt kernel under both helpers is the
+/// Distinct from [`try_kt_sum_last_dim_keepdim`] (the trailing-axis +
+/// keepdim variant). The kt kernel under both helpers is the
 /// same `reduce_arbitrary_axis` (commit `7ca6cabd`) — this helper
 /// just exposes its native non-keepdim shape directly to kt
 /// `Tensor::sum(axis)` call sites.

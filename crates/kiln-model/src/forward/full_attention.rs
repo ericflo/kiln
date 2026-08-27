@@ -703,8 +703,8 @@ pub fn gqa_attention_prepare_prefill(
 /// Phase 7 default-on (#1082) — region-3 kt-native consolidation of the
 /// GQA full-attention **naive-SDPA fallback**'s two cublasLt matmuls.
 ///
-/// Computes the non-flash fallback `attn_output = softmax((q @ kᵀ)/√hd
-/// + causal_mask) @ v` for the GQA-expanded, head-FIRST operands
+/// Computes the non-flash fallback `attn_output = softmax((q @ kᵀ)/√hd +
+/// causal_mask) @ v` for the GQA-expanded, head-FIRST operands
 /// (`q`/`k`/`v` all `[B, nq, T, hd]`), routing the **score matmul**
 /// (`q @ kᵀ`) and the **value matmul** (`p @ v`) through the kt substrate
 /// (`kiln_tensor::ops::{matmul_rhs_transposed, matmul}`) with the active
