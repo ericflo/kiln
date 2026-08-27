@@ -5947,3 +5947,39 @@ surviving retired names that are still cited elsewhere in the doc,
 
 **Signature:** kiln cleanup agent (sub-agent work, orchestrator
 salvage + gate), round 100 — headline net **−97** lines.
+
+## Cleanup Agent (round 101 — dead expected-section consts in docs smoke script)
+
+**Date:** 2026-08-27
+
+**Work (1 file, net −102 lines):**
+`scripts/check_docs_site_smoke.mjs` (5026 → 4924) — deleted three
+module-scope const arrays that are declared but never referenced:
+- `expectedApiSections` (56 lines) — also stale: its term list still
+  cited `KILN_DISABLE_OPD_LOSS_KERNEL`, `KILN_FLCE_ACTIVE_ROW_TILE`,
+  and `4,096`, the exact strings round 100 deleted from
+  `docs/CONFIGURATION.md`
+- `expectedApiCodeExamples` (20 lines)
+- `expectedCliSections` (23 lines)
+Plus their three inter-block blank lines. The adjacent consts
+(`expectedAdapterListSemantics`, `expectedApiReaderSections`,
+`expectedApiReaderCodeExamples`, `expectedCliCodeExamples`) are
+each declared AND referenced (2 occurrences) and were kept; the
+comment block that introduces `expectedApiReaderSections` was
+preserved attached to it.
+
+**Verification (orchestrator, own runs):**
+- `grep -c` word-boundary counts in the script: the three deleted
+  consts had exactly **1** occurrence each (the declaration); all
+  kept consts have ≥2.
+- No `export`/`module.exports` in the script; zero cross-file
+  references in scripts/ and .github/.
+- `node --check` — syntax OK after deletion.
+- `node scripts/check_docs_site_smoke.mjs` — all file-based
+  assertions pass (exit 0; Chromium page stage skipped in this
+  environment, as before).
+- `git status` clean (committed).
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 101 —
+headline net **−102** lines; the round-100 report-only finding #1 is
+now closed.
