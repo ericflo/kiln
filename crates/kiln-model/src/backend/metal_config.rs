@@ -192,8 +192,9 @@ pub(super) fn metal_lora_delta_decode_disabled() -> bool {
 }
 
 pub(super) fn metal_lm_head_argmax_disabled() -> bool {
-    // On the Qwen3.5-4B macOS desktop path, Candle's materialized last-row
-    // projection plus argmax is faster than this custom chunk/reduce kernel.
+    // On the Qwen3.5-4B macOS desktop path, the portable materialized
+    // last-row projection plus argmax is faster than this custom
+    // chunk/reduce kernel.
     // Keep the kernel available for tuning, but require explicit opt-in.
     !current_metal_kernel_policy().lm_head_argmax
 }
