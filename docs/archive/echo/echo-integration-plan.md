@@ -1,5 +1,14 @@
 # The ECHO Integration Plan
 
+> **Archived 2026-08-26 — plan landed.** Every phase below (0–4) is implemented
+> in the live tree: `kiln-train::echo` and `trajectory_mask` are live modules,
+> ECHO is on by default in `LossConfig::default()` (λ=0.05), and the OPD
+> composition (Phase 4) was restored at `0e0606f73` (#1531). Landing commits
+> include `8a9181a70` (#1502), `7c746208d` (#1512), `a8de9dd85` (#1518),
+> `0e0606f73` (#1531). See [`README.md`](README.md) for the archive note; the
+> live user-facing surface is `docs/ECHO_GUIDE.md` + README "ECHO-by-default".
+> The reference corpus stays at `docs/papers/echo/` (paper + blog).
+
 > *Make environment-token cross-entropy a first-class loss term across the kiln agentic-RL stack — on by default, native everywhere, composed cleanly with OPD.*
 
 **Status:** Draft. Branch `use-breakthrough-echo-grpo-technique-throughout`. The reference docs for the technique live at `docs/papers/echo/` (paper + blog).
@@ -419,7 +428,7 @@ Long-term we add an explicit `/v1/train/agentic` alias to signal the canonical p
 - New `docs/ECHO_GUIDE.md` (peer to existing `docs/GRPO_GUIDE.md`). Single page: what ECHO is, when to turn it off, how to interpret the diagnostics, how to read `dynamics_holdout_ce`.
 - `README.md` GRPO section gets one paragraph: "kiln's GRPO is ECHO-by-default for agentic rollouts (trajectories with tool calls); for single-turn rewards it behaves identically to classical GRPO."
 - `CHANGELOG.md`: one entry per phase below.
-- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan, written when Phase 1 lands.
+- `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan, written when Phase 1 lands.
 
 ---
 
@@ -522,7 +531,7 @@ The naming refactor is already done in Phase 0; this phase is just the rounding-
 
 - `capabilities/agentic-grpo/pi-script-fixup` — verifier-free env-only adaptation cap (paper §5.5 demo). Mask GRPO term off, train only on env CE for 100 steps from the strongest Phase 2 checkpoint. Demonstrates the perpetual-improvement-without-judge loop that pairs with OPD plan §10.6's self-distillation loop.
 - `docs/ECHO_GUIDE.md`, README/CHANGELOG/QUICKSTART updates.
-- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan.
+- `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan.
 
 ### Phase 4 — Compose with OPD (subsequent, dependent on OPD branch state)
 

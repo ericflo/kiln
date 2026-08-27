@@ -1292,7 +1292,7 @@ impl Default for SftConfig {
 // byte-identical, plus an optional `trajectory` field on each rollout
 // that ECHO consumes. Legacy callers see no field-name change.
 //
-// See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
+// See `docs/archive/echo/echo-integration-plan.md` §2 and §B.1 for the design.
 
 pub use crate::openenv_provenance::{
     OPENENV_TRAINING_DATA_PROVENANCE_SCHEMA_V1, OpenEnvTerminationCountsV1,
@@ -1752,7 +1752,7 @@ pub enum EnvMaskMode {
 
 /// Configuration for ECHO — the auxiliary environment cross-entropy loss
 /// on tool/observation tokens. See
-/// `docs/papers/echo/echo_paper.md` and `docs/plans/echo-integration-plan.md`.
+/// `docs/papers/echo/echo_paper.md` and `docs/archive/echo/echo-integration-plan.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EchoConfig {
     /// Mixing coefficient for the env-CE term: `L_total = L_policy + λ · L_envCE`.

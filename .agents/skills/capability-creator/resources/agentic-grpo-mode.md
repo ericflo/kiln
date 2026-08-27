@@ -215,6 +215,6 @@ In addition to GRPO fields (groups_*, reward_*, kl_*):
 - `caps/pi-terminal-bench-lite/` — multi-turn paper-track + verifier-free
 - `caps/pi-script-fixup/` — `--no-policy-loss` reference
 - `caps/pi-faithful-completion/` — multi-stage pilot for round 3
-- `docs/plans/echo-integration-plan.md` — ECHO design + masking layer
+- `docs/archive/echo/echo-integration-plan.md` — ECHO design + masking layer
 - `crates/kiln-train/src/echo.rs` — the loss term
 - `crates/kiln-train/src/trajectory_mask.rs` — the masking layer

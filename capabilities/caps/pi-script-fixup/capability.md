@@ -1,6 +1,6 @@
 # pi-script-fixup — verifier-free ECHO adaptation
 
-**Status:** Scaffold. Phase 3 of `docs/plans/echo-integration-plan.md` —
+**Status:** Scaffold. Phase 3 of `docs/archive/echo/echo-integration-plan.md` —
 the showcase cap for paper §5.5 *verifier-free env-only adaptation*.
 
 **Goal:** demonstrate that a strong-but-stable agentic LoRA can keep

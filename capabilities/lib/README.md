@@ -73,7 +73,7 @@ Python parser remains for two reasons:
 
 ## Schema reference
 
-See `docs/plans/echo-integration-plan.md` §3.3 for the canonical
+See `docs/archive/echo/echo-integration-plan.md` §3.3 for the canonical
 trajectory schema (action / observation / context segments + `warning_prefix_len`)
 that both pi-trajectory parsers target.
 See [`../PIPELINE.md`](../PIPELINE.md) §2.3 and §3.1 for the `stages/`

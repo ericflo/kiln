@@ -295,7 +295,7 @@ The 4B base does use grep when prompted explicitly, but its default is
 
 - OPD cap `capabilities/caps/code-symbol-extraction/` — sibling skill at
   single-file granularity.
-- `docs/plans/echo-integration-plan.md` §3.4 — ECHO defaults.
+- `docs/archive/echo/echo-integration-plan.md` §3.4 — ECHO defaults.
 
 
 ## Round 2 setup

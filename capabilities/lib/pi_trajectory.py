@@ -31,7 +31,7 @@ Tool-call args have appeared under both b["input"] and b["arguments"]
 across pi versions. Tool result blocks use b["content"] (string) and
 b["toolCallId"] for correlation.
 
-See `docs/plans/echo-integration-plan.md` §3.3 and §B.8 for the design.
+See `docs/archive/echo/echo-integration-plan.md` §3.3 and §B.8 for the design.
 """
 from __future__ import annotations
 

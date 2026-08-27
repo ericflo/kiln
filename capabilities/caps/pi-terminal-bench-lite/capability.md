@@ -16,7 +16,7 @@ variant — `OpenThoughts-TBLite` from the paper Table 1 (100 small-model
 calibrated tasks) — is exactly the right shape for our hardware.
 
 This cap is the dedicated paper-reproduction receipt the integration
-plan specified at Phase 2 (`docs/plans/echo-integration-plan.md` §5
+plan specified at Phase 2 (`docs/archive/echo/echo-integration-plan.md` §5
 Phase 2). It's deliberately separate from `pi-doctest` so the receipt is
 clean: same rubric, same task budget, same recipe across runs; only
 `--no-echo` vs default ECHO changes between paired runs.

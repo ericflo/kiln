@@ -5,7 +5,7 @@
 //! role (assistant) to multiple (assistant + tool / observation), and adds
 //! the paper §3.2 harness-warning-prefix exclusion for env spans.
 //!
-//! See `docs/plans/echo-integration-plan.md` §3.2 and §B.2 for the design.
+//! See `docs/archive/echo/echo-integration-plan.md` §3.2 and §B.2 for the design.
 //!
 //! [`Trajectory`]: crate::trajectory
 
@@ -846,7 +846,7 @@ mod tests {
     /// Verifies that the byte-search masking strategy correctly handles
     /// the *real* Qwen tool_response wrapper, not just my synthetic
     /// fixture template. This is the load-bearing test for the S2 risk
-    /// flagged in docs/plans/echo-integration-plan.md §6.1
+    /// flagged in docs/archive/echo/echo-integration-plan.md §6.1
     /// (Tool-result delimiter mismatch with the active chat template).
     #[test]
     fn build_masks_against_real_qwen_tokenizer() -> anyhow::Result<()> {

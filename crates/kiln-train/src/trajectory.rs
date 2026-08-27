@@ -1,6 +1,6 @@
 //! Canonical trajectory schema for agentic rollouts.
 //!
-//! See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
+//! See `docs/archive/echo/echo-integration-plan.md` §2 and §B.1 for the design.
 //!
 //! A trajectory is an ordered sequence of [`TurnSegment`]s. Each segment
 //! belongs to a [`TurnKind::Context`] (prompt scaffolding), [`TurnKind::Action`]

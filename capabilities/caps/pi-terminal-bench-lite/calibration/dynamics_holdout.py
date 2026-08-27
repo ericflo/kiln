@@ -6,7 +6,7 @@ reduce env-CE by ≥30%, while GRPO-only should barely move it (paper §5.2
 Figure 3).
 
 This script is the Phase 2 validation gate from
-docs/plans/echo-integration-plan.md §5 Phase 2: "Dynamics holdout CE
+docs/archive/echo/echo-integration-plan.md §5 Phase 2: "Dynamics holdout CE
 drops by at least 30% on the ECHO checkpoint vs the GRPO-only
 checkpoint AND pass-rate strictly improves."
 
@@ -73,7 +73,7 @@ def kiln_chat_logprobs(url: str, messages: list[dict], target_tokens: list[str])
     raise NotImplementedError(
         "kiln_chat_logprobs requires kiln's prompt_logprobs extension; \n"
         "filed as an integration follow-up. See \n"
-        "docs/plans/echo-integration-plan.md §C.2 for the intended shape."
+        "docs/archive/echo/echo-integration-plan.md §C.2 for the intended shape."
     )
 
 

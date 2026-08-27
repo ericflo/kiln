@@ -209,7 +209,7 @@ Each family should have ≥20 training tasks balanced stale/holds-true.
 
 ## References
 
-- `docs/plans/echo-integration-plan.md` §3.1, §3.4 — ECHO defaults.
+- `docs/archive/echo/echo-integration-plan.md` §3.1, §3.4 — ECHO defaults.
 - `capabilities/caps/pi-doctest/capability.md` — v1 rubric pattern.
 - Saved clouderic notes: `verify-before-implementing`,
   `verify-bugs-before-fixing`, `verify-data-shape-before-implementing`,

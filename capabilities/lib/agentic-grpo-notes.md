@@ -28,7 +28,7 @@ Empirically this:
 - composes cleanly with the existing GRPO surrogate and KL terms.
 
 ECHO is **on by default** in `LossConfig::default()` (see
-`docs/plans/echo-integration-plan.md` §3.4). The CLI surface is
+`docs/archive/echo/echo-integration-plan.md` §3.4). The CLI surface is
 `--echo-lambda <f64>` to override and `--no-echo` to disable. Every stage
 using the `agentic-grpo` method should keep ECHO on unless the cap's
 `pipeline.md::stage_transition_rationale` documents an explicit reason to
@@ -145,8 +145,8 @@ depend on them. Per-cap round-1 artifacts are preserved under each
 - [`../PIPELINE.md`](../PIPELINE.md) — how agentic-GRPO chains with other methods
 - [`../KILN_IMPROVEMENT_ISSUES.md`](../KILN_IMPROVEMENT_ISSUES.md) — kiln features
 - [`../CONSOLIDATED_REPORT.md`](../CONSOLIDATED_REPORT.md) — round-1 lessons
-- `docs/plans/echo-integration-plan.md` — the ECHO design + masking layer
-- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md`
+- `docs/archive/echo/echo-integration-plan.md` — the ECHO design + masking layer
+- `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md`
 - `crates/kiln-train/src/echo.rs` — the loss term
 - `crates/kiln-train/src/trajectory_mask.rs` — the masking layer
 - `crates/kiln-train/src/pi_trajectory.rs` — kiln's pi-session normalizer

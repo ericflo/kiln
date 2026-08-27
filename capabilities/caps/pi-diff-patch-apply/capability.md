@@ -257,7 +257,7 @@ ECHO default: λ=0.05, env-only mask, warning_filter=on.
 - `capabilities/caps/pi-doctest/` — closest agentic-GRPO sibling.
 - `capabilities/caps/pi-compaction/` — backup_to_b2 and drive_iters template.
 - `crates/kiln-train/src/echo.rs` — ECHO loss term.
-- `docs/plans/echo-integration-plan.md` §3.1, §3.3.
+- `docs/archive/echo/echo-integration-plan.md` §3.1, §3.3.
 
 
 ## Round 2 setup

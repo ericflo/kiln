@@ -1,5 +1,14 @@
 # A Grand Plan for Extraordinarily Great ECHO for Everyone
 
+> **Archived 2026-08-26 — plan landed.** The rollout this document tracks is
+> implemented in the live tree: Phases 0–3 shipped (marked ✅ SHIPPED below)
+> and the Phase 4 OPD composition was restored at `0e0606f73` (#1531). The
+> companion contract [`echo-integration-plan.md`](echo-integration-plan.md) is
+> archived alongside. ECHO-by-default is the documented product behavior today
+> (README, `docs/ECHO_GUIDE.md`, CHANGELOG "Unreleased — ECHO"). See
+> [`README.md`](README.md) for the archive note. The "what ships after Phase 3"
+> language below describes the 2026-05-19 point in time.
+
 > *Every command an agent runs produces a response. Every response is supervision. Use it.*
 
 **Status:** Companion document to the engineering plan in [`echo-integration-plan.md`](echo-integration-plan.md). Where that one is the technical contract — phases, file:line touch points, acceptance gates — this one is the aspirational arc: why ECHO matters for kiln, who it serves, what the user-facing surface looks like, and what we ship after Phase 3.
@@ -253,7 +262,7 @@ Same hot-swap semantics as SFT/GRPO. The next inference call uses the new adapte
 - `LossConfig.no_policy_loss` flag landed in trainer.
 - `--no-policy-loss` CLI flag in `cuda_grpo_ablation`.
 - `docs/ECHO_GUIDE.md` (this document's operational peer).
-- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md` (this document).
+- `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` (this document).
 - README + CHANGELOG ECHO entries.
 
 ### Phase 4 — Compose with OPD (subsequent, dependent on OPD branch state)
