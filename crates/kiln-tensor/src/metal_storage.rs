@@ -2,19 +2,16 @@
 //!
 //! Wraps `Arc<metal::Buffer>` (the actual buffer) + dtype +
 //! `MetalRawDevice` (the metal-rs `Retained<ProtocolObject<dyn
-//! MTLDevice>>` handle, reached through `candle_metal_kernels::metal`)
-//! for kernel-FFI affinity. After the #1082 Wave-14 lift the storage
-//! is candle-core-free at the field level AND at the op level — the
-//! 7 in-file substrate ops dispatch through `MetalStorage::companion()`
-//! (a kt-native `MetalCompanion` from `metal_types`), which holds the
-//! `Device` / `Kernels` / `Commands` triple every
-//! `candle_metal_kernels::call_*` MSL kernel entry needs. The previous
-//! candle-derived `MetalStorage::candle_device()` shim and its
+//! MTLDevice>>` handle, from `crate::metal_rt`) for kernel-FFI affinity.
+//! After the #1082 Wave-14 lift the storage is candle-core-free at the
+//! field level AND at the op level — the 7 in-file substrate ops
+//! dispatch through `MetalStorage::companion()` (a kt-native
+//! `MetalCompanion` from `metal_types`), which holds the
+//! `Device` / `Kernels` / `Commands` triple the kiln-owned MSL kernel
+//! entries need. The previous candle-derived
+//! `MetalStorage::candle_device()` shim and its
 //! `primary_metal_device` (`candle_core::Device::new_metal`) hook were
-//! deleted; the only remaining `candle-core` dependency in
-//! `kiln-tensor` under the `metal` feature now lives in `metal_types.rs`
-//! (the `MetalDevice` / `DeviceId` / `Storage` / `sdpa` re-exports
-//! consumed at ~48 callsites in `kiln-model::backend::metal`).
+//! deleted.
 //!
 //! # Anti-pattern 1 compliance
 //!
@@ -51,22 +48,18 @@
 use std::any::Any;
 use std::sync::Arc;
 
-// `candle_metal_kernels` is its own crate — candle-core does NOT
-// re-export it under `metal_backend`. Depend on it directly under the
-// `metal` feature so this path resolves.
-//
 // The seven `metal_*` substrate ops in this file (softmax, rmsnorm,
 // layernorm, index_select_dim0, cast, elementwise_binary,
-// activation_unary) call directly into `candle_metal_kernels::call_*`
-// MSL kernel entry points (no `CandleTensor` / `CandleMetalStorage` /
-// `candle_nn` bridge). After Wave-14 (#1082) the 7 ops reach the MSL
-// pipeline cache + command-buffer pool through `MetalStorage::companion()`
-// — a kt-native `MetalCompanion` (defined in `metal_types`) built
-// entirely from `candle_metal_kernels` primitives (`Device::all()`,
-// `Kernels::new()`, `Commands::new(queue)`). The previous candle-derived
-// shim (`MetalStorage::candle_device()` -> `primary_metal_device`) is
-// gone — the `candle_core::metal_backend::MetalDevice` import that
-// shim's return type required has retired alongside it.
+// activation_unary) call into the kiln-owned `crate::metal_kernels`
+// MSL functions (no `CandleTensor` / `CandleMetalStorage` / `candle_nn`
+// bridge). After Wave-14 (#1082) the 7 ops reach the MSL pipeline
+// cache + command-buffer pool through `MetalStorage::companion()` — a
+// kt-native `MetalCompanion` (defined in `metal_types`) holding the
+// `crate::metal_rt` primitives (`Device::all()`, `Kernels::new()`,
+// `Commands::new(queue)`). The previous candle-derived shim
+// (`MetalStorage::candle_device()` -> `primary_metal_device`) is gone —
+// the `candle_core::metal_backend::MetalDevice` import that shim's
+// return type required has retired alongside it.
 use crate::metal_rt::Buffer as MetalBuffer;
 use crate::metal_rt::Device as MetalRawDevice;
 
@@ -93,8 +86,8 @@ pub struct MetalStorage {
     /// no longer derive a candle `MetalDevice` per call — they
     /// reach the substrate primitives through
     /// [`MetalStorage::companion`] (a kt-native `MetalCompanion`
-    /// holding `Device` / `Kernels` / `Commands` from
-    /// `candle_metal_kernels` directly, no `candle-core` involved).
+    /// holding the `Device` / `Kernels` / `Commands` primitives from
+    /// `crate::metal_rt`).
     metal_handle: MetalRawDevice,
 }
 
@@ -266,9 +259,8 @@ impl MetalStorage {
     /// The input `device` (metal-rs handle) flows directly into the
     /// storage's `metal_handle: MetalRawDevice` field via a cheap
     /// NSObject `retain` clone. The 7 internal substrate ops in this
-    /// file reach `kernels()` + `command_encoder()` for
-    /// `candle_metal_kernels::call_*` dispatch via
-    /// [`MetalStorage::companion`] — a kt-native `MetalCompanion`
+    /// file reach the kiln-owned `crate::metal_kernels` MSL functions
+    /// via [`MetalStorage::companion`] — a kt-native `MetalCompanion`
     /// holding the candle-core-free `Device` / `Kernels` / `Commands`
     /// triple. No candle wrapper is materialized anywhere on the
     /// allocation or dispatch path.
@@ -279,8 +271,8 @@ impl MetalStorage {
     /// kt-native `MetalCompanion` resolved via
     /// [`primary_metal_companion(device_index)`] wrap the same
     /// `MTLDevice` protocol object for the given ordinal — both go
-    /// through `candle_metal_kernels::metal::Device::all()` which
-    /// resolves the same registry-ID-indexed physical GPU. The new
+    /// through `crate::metal_rt::Device::all()` which resolves the
+    /// same registry-ID-indexed physical GPU. The new
     /// buffer is therefore addressable by every kernel-crate FFI that
     /// consumes `companion.device()`.
     ///
@@ -303,10 +295,10 @@ impl MetalStorage {
     /// `primary_metal_device` / `Self::candle_device()` candle-derivation
     /// shims have both been retired. This constructor and the 7 in-file
     /// substrate ops are fully candle-core-free at the field AND op
-    /// level — the ops reach `kernels()` + `command_encoder()` via
-    /// `Self::companion()` (a kt-native `MetalCompanion` from
-    /// `metal_types`, holding `candle_metal_kernels::Kernels` + `Commands`
-    /// directly).
+    /// level — the ops reach the kiln-owned `crate::metal_kernels`
+    /// MSL functions via `Self::companion()` (a kt-native
+    /// `MetalCompanion` from `metal_types`, holding the
+    /// `crate::metal_rt` `Kernels` + `Commands` primitives).
     ///
     /// The candle-typed `Self::zeros` back-compat constructor was
     /// deleted (#1082, commit 71a3b677) earlier in the lift chain; this
@@ -429,14 +421,14 @@ impl MetalStorage {
     /// in-file Metal ops in this file (softmax, rmsnorm, layernorm,
     /// index_select_dim0, cast, elementwise_binary, activation_unary)
     /// need:
-    ///   - `&candle_metal_kernels::metal::Device` for `call_*`
-    ///   - `&candle_metal_kernels::Kernels` for MSL pipeline caching
+    ///   - `&crate::metal_rt::Device` for the MSL kernel entries
+    ///   - `&crate::metal_rt::Kernels` for MSL pipeline caching
     ///   - `ComputeCommandEncoder` materialization
     ///
-    /// All three live in `candle_metal_kernels` (the sibling crate of
-    /// `candle-core`); the companion's construction path
+    /// All three live in `crate::metal_rt` (the vendored candle-free
+    /// port); the companion's construction path
     /// (`Device::all()` + `Kernels::new()` + `Commands::new(queue)`)
-    /// never touches `candle-core`. The previous candle-derived
+    /// is fully kt-native. The previous candle-derived
     /// `MetalStorage::candle_device()` shim and its `primary_metal_device`
     /// (`candle_core::Device::new_metal`) hook were retired alongside
     /// the in-file op migration (Wave 14, #1082) — `companion()` is the
@@ -484,8 +476,8 @@ impl MetalStorage {
     /// Shared/Managed buffer (the constructor's contract). Since Metal
     /// is only supported on Apple Silicon hosts, this is unconditionally
     /// `true` — querying the buffer's actual storage mode would require
-    /// reaching through `candle_metal_kernels::metal::Buffer` to the
-    /// inner `dyn MTLBuffer` protocol object, which `Buffer` does not
+    /// reaching through `crate::metal_rt::Buffer` to the inner
+    /// `dyn MTLBuffer` protocol object, which `Buffer` does not
     /// expose. Revisit when supporting Intel Macs or Private-mode
     /// buffers becomes a goal.
     pub fn is_unified_memory(&self) -> bool {
@@ -518,8 +510,7 @@ impl StorageBackend for MetalStorage {
 // Process-wide cache keyed on Metal device ordinal that materializes
 // one `MetalCompanion` per device on first access. **Candle-core-free**:
 // the companion's `Device` / `Kernels` / `Commands` triple comes entirely
-// from `candle_metal_kernels` (a sibling crate of candle-core, which the
-// `metal` feature already pulls).
+// from `crate::metal_rt` (the vendored candle-free port).
 //
 // Used by [`MetalStorage::companion`] as the per-call derivation hook
 // for the 7 in-file substrate ops (softmax, rmsnorm, layernorm,
@@ -553,11 +544,10 @@ static METAL_COMPANIONS: OnceLock<
 /// `MetalCompanion` for the given Metal device ordinal.
 ///
 /// Candle-core-free: under the hood this calls
-/// `candle_metal_kernels::metal::Device::all()` (same MTL device
-/// enumeration `MTLCreateSystemDefaultDevice` underpins, reached through
-/// the `candle-metal-kernels` re-export — not `candle-core`) and threads
-/// the resulting `Device` through `MetalCompanion::from_raw` to
-/// allocate the `Kernels` / `Commands` pair.
+/// `crate::metal_rt::Device::all()` (same MTL device enumeration
+/// `MTLCreateSystemDefaultDevice` underpins) and threads the resulting
+/// `Device` through `MetalCompanion::from_raw` to allocate the
+/// `Kernels` / `Commands` pair.
 ///
 /// The 7 in-file substrate ops in `metal_storage.rs` (softmax, rmsnorm,
 /// layernorm, index_select_dim0, cast, elementwise_binary,
@@ -584,8 +574,8 @@ pub fn primary_metal_companion(
     if let Some(existing) = map.get(&device_index) {
         return Ok(existing.clone());
     }
-    // Enumerate the candle_metal_kernels devices (the candle-core-free
-    // path). On Apple Silicon there's typically a single device at
+    // Enumerate the metal_rt devices (the candle-core-free path). On
+    // Apple Silicon there's typically a single device at
     // index 0 — `Device::all()` returns it (and `Device::system_default()`
     // returns the same physical GPU). On multi-GPU Macs (Pro/Studio with
     // M-Ultra) `Device::all()` exposes each GPU at its own ordinal.
@@ -2473,9 +2463,9 @@ pub fn metal_muon_step(
 /// Dispatches on `kind_tag` (matches the CUDA tags in
 /// `ActivationOp::cuda_fwd` and `UnaryArithKind::cuda_kind_tag`):
 ///   - `0`  -> Silu — MSL kernel `silu_<dt>`
-///   - `1`  -> Sigmoid — no `contiguous::*` table entry in
-///     `candle_metal_kernels`; rejected here, callers fall through
-///     to CPU until a Metal sigmoid kernel lands.
+///   - `1`  -> Sigmoid — no `contiguous::*` table entry in the
+///     kiln-owned `metal_kernels` MSL set; rejected here, callers fall
+///     through to CPU until a Metal sigmoid kernel lands.
 ///   - `2`  -> Gelu (tanh approximation) — MSL kernel `gelu_<dt>`
 ///   - `3`  -> Tanh — MSL kernel `tanh_<dt>`
 ///   - `4`  -> Relu — MSL kernel `relu_<dt>`
@@ -2611,8 +2601,8 @@ mod tests {
     ///
     /// Mirrors the `maybe_metal_raw_device` pattern in
     /// `metal_allocator.rs` — uses `MetalRawDevice::system_default()`
-    /// (the `candle_metal_kernels::metal` re-export of Apple's `metal`
-    /// crate's `Device::system_default`) so the test mod does not need
+    /// (the `crate::metal_rt` re-export of Apple's `metal` crate's
+    /// `Device::system_default`) so the test mod does not need
     /// `candle_core::Device::new_metal(0)`. This drops the
     /// `use candle_core::Device as CandleDevice` import that the test
     /// mod previously carried — one less candle hook in

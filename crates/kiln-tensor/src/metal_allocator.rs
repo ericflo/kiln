@@ -7,8 +7,7 @@
 //! `Device` plumbing.
 //!
 //! GPU-only tests live behind `KILN_TENSOR_METAL_TEST=1` so the CI
-//! compile path (which links `metal` against `candle-core` but has no
-//! Metal device) doesn't spuriously fail.
+//! compile path (which has no Metal device) doesn't spuriously fail.
 //!
 //! # Phase 7 candle-removal — CP-1 complete (allocator AND storage)
 //!
@@ -27,16 +26,6 @@
 //! ops to `.context()`, 5c3cd353 drop `CudaStorage::candle_device`
 //! field, 876e17da delete candle-typed back-compat constructors).
 //! The Metal side now mirrors all of these shapes.
-//!
-//! Internal residual at the substrate boundary: the 7 in-file
-//! substrate ops in `metal_storage.rs` still derive a candle
-//! `MetalDevice` per call via [`crate::primary_metal_companion`] for
-//! `kernels()` and `command_encoder()` access — those are the
-//! candle-cached MSL pipeline collection and command-buffer pool
-//! used by `candle_metal_kernels::call_*` FFI. The follow-up
-//! substrate lift moves an `Arc<Kernels>` + `CommandQueue` companion
-//! onto `MetalStorage` so the per-op call becomes a cheap field
-//! clone; that lift is out of scope for the CP-1 commits.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,14 +45,7 @@ pub struct MetalAllocator {
     /// The previously-held `candle_device: Arc<MetalDevice>` field
     /// was dropped alongside the allocation-path swap from
     /// `MetalStorage::zeros(candle_device, ...)` to
-    /// `MetalStorage::zeros_kt(&metal_device_handle, ...)`. External
-    /// callers needing a candle wrapper can derive one on demand via
-    /// [`crate::primary_metal_companion`] using the stored
-    /// `device_index`, or call `MetalStorage::candle_device()` on a
-    /// produced storage (which itself derives via
-    /// `primary_metal_device(device_index)` after the #1082 CP-1
-    /// final lift — MetalStorage no longer holds a candle wrapper in
-    /// its field state either).
+    /// `MetalStorage::zeros_kt(&metal_device_handle, ...)`.
     ///
     /// Mirror of [`crate::CudaAllocator::context`] (commit
     /// 03b8a34c added the companion; commit 6155e2e6 dropped the
@@ -85,9 +67,7 @@ impl MetalAllocator {
     /// entries (which extracted the metal-rs handle from a candle
     /// `MetalDevice`) were removed alongside the `metal_allocator`
     /// candle import drop (#1082); the only callers were in-source
-    /// `#[cfg(test)]` and have been migrated to this entry. External
-    /// callers needing a candle wrapper can derive one on demand via
-    /// [`crate::primary_metal_companion`].
+    /// `#[cfg(test)]` and have been migrated to this entry.
     ///
     /// Mirror of [`crate::CudaAllocator::new_ctx`].
     pub fn new_ctx(metal_device_handle: MetalRawDevice, device_index: usize) -> Self {
@@ -121,10 +101,8 @@ impl MetalAllocator {
         for _ in 0..count {
             // Route through the candle-free zeros_kt entry — after the
             // CP-1 final lift the resulting MetalStorage stores only a
-            // metal-rs MetalRawDevice in its field state (the candle
-            // wrapper, if needed downstream, is derived on demand via
-            // `MetalStorage::candle_device()` -> `primary_metal_device`).
-            // This allocator never touches the candle wrapper.
+            // metal-rs MetalRawDevice in its field state. This
+            // allocator never touches a candle wrapper.
             let metal = MetalStorage::zeros_kt(
                 &self.metal_device_handle,
                 self.device_index,
@@ -149,13 +127,7 @@ impl MetalAllocator {
     }
 
     /// Borrow the metal-rs `Device` companion handle — the canonical,
-    /// candle-free device-handle accessor. Callers that need a candle
-    /// `MetalDevice` wrapper can derive one on demand via
-    /// [`crate::primary_metal_companion`] using
-    /// [`Self::device_index()`], or call `.candle_device()` on a
-    /// produced `MetalStorage` (which after the #1082 CP-1 final lift
-    /// also derives via `primary_metal_device(device_index)` since
-    /// the storage no longer holds a candle wrapper in its field).
+    /// candle-free device-handle accessor.
     pub fn metal_device_handle(&self) -> &MetalRawDevice {
         &self.metal_device_handle
     }

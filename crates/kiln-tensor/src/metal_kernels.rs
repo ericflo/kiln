@@ -6,11 +6,8 @@
 //! established for the GEMM) instead of calling `candle_metal_kernels::call_*`.
 //! Pipelines are compiled once and cached process-wide per `(device, entry)`.
 //!
-//! These still reach the GPU through the `MetalCompanion`'s candle-derived
-//! `Device` / command pool — that substrate is the *last* candle dependency
-//! and is flipped to a pure objc2-metal substrate in a follow-up once every
-//! `call_*` here is kiln-owned (so candle's `&Device`/`&Kernels` are no
-//! longer required by any op).
+//! These reach the GPU through the `MetalCompanion`'s `Device` /
+//! command pool (both `crate::metal_rt` primitives).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
