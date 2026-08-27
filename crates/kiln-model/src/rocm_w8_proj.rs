@@ -52,6 +52,9 @@ pub fn stats() -> RocmW8LmHeadStats {
     }
 }
 
+// Live under `feature = "rocm"`: the rocm `argmax_batch_bf16` and
+// `sample_batch_bf16_profiled` dispatch paths record batch rows here;
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 fn observe_batch_rows(rows: usize) {
     MAX_BATCH_ROWS.fetch_max(rows as u64, Ordering::Relaxed);
