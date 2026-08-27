@@ -6593,3 +6593,119 @@ are fully closed.
 **Signature:** kiln cleanup agent (round 110, bounded single round) —
 headline net **−273** lines; zero justification lines added; one
 pre-existing environment failure newly documented.
+## Cleanup Agent (round 111 — kiln-tensor approx_constant lint fix + workspace clippy-red sweep)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** close round 91's round-92
+recommendation #1 — the 4 deny-by-default
+`clippy::approx_constant` errors that had made
+`cargo clippy -p kiln-tensor --all-targets` red since the pre-existing
+commit 9371035bf (first documented in round 91, "recommended for
+round 92", never fixed) — plus a full workspace sweep for the same lint
+class and any other clippy-red test targets.
+
+**Per-site fix table (5 sites, all kiln-tensor test literals; no
+strings/comments/doc examples touched):**
+
+| site | old literal | new | why semantics preserved |
+|---|---|---|---|
+| crates/kiln-tensor/src/element.rs:216 (`f32_to_bytes_round_trip`) | `vec![1.0_f32, -2.5, 3.14]` | `vec![1.0_f32, -2.5, std::f32::consts::PI]` | arbitrary-value byte round-trip test — `assert_eq!(back, v)` on a byte cast; any f32 is equally valid, value set still includes non-trivial magnitudes |
+| crates/kiln-tensor/src/element.rs:235 (`from_bytes_inverts_to_bytes`) | `vec![1.0_f32, -2.5, 3.14, 0.0]` | `vec![1.0_f32, -2.5, std::f32::consts::PI, 0.0]` | same as above — `from_bytes(to_bytes(f)) == f`; any value is equivalent |
+| crates/kiln-tensor/src/ops/like.rs:151 (`full_like_arbitrary_value`) | `full_like(&t, 3.14)` | `full_like(&t, std::f32::consts::PI)` | assertion structure unchanged — value equality through `full_like`; PI replaces 3.14 as the "arbitrary value" (test name still accurate) |
+| crates/kiln-tensor/src/ops/like.rs:153 (same test) | `assert!((v - 3.14).abs() < 1e-6)` | `assert!((v - std::f32::consts::PI).abs() < 1e-6)` | BOTH call sites use the identical constant, so the round-trip equality assertion is intact — same test, different arbitrary value |
+| crates/kiln-tensor/tests/rocm_topk_last_axis_parity.rs:87 (`topk_breaks_ties_to_lowest_index`, rocm-gated) | `vec![3.14f32; w]` | `vec![std::f32::consts::PI; w]` | all-equal tie-breaking row — the value is completely unconstrained by the assertion (ties → lowest indices); found this round by repo-wide `3.14` grep; `#![cfg(feature = "rocm")]` hides it from the default-features clippy lane (round 91's 4-site list missed it) |
+
+Note: the lint-suggested `f32::consts::PI` path form does NOT compile on
+this pinned toolchain (rustc 1.96.1, edition 2024 — E0223 "ambiguous
+associated type", reproducible with a 4-line standalone probe in both
+edition 2021 and 2024); `std::f32::consts::PI` (rustc's own help
+suggestion) is the working form and is used at all 5 sites.
+
+**Workspace sweep findings (clippy-red targets):**
+
+- The 4 default-lane kiln-tensor sites above were the ONLY
+  `approx_constant` errors in the whole workspace (repo-wide grep for
+  `approx_constant` + `3.14` float literals; the other `3.14` text hits
+  are arXiv IDs in comments, `"3.14159"` string literals in
+  kiln-eval, and kiln-vulkan-kernel's vk_tensor.rs:623 test which
+  already deliberately avoids the band — all correctly lint-free).
+- **PRE-EXISTING DEFECT (reported, NOT fixed — different crate, not a
+  trivial literal swap):** `crates/kiln-rocblas/src/hipblaslt_handle.rs:1076`
+  — `Epilogue::BiasGelu => Ok(EPI_BIAS_GELU)` references a constant
+  that no longer exists: `EPI_BIAS_GELU: i32 = 6` was deleted by
+  round-108 commit 897bbf599 ("4 dead SiLU FFI wire consts") while its
+  live read in the same file survived — the exact
+  feature-gated-live-read trap rounds 35/64/65/66 documented. Result:
+  `cargo clippy -p kiln-rocblas --features rocm` (and anything above
+  it in the rocm lane, e.g. `cargo test -p kiln-tensor --features
+  rocm`) FAILS to compile with E0425. Suggested fix: restore
+  `const EPI_BIAS_GELU: i32 = 6;` next to EPI_GELU (L99) and verify
+  the rocm lane. Left for a future round per steering (other crate,
+  semantic constant, rocm-lane verification).
+- `cargo clippy --workspace --all-targets` (the steering command)
+  aborts on THIS host before linting any member: `error: failed to
+  run custom build command for cudarc v0.19.7` — the documented
+  no-CUDA-toolkit environment limit (rounds 55/65/66/91), triggered by
+  the four kernel crates with `default = ["cuda"]`. Running the same
+  sweep with those four excluded (below) is the faithful equivalent.
+- Sweep with exclusions: `cargo clippy --workspace --exclude
+  kiln-flash-attn --exclude kiln-marlin-gemm --exclude kiln-gdn-kernel
+  --exclude kiln-conv1d-kernel --all-targets` → **rc=0, 0 errors, 0
+  `approx_constant` hits** across all 29 other workspace members
+  (kiln-autograd, kiln-blas, kiln-core, kiln-eval, kiln-flce-kernel,
+  kiln-graph, kiln-graph-cuda, kiln-graph-metal, kiln-graph-vulkan,
+  kiln-hip, kiln-kt-bridge, kiln-memory, kiln-model, kiln-mps,
+  kiln-nvtx, kiln-opd-loss-kernel, kiln-openenv, kiln-optim,
+  kiln-param, kiln-resource, kiln-rmsnorm-kernel, kiln-rocblas,
+  kiln-scheduler, kiln-server, kiln-tensor, kiln-tensor-id,
+  kiln-train, kiln-vulkan-blas, kiln-vulkan-kernel; 42 pre-existing
+  warnings, all in the protected per-crate sets — untouched).
+- NOT linted this host (environment): kiln-flash-attn,
+  kiln-marlin-gemm, kiln-gdn-kernel, kiln-conv1d-kernel
+  (`default = ["cuda"]` hard-requires the absent CUDA toolkit —
+  documented baseline, same as round 66's kiln-marlin-gemm note and
+  round 91's kiln-tensor cuda/metal lane notes).
+
+**Gates (exact lines, all run after the code commit `6d742eb68`):**
+
+- `cargo clippy -p kiln-tensor --all-targets` → **rc=0, 0 errors**
+  (was: 4 `approx_constant` errors + "could not compile kiln-tensor
+  (lib test) due to 4 previous errors; 25 warnings emitted").
+  Warning set byte-identical to the documented baseline: 14 (lib) / 25
+  (lib test, 14 duplicates) / full_sampler_chain 2 / new_ops_parity 1 /
+  rocm_diag_parity 2 / training_full_block 1 — untouched.
+- `cargo test -p kiln-tensor --lib` → **`test result: ok. 994
+  passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`** — exact
+  round-91 baseline gate.
+- `cargo test -p kiln-tensor --features rocm --test
+  rocm_topk_last_axis_parity` → BLOCKED pre-existing (not by this
+  round's change): fails in the dependency `kiln-rocblas` with the
+  E0425 `EPI_BIAS_GELU` defect above; the 5th site's edit is a
+  provably semantics-preserving literal swap in an all-equal row,
+  verified by inspection.
+- `cargo fmt --check` → **clean (rc=0, no output)**.
+- `python3 scripts/check_production_file_budget.py` → **pass** —
+  `production file budget passed: 646 files, 5000-line default, 14
+  reviewed exceptions`.
+- `python3 scripts/check_repository_artifacts.py` → **pass** —
+  `repository artifact policy passed: 6694 tracked paths,
+  124977931 bytes; CSV <= 1048576, each file <= 10485760`.
+- `git status` → clean (only the 3 kiln-tensor test-file edits before
+  the commit; nothing stray).
+
+**Commits:** `6d742eb68` (the 5-site fix), + this ledger entry.
+
+**Left for future rounds:** (a) restore the deleted `EPI_BIAS_GELU`
+constant in kiln-rocblas and verify the rocm lane end-to-end (the
+round-108 regression above); (b) the four cuda-default kernel crates
+remain un-lintable on hosts without a CUDA toolkit (environment, not
+code).
+
+**Signature:** kiln cleanup agent (round 111, bounded single round) —
+kiln-tensor `approx_constant` gap open since round 91 closed
+(4 default-lane sites + 1 rocm-gated site found this round); first
+green `cargo clippy -p kiln-tensor --all-targets` in the ledger's
+history; workspace sweep clean of the lint class everywhere it could
+build; 994/0 lib tests; one other-crate pre-existing rocm-lane
+compilation defect documented with its suggested one-line fix.
