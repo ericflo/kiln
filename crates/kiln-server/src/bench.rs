@@ -1568,281 +1568,6 @@ fn resolve_bench_spec_method_with_force(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kiln_memory::vram::LinuxDrmVendor;
-
-    #[test]
-    fn vram_probe_selector_tracks_selected_benchmark_device() {
-        assert_eq!(
-            vram_probe_selector_for_device(&kiln_tensor::Device::Cuda(2)),
-            VramProbeSelector::Nvidia(2)
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&kiln_tensor::Device::Rocm(1)),
-            VramProbeSelector::LinuxDrm {
-                index: 1,
-                vendor: Some(LinuxDrmVendor::Amd),
-            }
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&kiln_tensor::Device::Vulkan(3)),
-            VramProbeSelector::LinuxDrm {
-                index: 3,
-                vendor: None,
-            }
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&kiln_tensor::Device::Metal(4)),
-            VramProbeSelector::AppleUnified
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&kiln_tensor::Device::Cpu),
-            VramProbeSelector::None
-        );
-    }
-
-    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
-        SpeculativeDecodePolicy::default()
-    }
-
-    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
-        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
-    }
-
-    #[test]
-    fn bench_mtp_short_prompt_stays_mtp() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                128,
-                64,
-                0.0,
-                true,
-                true,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Mtp
-        );
-    }
-
-    #[test]
-    fn bench_mtp_long_greedy_prompt_falls_back_to_skip_layer() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-                64,
-                0.0,
-                true,
-                true,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::SkipLayer
-        );
-    }
-
-    #[test]
-    fn bench_mtp_long_short_output_or_sampled_prompt_turns_off() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-                31,
-                0.0,
-                true,
-                true,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Off
-        );
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-                64,
-                0.7,
-                true,
-                true,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Off
-        );
-    }
-
-    #[test]
-    fn bench_mtp_medium_prompt_stays_off_until_skip_layer_crossover() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                512,
-                64,
-                0.0,
-                true,
-                true,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Off
-        );
-    }
-
-    #[test]
-    fn bench_mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                64,
-                64,
-                0.0,
-                true,
-                false,
-                default_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Off
-        );
-    }
-
-    #[test]
-    fn bench_force_raw_mtp_bypasses_shape_routing() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                8192,
-                64,
-                0.0,
-                true,
-                false,
-                default_speculative_policy_for_test(),
-                true
-            ),
-            SpecMethod::Mtp
-        );
-    }
-
-    #[test]
-    fn bench_mtp_metal_medium_prompt_stays_off_until_4096() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                2048,
-                64,
-                0.0,
-                true,
-                false,
-                metal_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::Off
-        );
-    }
-
-    #[test]
-    fn bench_mtp_metal_4096_prompt_falls_back_to_skip_layer() {
-        assert_eq!(
-            resolve_bench_spec_method_with_force(
-                SpecMethod::Mtp,
-                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
-                64,
-                0.0,
-                true,
-                false,
-                metal_speculative_policy_for_test(),
-                false
-            ),
-            SpecMethod::SkipLayer
-        );
-    }
-
-    #[test]
-    fn bench_filter_default_is_warn() {
-        assert_eq!(bench_filter(0, false), "kiln=warn,kiln_train=warn");
-    }
-
-    #[test]
-    fn bench_filter_v_lifts_to_info() {
-        assert_eq!(bench_filter(1, false), "kiln=info,kiln_train=info");
-    }
-
-    #[test]
-    fn bench_filter_vv_lifts_to_trace() {
-        assert_eq!(bench_filter(2, false), "kiln=trace,kiln_train=trace");
-        assert_eq!(bench_filter(3, false), "kiln=trace,kiln_train=trace");
-    }
-
-    #[test]
-    fn bench_filter_quiet_wins_over_verbose() {
-        assert_eq!(bench_filter(2, true), "kiln=warn,kiln_train=warn");
-    }
-
-    #[test]
-    fn benchmark_cli_parses_explicit_speculative_and_diagnostic_controls() {
-        let args = [
-            "kiln-bench",
-            "--model-path",
-            "/models/qwen",
-            "--spec-method",
-            "mtp",
-            "--spec-num-tokens",
-            "2",
-            "--spec-draft-layers",
-            "6",
-            "--force-mtp",
-            "--log-tokens",
-            "--log-itl",
-            "--allow-experimental-speculative",
-        ]
-        .map(str::to_owned);
-        let parsed = parse_args_from(&args).expect("typed benchmark arguments");
-        assert_eq!(parsed.spec_method, Some(SpecMethod::Mtp));
-        assert_eq!(parsed.spec_num_tokens, Some(2));
-        assert_eq!(parsed.spec_draft_layers, Some(6));
-        assert!(parsed.force_mtp);
-        assert!(parsed.log_tokens);
-        assert!(parsed.log_itl);
-        assert!(parsed.allow_experimental_speculative);
-    }
-
-    #[test]
-    fn benchmark_cli_rejects_unknown_speculative_method() {
-        let args = [
-            "kiln-bench",
-            "--model-path",
-            "/models/qwen",
-            "--spec-method",
-            "maybe",
-        ]
-        .map(str::to_owned);
-        let error = parse_args_from(&args)
-            .err()
-            .expect("invalid method must fail");
-        assert!(error.to_string().contains("invalid --spec-method"));
-    }
-
-    #[test]
-    fn speculative_benchmark_requires_explicit_experimental_opt_in() {
-        let error = require_speculative_benchmark_opt_in(SpecMethod::Mtp, false)
-            .expect_err("speculative research must require an explicit acknowledgment");
-        assert!(
-            error
-                .to_string()
-                .contains("--allow-experimental-speculative")
-        );
-    }
-
-    #[test]
-    fn non_speculative_benchmark_does_not_require_experimental_opt_in() {
-        require_speculative_benchmark_opt_in(SpecMethod::Off, false)
-            .expect("the supported baseline must remain directly runnable");
-    }
-}
-
 /// Benchmark latency along the SKIP-LAYER speculative path.
 ///
 /// Uses the same flat `KvCache` + `model_forward` path as the existing
@@ -3376,4 +3101,279 @@ fn main() -> Result<()> {
     println!("{json}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_memory::vram::LinuxDrmVendor;
+
+    #[test]
+    fn vram_probe_selector_tracks_selected_benchmark_device() {
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Cuda(2)),
+            VramProbeSelector::Nvidia(2)
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Rocm(1)),
+            VramProbeSelector::LinuxDrm {
+                index: 1,
+                vendor: Some(LinuxDrmVendor::Amd),
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Vulkan(3)),
+            VramProbeSelector::LinuxDrm {
+                index: 3,
+                vendor: None,
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Metal(4)),
+            VramProbeSelector::AppleUnified
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Cpu),
+            VramProbeSelector::None
+        );
+    }
+
+    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::default()
+    }
+
+    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
+    }
+
+    #[test]
+    fn bench_mtp_short_prompt_stays_mtp() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                128,
+                64,
+                0.0,
+                true,
+                true,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Mtp
+        );
+    }
+
+    #[test]
+    fn bench_mtp_long_greedy_prompt_falls_back_to_skip_layer() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                64,
+                0.0,
+                true,
+                true,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::SkipLayer
+        );
+    }
+
+    #[test]
+    fn bench_mtp_long_short_output_or_sampled_prompt_turns_off() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                31,
+                0.0,
+                true,
+                true,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Off
+        );
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                64,
+                0.7,
+                true,
+                true,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_medium_prompt_stays_off_until_skip_layer_crossover() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                512,
+                64,
+                0.0,
+                true,
+                true,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                64,
+                64,
+                0.0,
+                true,
+                false,
+                default_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_force_raw_mtp_bypasses_shape_routing() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                8192,
+                64,
+                0.0,
+                true,
+                false,
+                default_speculative_policy_for_test(),
+                true
+            ),
+            SpecMethod::Mtp
+        );
+    }
+
+    #[test]
+    fn bench_mtp_metal_medium_prompt_stays_off_until_4096() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                2048,
+                64,
+                0.0,
+                true,
+                false,
+                metal_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_metal_4096_prompt_falls_back_to_skip_layer() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                64,
+                0.0,
+                true,
+                false,
+                metal_speculative_policy_for_test(),
+                false
+            ),
+            SpecMethod::SkipLayer
+        );
+    }
+
+    #[test]
+    fn bench_filter_default_is_warn() {
+        assert_eq!(bench_filter(0, false), "kiln=warn,kiln_train=warn");
+    }
+
+    #[test]
+    fn bench_filter_v_lifts_to_info() {
+        assert_eq!(bench_filter(1, false), "kiln=info,kiln_train=info");
+    }
+
+    #[test]
+    fn bench_filter_vv_lifts_to_trace() {
+        assert_eq!(bench_filter(2, false), "kiln=trace,kiln_train=trace");
+        assert_eq!(bench_filter(3, false), "kiln=trace,kiln_train=trace");
+    }
+
+    #[test]
+    fn bench_filter_quiet_wins_over_verbose() {
+        assert_eq!(bench_filter(2, true), "kiln=warn,kiln_train=warn");
+    }
+
+    #[test]
+    fn benchmark_cli_parses_explicit_speculative_and_diagnostic_controls() {
+        let args = [
+            "kiln-bench",
+            "--model-path",
+            "/models/qwen",
+            "--spec-method",
+            "mtp",
+            "--spec-num-tokens",
+            "2",
+            "--spec-draft-layers",
+            "6",
+            "--force-mtp",
+            "--log-tokens",
+            "--log-itl",
+            "--allow-experimental-speculative",
+        ]
+        .map(str::to_owned);
+        let parsed = parse_args_from(&args).expect("typed benchmark arguments");
+        assert_eq!(parsed.spec_method, Some(SpecMethod::Mtp));
+        assert_eq!(parsed.spec_num_tokens, Some(2));
+        assert_eq!(parsed.spec_draft_layers, Some(6));
+        assert!(parsed.force_mtp);
+        assert!(parsed.log_tokens);
+        assert!(parsed.log_itl);
+        assert!(parsed.allow_experimental_speculative);
+    }
+
+    #[test]
+    fn benchmark_cli_rejects_unknown_speculative_method() {
+        let args = [
+            "kiln-bench",
+            "--model-path",
+            "/models/qwen",
+            "--spec-method",
+            "maybe",
+        ]
+        .map(str::to_owned);
+        let error = parse_args_from(&args)
+            .err()
+            .expect("invalid method must fail");
+        assert!(error.to_string().contains("invalid --spec-method"));
+    }
+
+    #[test]
+    fn speculative_benchmark_requires_explicit_experimental_opt_in() {
+        let error = require_speculative_benchmark_opt_in(SpecMethod::Mtp, false)
+            .expect_err("speculative research must require an explicit acknowledgment");
+        assert!(
+            error
+                .to_string()
+                .contains("--allow-experimental-speculative")
+        );
+    }
+
+    #[test]
+    fn non_speculative_benchmark_does_not_require_experimental_opt_in() {
+        require_speculative_benchmark_opt_in(SpecMethod::Off, false)
+            .expect("the supported baseline must remain directly runnable");
+    }
 }
