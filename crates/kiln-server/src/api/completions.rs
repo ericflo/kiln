@@ -83,7 +83,7 @@ use streaming::*;
 pub(crate) use validation::stop_sequence_conflicts_with_thinking_close;
 use validation::*;
 
-// Preserve the crate-visible wire-type surface while behavior moves into `batch`.
+// Crate-visible wire types (sibling modules take them via `use super::*`); the allow is required because `BatchCompletionItem`/`BatchCompletionResponse` are only referenced from `#[cfg(test)]` tests.
 #[allow(unused_imports)]
 pub use batch::{
     BatchCompletionItem, BatchCompletionMetadata, BatchCompletionRequest, BatchCompletionResponse,

@@ -862,10 +862,10 @@ fn resolve_caps_for(spec: &TeacherSpec) -> Option<LogitSourceCaps> {
     })
 }
 
-/// Resolve a teacher alias to a `TeacherSpec`. Used by trainer code
-/// inside `run_opd` (and future `/v1/distill/*` handlers) to look up
-/// the registry entry. Returns a `LogitSourceError::Invalid` when
-/// the alias is unknown.
+/// Resolve a teacher alias to a `TeacherSpec`, returning a
+/// `LogitSourceError::Invalid` when the alias is unknown. Test-only:
+/// `mod tests` below (`resolve_alias_returns_invalid_on_unknown`) is the sole
+/// caller, so the allow keeps the default lib build warning-free.
 #[allow(dead_code)]
 pub fn resolve_teacher(
     registry: &TeacherRegistry,

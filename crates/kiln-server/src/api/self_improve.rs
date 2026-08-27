@@ -27,7 +27,7 @@
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use kiln_train::{DistillPumpMode, DistillPumpRequest, OpdConfig, OpdRequest, TrainingResponse};
+use kiln_train::{DistillPumpMode, DistillPumpRequest, OpdConfig, OpdRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -555,10 +555,6 @@ fn prepare_agent_job(
         },
     )
 }
-
-// Avoid unused warnings on the Response type alias.
-#[allow(dead_code)]
-type _Response = TrainingResponse;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
