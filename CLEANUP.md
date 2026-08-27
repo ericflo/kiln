@@ -6785,3 +6785,106 @@ fixed this round):**
 
 **Net this round:** +2 lines (the restored const), −2 lines (dangling
 allows) = **0 net**; correctness restored.
+
+## Cleanup Agent (round 112 — feature-lane dead-code probe: device_stream_submission)
+
+**Date:** 2026-08-27
+
+Closes the round-111b queued item: the `fn device_stream_submission`
+rocm-lane `dead_code` warning in kiln-gdn-kernel. Probed both crates in
+both lanes (no guesses), fixed the one genuine liveness asymmetry, and
+swept the other GPU kernel crates in the rocm lane for the same class.
+
+**Per-crate probe table (all commands run on this host; `CUDARC_CUDA_VERSION=12080`
+set for any lane that unifies cudarc):**
+
+| crate | lane | warning fires? | liveness evidence |
+|---|---|---|---|
+| kiln-gdn-kernel | pure rocm (`--no-default-features --features rocm`) | **YES** — `warning: function `device_stream_submission` is never used` (kt_api.rs:109), only own-code warning in the lane | helper is `#[cfg(any(cuda, rocm))]` (kt_api.rs:108); all 25 call sites are `#[cfg(feature = "cuda")]` (verified per-site: kt_api.rs:256/347/442/557/680/851/961/1070/1181/1286/1388/1490/1599/1713/1827/1996/2093/2169/2374/2488/2629/2694/2758/2889/3024); the rocm branch instead calls `rocm_launch_stream` (kt_api.rs:166) → `output_stream_submission` (kt_api.rs:138) which inlines `kiln_kt_bridge::device_stream_submission_of(out, "rocm_output")` |
+| kiln-gdn-kernel | cuda (default lane; build.rs skips nvcc with a cargo:warning, clippy completes) | NO dead_code — helper **live** | the cuda-gated call sites above compile; `cargo clippy -p kiln-gdn-kernel -p kiln-rmsnorm-kernel --all-targets`: gdn lib 0 own warnings |
+| kiln-rmsnorm-kernel | rocm (`--features rocm`; crate has no `default`, so pure rocm) | **NO** — premise "likely the same pattern" was WRONG | the helper (kt_api.rs:99) has NO cfg gate at all, and is called unconditionally from `pub fn fused_rmsnorm_kt` (kt_api.rs:227) plus ~30 more ungated call sites; live in every lane it compiles |
+| kiln-rmsnorm-kernel | cuda / no-features | NO dead_code for this helper | live in cuda too (same ungated callers); see "other findings" for `kt_error` |
+
+**Fix (one crate, two lines, comment + lane-precise allow):**
+`crates/kiln-gdn-kernel/src/kt_api.rs`, immediately above the existing
+`#[cfg(any(feature = "cuda", feature = "rocm"))]` on `device_stream_submission`:
+
+```rust
+// rocm-lane only: all 25 call sites are `#[cfg(feature = "cuda")]`; the rocm branch uses `rocm_launch_stream` -> `output_stream_submission`, which inlines `kiln_kt_bridge::device_stream_submission_of` — so this helper is dead in the pure-rocm lane and live in every cuda lane.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+```
+
+Lane-precise per the hard rule: the allow is INACTIVE in every cuda lane
+(including the cuda+rocm unified lane, where the helper is live) and
+active only in pure-rocm lanes, which is exactly where the warning fired.
+No behavior change, no signature change, doc comment untouched.
+**kiln-rmsnorm-kernel: NO CHANGE** (no dead_code warning for the helper in
+any probed lane — per task rule, probe result recorded, crate left alone).
+
+**Sweep of the other GPU kernel crates (rocm lane, dead-code class
+`never used/never read/never constructed` grep over full clippy output):**
+
+| crate | rocm-lane probe | dead-code-class warnings | notes |
+|---|---|---|---|
+| kiln-flash-attn (`--no-default-features --features rocm`, default=cuda) | builds clean (rc=0) | 0 | 18 lib + 4 test clippy-suggestion warnings (needless_range_loop & co.) — pre-existing, not dead-code class |
+| kiln-conv1d-kernel (same) | builds clean (rc=0) | 0 | 3 test warnings, same class; no local `device_stream_submission` wrapper (calls `kiln_kt_bridge::device_stream_submission_of` directly, kt_api.rs:113/214) |
+| kiln-opd-loss-kernel (`--features rocm`) | builds clean (rc=0) | 0 | 3 lib + 1 test suggestions; also calls the bridge directly (kt_api.rs:1375/1603) |
+| kiln-rocblas (`--features rocm`) | builds clean (rc=0) | 0 | re-confirmed round 111b's "already clean" |
+| kiln-tensor (`--features rocm`) | **lib** builds (26 suggestion warnings, 0 dead-code-class); `--all-targets` FAILS to compile the test target | 0 (lib) | PRE-EXISTING test-lane breakage: 6× E0599 in `rocm_matmul.rs`/`paged_decode_meta.rs` test code — kiln-hip gates `RocmStridedBatchedMatmulMode::Auto` / `RocmTensorKernelPolicy::qualified()` behind `cfg(any(test, feature = "hardware-qualification"))`, and `cfg(test)` is false for kiln-hip when compiled as a dep of kiln-tensor's test target. Unrelated to this round (kiln-tensor/kiln-hip untouched); needs its own round |
+
+**Other findings (reported, NOT fixed this round — different class):**
+- kiln-rmsnorm-kernel **cuda lane**: `warning: function `kt_error` is never
+  used` (kt_api.rs:44) — dead because its only 5 call sites are inside the
+  `#[cfg(feature = "rocm")]` fn `fused_rmsnorm_kt_rocm_row_tiled`
+  (kt_api.rs:263-311). Inverse of the gdn asymmetry (rocm-live, cuda-dead).
+  Anomaly noted: the no-features lane (where it is equally dead) does NOT
+  warn — unexplained, worth adjudication with the fix. Suggested future
+  fix: `#[cfg(feature = "rocm")]` on the fn itself (or a cuda-side allow).
+- kiln-model rocm-lane `BatchedPagedDecodeGraphInputs.max_seqlen_k` never
+  read — still open from round 111b, out of scope here.
+- Pre-existing rocm-lane clippy-suggestion warnings in dep lanes
+  (kiln-tensor 26, kiln-rmsnorm 6× `manual_is_multiple_of`, flash-attn 18,
+  etc.) — queued for a future sweep round, untouched this round.
+
+**Gates (exact lines):**
+- `cargo clippy -p kiln-gdn-kernel --no-default-features --features rocm --all-targets`
+  (the lane that actually exercises the fix) → 0 dead_code warnings (was 1);
+  gdn own warnings now only 2× `needless_range_loop` in
+  tests/rocm_gdn_parity.rs:397/404 (pre-existing).
+- `cargo clippy -p kiln-gdn-kernel -p kiln-rmsnorm-kernel --features rocm --all-targets`
+  (task-literal; gdn's `default = ["cuda"]` unifies cuda into this lane)
+  → 0 dead-code-class warnings.
+- `cargo clippy -p kiln-gdn-kernel -p kiln-rmsnorm-kernel --all-targets`
+  (default lane, `CUDARC_CUDA_VERSION=12080`) → **unchanged** before/after:
+  kiln-tensor (lib) 34 warnings (dep lane, pre-existing), kiln-gdn-kernel
+  (test "gated_rms_norm_parity") 1 warning (`needless_range_loop`),
+  kiln-rmsnorm-kernel 0 own warnings.
+- `cargo test -p kiln-gdn-kernel --no-default-features --features rocm`
+  → 7 passed; 0 failed (2 lib + 5 parity, 0.34s — real ROCm run).
+- `cargo test -p kiln-rmsnorm-kernel --features rocm` → 11 passed; 0 failed.
+- `cargo test -p kiln-rmsnorm-kernel` (default) → 0 failed (all suites ok,
+  mostly empty in the no-features lane).
+- `cargo test -p kiln-gdn-kernel --no-default-features` → 2 passed; 0 failed.
+- `cargo test -p kiln-gdn-kernel -p kiln-rmsnorm-kernel` (literal default
+  gate): **environmentally blocked on this host, PRE-EXISTING** — the cuda
+  default lane links cudarc's CUDA libs and this host has no CUDA toolkit
+  (`rust-lld: error: unable to find library -lcuda / -lnvrtc / -lcurand /
+  -lcublas / -lcublasLt`). Reproduced byte-identical on the pristine tree
+  via `git stash` → not caused by this round. The no-features analogs above
+  are the executable default-lane coverage on this host.
+- `cargo fmt --check` → clean (rc=0).
+- `python3 scripts/check_production_file_budget.py` → "production file
+  budget passed: 646 files, 5000-line default, 14 reviewed exceptions".
+- `python3 scripts/check_repository_artifacts.py` → "repository artifact
+  policy passed: 6694 tracked paths, 124989889 bytes; CSV <= 1048576,
+  each file <= 10485760".
+- `git status` → clean (after commits).
+
+**Commits:** `2d5a9f06c` fix(kiln-gdn-kernel): round 112 — lane-precise
+cfg_attr allow for device_stream_submission (the only crate touched;
+kiln-rmsnorm-kernel needed no change). Not pushed.
+
+**Net this round:** **+2 lines, −0 (net +2)** — intentionally net-additive:
+warning-suppression (one factual comment + one lane-precise attribute),
+not dead-code justification; the suppressed function is live in every cuda
+lane, where the allow is inactive.
