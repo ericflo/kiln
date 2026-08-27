@@ -139,6 +139,8 @@ fn validate_opd_inputs(
 /// floats). Used by both the high-level `vk_opd_top_k_reverse_kl_loss`
 /// path and external callers that want to fold this dispatch into a larger
 /// command submission.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_opd_topk_kl_fwd_resident(
     device: &VulkanDevice,
     hidden_handle: vk::Buffer,
@@ -185,6 +187,8 @@ pub fn dispatch_opd_topk_kl_fwd_resident(
 /// f32; `output_mode = 1` means per-position and `grad_loss_handle` is
 /// `num_active` floats. `scale_factor` is `1 / num_active` for mode 0 and
 /// `1.0` for mode 1 (caller multiplies in).
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_opd_topk_kl_bwd_resident(
     device: &VulkanDevice,
     hidden_handle: vk::Buffer,
@@ -238,6 +242,8 @@ pub fn dispatch_opd_topk_kl_bwd_resident(
 /// Resident-buffer metrics dispatch (§3.8).
 ///
 /// Emits `[num_active, 3]` f32 rows: `(H(p_hat), H(q_hat), KL_t)`.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_opd_topk_metrics_resident(
     device: &VulkanDevice,
     hidden_handle: vk::Buffer,

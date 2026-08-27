@@ -32,6 +32,8 @@ fn dispatch_3d(
         .with_context(|| format!("vk_ops: 3d dispatch {shader}"))
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_batched(
     device: &VulkanDevice,
     a: &VulkanBuffer,
@@ -110,6 +112,8 @@ pub fn vk_matmul_batched_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor>
     ))
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_batched_bf16(
     device: &VulkanDevice,
     a: &VulkanBuffer,
@@ -133,6 +137,8 @@ fn dispatch_matmul_batched_bf16(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_lhs_t_batched(
     device: &VulkanDevice,
     a: &VulkanBuffer,
@@ -156,6 +162,8 @@ fn dispatch_matmul_lhs_t_batched(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_lhs_t_batched_bf16(
     device: &VulkanDevice,
     a: &VulkanBuffer,
@@ -179,6 +187,8 @@ fn dispatch_matmul_lhs_t_batched_bf16(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_rhs_t_batched(
     device: &VulkanDevice,
     a: &VulkanBuffer,
@@ -202,6 +212,8 @@ fn dispatch_matmul_rhs_t_batched(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_matmul_rhs_t_batched_bf16(
     device: &VulkanDevice,
     a: &VulkanBuffer,

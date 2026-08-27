@@ -37,6 +37,8 @@ pub struct GdnChunkPrepOutput {
 ///   ks_entry = k_c @ S_in
 ///   q_s      = q_c @ S_in
 /// via `vk_matmul_batched` etc.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_gdn_chunk_prep_no_grad(
     g: &VkTensor,        // [B, nv, C]
     v: &VkTensor,        // [B, nv, C, dv]

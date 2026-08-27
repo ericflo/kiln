@@ -1219,6 +1219,8 @@ pub fn upload_bf16_packed_buffer_from_slice(
 /// Same semantics as the bf16-packed _bytes variant but for f32 weights.
 /// (#1082)
 #[allow(clippy::too_many_arguments)]
+// Returns (qkv, z, a, b) mirroring the four SoA shader outputs.
+#[allow(clippy::type_complexity)]
 pub fn dispatch_gdn_in_proj_decode_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -1258,6 +1260,8 @@ pub fn dispatch_gdn_in_proj_decode_cached_bytes(
 /// `[batch, 1, *_dim]` in row-major order. The shim reconstructs a CPU
 /// Tensor internally so callers can stay candle-free. (#1082)
 #[allow(clippy::too_many_arguments)]
+// Returns (qkv, z, a, b) mirroring the four SoA shader outputs.
+#[allow(clippy::type_complexity)]
 pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -1290,6 +1294,8 @@ pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
     split_gdn_in_proj_bytes(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_in_proj_decode_cached_impl(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -1870,6 +1876,8 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
 /// SoA order: all qkv batches first, then all z, then all a, then all
 /// b. So the split is purely contiguous — `qkv = out[..batch*qkv_dim*4]`,
 /// etc. Replaces the older candle-Tensor split helper. (#1082)
+// Returns (qkv, z, a, b) mirroring the four SoA shader outputs.
+#[allow(clippy::type_complexity)]
 fn split_gdn_in_proj_bytes(
     out_data: &[u8],
     batch: usize,
@@ -1921,6 +1929,8 @@ pub fn dispatch_linear_decode_cached_bytes(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_linear_decode_cached_bf16_weights_offset_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -4303,6 +4313,8 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bytes(
     split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -5319,6 +5331,8 @@ pub fn dispatch_mlp_decode_cached_bytes(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -5345,6 +5359,8 @@ pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -6718,6 +6734,8 @@ fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
     logical_readback(output_data, output_size, "gdn_gated_rms_norm output")
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_causal_conv1d_update_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -6912,6 +6930,8 @@ fn dispatch_causal_conv1d_update_bytes_core(
 /// Two-dispatch approach to avoid data races on conv_state:
 /// 1. `causal_conv1d.comp` — computes output only (no state writes)
 /// 2. `causal_conv1d_state_advance.comp` — advances state per (b, c) pair
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_causal_conv1d_prefill_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -7079,6 +7099,8 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
 /// This keeps the old tensor-weight entry point available as a rollback path,
 /// while avoiding one per-layer weight upload and folding the two uploads, two
 /// compute dispatches, and two readbacks into one command buffer/queue submit.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -10264,6 +10286,8 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
 /// Input: g`[B,H,C]`, v`[B,H,C,dv]`, kkt`[B,H,C,C]`, qkt`[B,H,C,C]`,
 ///         ks_entry`[B,H,C,dv]`, q_s`[B,H,C,dv]`
 #[allow(clippy::too_many_arguments)]
+// The six-tuple mirrors the six SoA chunk-prep shader outputs.
+#[allow(clippy::type_complexity)]
 pub fn dispatch_gdn_chunk_prep_bytes(
     vk_device: &VulkanDevice,
     g_data: &[u8],

@@ -403,6 +403,8 @@ pub fn vk_causal_conv1d(
 ///   d_x:           [batch, channels, seq_len] F32
 ///   d_weight:      [channels, kernel_size]    F32  (CPU reduce — small)
 ///   d_conv_state:  [batch, channels, K-1]     F32  (CPU compute — small)
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_causal_conv1d_bwd_no_grad(
     d_out: &VkTensor,
     weight: &VkTensor,

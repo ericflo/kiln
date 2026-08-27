@@ -93,6 +93,8 @@ pub const VK_GRPO_KL_MODE_NONE: u32 = 0;
 pub const VK_GRPO_KL_MODE_K1: u32 = 1;
 pub const VK_GRPO_KL_MODE_K3: u32 = 3;
 
+// The return tuple bundles the SoA FLCE outputs (tensor + raw buffers).
+#[allow(clippy::type_complexity)]
 fn run_flce_forward(
     hidden: &VkTensor,
     weight: &VkTensor,

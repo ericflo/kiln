@@ -49,6 +49,8 @@ fn dispatch_l2norm_forward(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_l2norm_backward(
     device: &VulkanDevice,
     x: &VulkanBuffer,

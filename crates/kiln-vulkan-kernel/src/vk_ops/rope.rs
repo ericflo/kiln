@@ -52,6 +52,8 @@ fn check_rope_shape(
     Ok((rows, heads, head_dim))
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_rope(
     device: &VulkanDevice,
     shader: &str,

@@ -256,6 +256,8 @@ pub fn vk_gdn_chunk_scan_bwd_cpu_reference(
 ///   dG[C-1]     += d_p_last  (composed by chunkwise op)
 ///   `dG[i]`       -= `d_decay[i]` (composed by chunkwise op)
 ///
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_gdn_state_exit_bwd_no_grad(
     d_s_exit: &VkTensor,       // [B, nv, dk, dv]
     decay_last_col: &VkTensor, // [B, nv, C]
@@ -330,6 +332,8 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
 /// Explicit CPU reference for tests and offline kernel diagnosis.
 ///
 /// Production execution always uses [`vk_gdn_state_exit_bwd_no_grad`].
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_gdn_state_exit_bwd_cpu_reference(
     d_s_exit: &VkTensor,
     decay_last_col: &VkTensor,
@@ -413,6 +417,8 @@ pub fn vk_gdn_state_exit_bwd_cpu_reference(
 /// shared memory (3 × 64 floats = 768 bytes).
 ///
 /// Returns: d_g, d_v, d_kkt, d_qkt, d_ks_entry, d_q_s.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_gdn_chunk_prep_bwd_no_grad(
     d_a_strict: &VkTensor,
     d_b_mask: &VkTensor,
@@ -517,6 +523,8 @@ pub fn vk_gdn_chunk_prep_bwd_no_grad(
 /// Explicit CPU reference for tests and offline kernel diagnosis.
 ///
 /// Production execution always uses [`vk_gdn_chunk_prep_bwd_no_grad`].
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn vk_gdn_chunk_prep_bwd_cpu_reference(
     d_a_strict: &VkTensor,       // [B, nv, C, C]
     d_b_mask: &VkTensor,         // [B, nv, C, C]

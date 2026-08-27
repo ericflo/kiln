@@ -162,6 +162,8 @@ impl<'a> CommandBatch<'a> {
     /// `record` (SPIR-V-keyed cache). Allocates a descriptor set,
     /// writes the buffer bindings, emits the compute→compute barrier
     /// (skipped on first dispatch), and dispatches.
+    // Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+    #[allow(clippy::too_many_arguments)]
     fn record_with_pipeline(
         &mut self,
         set_layout: vk::DescriptorSetLayout,

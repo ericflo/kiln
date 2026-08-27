@@ -322,6 +322,8 @@ fn record_transpose_batched_2d_no_grad(
     ))
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn record_gdn_chunk_prep_no_grad(
     batch_rec: &mut CommandBatch<'_>,
     g: &VkTensor,
@@ -425,6 +427,8 @@ fn record_gdn_chunk_prep_no_grad(
     })
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn record_solve_tri_no_grad(
     batch_rec: &mut CommandBatch<'_>,
     a_strict: &VkTensor,
@@ -636,6 +640,8 @@ fn concat_time(chunks: &[VkTensor], last_axis: usize) -> Result<VkTensor> {
 /// Per-chunk forward step.
 ///
 /// Returns (out_chunk [B, nv, C, dv], w [B, nv, C, dv]).
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn chunk_forward_no_grad(
     q_c: &VkTensor,    // [B, nv, C, dk]
     k_c: &VkTensor,    // [B, nv, C, dk]
@@ -737,6 +743,8 @@ fn vk_broadcast_mul_lastdim_no_grad(a: &VkTensor, b: &VkTensor, n: usize) -> Res
 /// State update: S_new = p_last·S + k^T · w_weighted.
 /// Pure GPU: vk_broadcast_mul_lastdim for the p_last broadcast,
 /// vk_matmul_batched + vk_add for the rest.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn state_update(
     state: &VkTensor,      // [B, nv, dk, dv]
     p_last: &VkTensor,     // [B, nv]
@@ -953,6 +961,8 @@ fn record_state_update(
 /// back between kernels. The returned [`GdnChunkwisePrefillRecord`] must stay
 /// alive until the batch has been submitted, because it owns all transient
 /// buffers referenced by the recorded command buffer.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn record_gdn_chunkwise_prefill_block_into(
     batch_rec: &mut CommandBatch<'_>,
     q: &VkTensor,

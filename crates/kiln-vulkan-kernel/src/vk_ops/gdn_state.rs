@@ -105,6 +105,8 @@ impl VkLinearAttentionState {
     /// Shapes per layer:
     ///   - recurrent_state: [batch, heads_v, head_dim_k, head_dim_v]
     ///   - conv_state:      [batch, conv_channels, kernel_size - 1]
+    // Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+    #[allow(clippy::too_many_arguments)]
     pub fn zeros(
         device: &Arc<VulkanDevice>,
         num_gdn_layers: usize,

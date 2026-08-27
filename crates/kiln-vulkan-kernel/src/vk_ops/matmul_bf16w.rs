@@ -54,6 +54,8 @@ fn bf16w_row_tile_len() -> usize {
     crate::kernels::bf16_weight_row_tile()
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_fwd_rows(
     device: &VulkanDevice,
     x: &VulkanBuffer,
@@ -135,6 +137,8 @@ fn dispatch_bwd(
     )
 }
 
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_bwd_rows(
     device: &VulkanDevice,
     grad_out: &VulkanBuffer,

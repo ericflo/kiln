@@ -189,6 +189,8 @@ fn dispatch_linear_decode_cached_resident_impl(
 ///
 /// `x` is `[batch, hidden]`, `weight_t` is packed-bf16 `[hidden, out_dim]`,
 /// `residual` and `out` are `[batch, out_dim]`.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
     vk_device: &VulkanDevice,
     x: &VulkanBuffer,
@@ -412,6 +414,8 @@ pub fn dispatch_add_qwen_rmsnorm_batched_resident(
 /// AND multiplies by a learned weight, neither of which match L2
 /// normalization. Use this dispatcher for both Q (with scale =
 /// 1/sqrt(dk)) and K (with scale = 1.0).
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_l2_norm_per_row_resident(
     vk_device: &VulkanDevice,
     x: &VulkanBuffer,
@@ -2494,6 +2498,8 @@ pub fn dispatch_gdn_qkv_split_resident(
 }
 
 /// Batched GDN mixed-QKV split. Input is `[batch, 2*qk_dim + v_dim]`.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_qkv_split_batched_resident(
     vk_device: &VulkanDevice,
     mixed_qkv: &VulkanBuffer,
@@ -2587,6 +2593,8 @@ pub fn dispatch_gdn_qkv_split_batched_resident(
 /// `block_table.slot_for(start_pos, block_size)`. The slot resolution
 /// itself happens on the host (no GPU block-table lookup); the kernel
 /// only does the copy.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_paged_kv_write_slot_resident(
     vk_device: &VulkanDevice,
     k_in: &VulkanBuffer,
@@ -2661,6 +2669,8 @@ pub fn dispatch_paged_kv_write_slot_resident(
 /// resolved destination slot per batch row. This is the batch primitive
 /// needed by multi-row resident decode so slot selection can vary per row
 /// without recording one `paged_kv_write_slot` dispatch per request row.
+// Flat argument list mirrors the WGSL entry-point signature (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_paged_kv_write_slots_resident(
     vk_device: &VulkanDevice,
     k_in: &VulkanBuffer,
