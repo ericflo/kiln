@@ -19,6 +19,9 @@ pub struct CudaTrainingPolicy {
     pub(crate) flash_attention_backward_mode: FlashAttentionBackwardMode,
 }
 
+// Live under `feature = "cuda"`: kiln-server `model_cuda_training_policy`
+// maps the startup profile to `fast`/`deterministic`; `deterministic` has no
+// default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 impl CudaTrainingPolicy {
     pub const fn fast() -> Self {
@@ -42,6 +45,8 @@ impl Default for CudaTrainingPolicy {
 
 /// Install immutable CUDA training policy. Same-value installation is
 /// idempotent; a conflicting value fails before work can begin.
+// Called by kiln-server `install_pre_device_startup_policy` (cuda lane);
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub fn install_cuda_training_policy(policy: CudaTrainingPolicy) -> Result<()> {
     match CUDA_TRAINING_POLICY.set(policy) {
@@ -53,6 +58,8 @@ pub fn install_cuda_training_policy(policy: CudaTrainingPolicy) -> Result<()> {
     }
 }
 
+// Read by `tape_forward`'s FlashAttention backward dispatch (cuda/rocm
+// lanes); no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn current_cuda_training_policy() -> CudaTrainingPolicy {
     *CUDA_TRAINING_POLICY.get_or_init(CudaTrainingPolicy::default)
