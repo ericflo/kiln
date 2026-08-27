@@ -868,7 +868,7 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
                     // this its dL/dx never flows to gate/up — they stayed islands).
                     // #1082 seam flip: kt-native MulBackward recorder — no
                     // kt->candle->kt. Ok(None) outside a scope -> plain mul.
-                    let hidden = if tape_scope_active {
+                    if tape_scope_active {
                         require_active_tape_output(
                             crate::tape_forward::try_tape_mul_kt(&gate, &up)
                                 .context("mlp mul try_tape_mul_kt")?,
@@ -876,8 +876,7 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
                         )?
                     } else {
                         (gate * up)?
-                    };
-                    hidden
+                    }
                 }
             }
             #[cfg(not(any(feature = "cuda", feature = "rocm")))]

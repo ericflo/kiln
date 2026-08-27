@@ -2350,7 +2350,7 @@ impl CudaGraphRunner {
             // `CapturedBatchedDecodeGraph` below.
             drop(graph_inputs);
 
-            let captured = CapturedBatchedDecodeGraph {
+            CapturedBatchedDecodeGraph {
                 graph,
                 output_hidden,
                 capture_stream: stream.clone(),
@@ -2368,8 +2368,7 @@ impl CudaGraphRunner {
                 _gdn_decode_outputs: gdn_decode_outputs,
                 _capture_arena_buffers: arena.borrow_mut().take_retained(),
                 max_seqlen_k: key.max_seqlen_k,
-            };
-            captured
+            }
         };
         // (#1082 Phase 5) Stream capture only RECORDED the batched forward — it
         // did NOT execute, so `output_hidden` is still the uninitialized

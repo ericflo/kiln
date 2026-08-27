@@ -3532,7 +3532,7 @@ impl RocmGraphRunner {
         key: &RocmGraphCacheKey,
         rejection: RocmGraphAdmissionRejection,
     ) -> bool {
-        let future_captures_suppressed = match rejection {
+        match rejection {
             RocmGraphAdmissionRejection::CandidateByteBudget => {
                 self.non_capture_safe.insert(
                     key.graph.clone(),
@@ -3564,8 +3564,7 @@ impl RocmGraphRunner {
                 true
             }
             RocmGraphAdmissionRejection::EntryCapacity => false,
-        };
-        future_captures_suppressed
+        }
     }
 
     #[cfg(feature = "rocm")]

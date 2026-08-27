@@ -3901,7 +3901,7 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
     let eager_replay = eager_step(start_pos + 2)?;
 
     // --- (2) Graph path: warmup -> capture -> replay. ---
-    let result = (|| -> Result<()> {
+    (|| -> Result<()> {
         let policy = crate::cuda_graph::CudaGraphExecutionPolicy::try_new(true, 8)?;
         let mut runner = crate::cuda_graph::CudaGraphRunner::new(&device_kt, policy);
         assert!(
@@ -4077,9 +4077,7 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
             "[cuda-graph-bs1] OK: captured and replayed graph matches eager token and BF16 logit bound"
         );
         Ok(())
-    })();
-
-    result
+    })()
 }
 
 #[cfg(feature = "metal")]
