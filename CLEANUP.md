@@ -5713,3 +5713,102 @@ adjudicated), HEADLINE NET LINES **−13** (10 ref lines removed:
 82 → 72 remaining, all adjudicated KEEP), 394/0/0 exact, zero code
 lines, commits `1196b43bc` + `c3cac7531` + `d6f889ae6` +
 `44e874e54` + `8457297d5` + `fb3aafb0d` + this ledger commit.
+
+## Cleanup Agent (round 97 — csrc comment sweep + --no-default-features lint lane)
+
+**Date:** 2026-08-27
+
+**Toolchain:** rustc 1.96.1 (31fca3adb 2026-06-26) / clippy 0.1.96
+
+**Steering:** two-part round. Part A — adjudicate the 7 stale `candle`
+mentions in `crates/kiln-gdn-kernel/csrc/` (keep legitimate
+"replaced N-op candle chain" statements; reword stale present-tense
+attributions to the live kt / F32 reference). Part B — take
+`kiln-flash-attn` (10 own warnings) and `kiln-gdn-kernel` (1 own
+warning) to zero under `--no-default-features`, per-warning adjudication:
+keep + ledger if live under default/cuda, delete only if dead in ALL
+configs and not public API, `allow(too_many_arguments)` for flat
+kernel-launch signatures, fix safe config-independent lints. Both
+feature configurations must compile/clippy at or better than baseline;
+no public API or behavior change.
+
+### Part A — csrc comment sweep (`e054f96e2`, net 0: 6 ins / 6 del, comment-only)
+
+Live-reference verification before rewording (all in `kiln-model`,
+committed tree): `gated_deltanet_forward` (linear_attention.rs:1842) is
+live; its streaming path marks `// --- Step 6: Compute gates ---`
+(linear_attention_streaming.rs:1663) and `// --- Step 8: Gated RMSNorm
+— norm(attn_out) * silu(z) ---` (:1997) — the Step 6 / Step 8 anchors in
+the csrc comments are still valid; Step 6's fallback
+(`gated_deltanet_gates_fallback`, linear_attention.rs:1727, called at
+streaming :1689/:1693) is a **kt F32 chain** (`to_dtype(F32)` →
+`broadcast_add` → `softplus` → …); `gdn_chunkwise_recurrence`
+(linear_attention.rs:1084) is a **kt-op chain** (kt `cumsum` /
+`where_cond` / casts, per its own #1082 comment). So the stale part of
+the 5 reworded comments is the "candle" attribution, not the
+chain/launch claims:
+
+| file:line | before | after | verdict |
+|---|---|---|---|
+| `gdn_chunk_prep.h:5` | "The **candle-op** reference in `kiln-model::forward::gdn_chunkwise_recurrence` spends 7+ launches per chunk" | "The **kt-op** reference chain in …" | REWORD (live fn is kt-based; present-tense attribution was stale; the 7+ launches claim is still true of the kt chain) |
+| `gdn_gates.h:19` | "matching the **candle** F32 reference path in … Step 6" | "matching the **kt** F32 reference path in … Step 6" | REWORD (Step 6 fallback is a kt F32 chain — verified) |
+| `gdn_gates.cu:27` | "Parity oracle: the **candle-op** chain above in … (Step 6)" | "Parity oracle: the **kt-op** chain above in … (Step 6)" | REWORD (parity oracle = the live kt F32 fallback; the op list it names is unchanged) |
+| `gdn_gated_rms_norm.cu:4` | "… body from the portable **candle** chain:" | "… body from the portable **kt-op** chain:" | REWORD (the Step 8 body is kt-native — verified) |
+| `recurrent_gdn_fwd.cu:26` | "The win over the **candle-op path** is eliminating the **chunkwise** machinery (…)" | "The win over the **chunkwise path** is eliminating **its** machinery (…)" | REWORD (the contrast is with the chunkwise-analytic recurrence, which is now kt-based; the machinery list — preshape/decay/KKT/forward-sub/B_mask/matmul — is unchanged) |
+| `gdn_chunk_prep.cu:22` | "This replaces 7+ candle op launches per chunk inside `gdn_chunkwise_recurrence`" | — | **KEEP** (past-tense "replaces" = accurate history of what this kernel superseded; op list matches the live chain) |
+| `gdn_gates.cu:5` | "Replaces the ~8-op candle chain:" | — | **KEEP** (same: historically accurate; the op list is the live Step 6 fallback body) |
+
+Comment-only: no code, no API, no build input changed (csrc is compiled
+by build.rs but only comments moved).
+
+### Part B — `--no-default-features` lint lane
+
+**Baseline correction (measured, committed tree):** the steering said
+"default: 0 own warnings". That was not reproducible: `cargo clippy -p
+kiln-flash-attn` (default features) in this container fails in the
+external `cudarc` build script (`nvcc --version`: no local CUDA toolkit)
+*before* linting, and a grep-only check masks that `error:` line as a
+"clean" run. The reproducible default-config measurement is
+`CUDARC_CUDA_VERSION=12080 cargo clippy …` (cudarc's build script honors
+that env var and skips nvcc entirely). With it, the true
+**before** baseline is:
+
+| crate | config | own warnings before |
+|---|---|---|
+| kiln-flash-attn | `--no-default-features` | 10 (4 unused_var + 2 dead_code + 3 too_many_arguments + 1 manual_is_multiple_of) |
+| kiln-flash-attn | default (CUDARC_CUDA_VERSION=12080) | **14** (the above minus the 4 unused, plus 8 unneeded-return) |
+| kiln-gdn-kernel | `--no-default-features` | 1 (dead_code) |
+| kiln-gdn-kernel | default (CUDARC_CUDA_VERSION=12080) | 0 lib (7 pre-existing tests/ hex-literal-grouping + loop-var warnings, untouched) |
+
+**kiln-flash-attn** (`fc9b10b81`, net +10: 19 ins / 9 del):
+
+| warning (×N) | config | adjudication |
+|---|---|---|
+| unused_variables ×4 (`k_pool`, `v_pool`, `num_kv_heads`, `head_dim` in `paged_kv_write_token_major_bf16_slot_kt`) | no-default only | **KEEP + cfg_attr allow.** Live under both cuda and rocm (both branches consume them); dead only in a backend-less build. `#[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(unused_variables))]` — the crate's established idiom (4 sibling kt entry points), extended to `not(any(cuda, rocm))` because this function's rocm branch also consumes the params |
+| dead_code ×2 (`score_policy::score_geometry`, `effective_score_geometry`) | both main configs | **KEEP + cfg_attr allow.** Live ONLY under `feature = "rocm"` (sole consumers are in `rocm_sdpa`, `#[cfg(feature = "rocm")]`-gated); deleted would break the rocm lane, so the precise `#[cfg_attr(not(feature = "rocm"), allow(dead_code))]` is strictly better than leaving 2 warnings in both main configs. Precedent: `rocm_sdpa.rs:5036` already carries a bare `#[allow(dead_code)]` |
+| too_many_arguments ×3 (`flash_attn_paged_decode_kt`, `…_dyn_seqlen_kt`, `…_dyn_seqlen_kt_with_graph_outputs` — 8/7, 9/7, 11/7) | both | **KEEP + allow.** Flat kernel-launch signatures mirroring the FFI param lists 1:1 — the round-66 judgment class (`flce_forward_row_tiled_stats` et al.) and the same allow already on `flash_attn_bwd_kt` / `flash_attn_bwd_collapsed_gqa_kt` in this file |
+| manual_is_multiple_of ×1 (`collapse_expanded_gqa_grad_kt`) | both | **FIX (safe, config-independent).** `num_heads_k == 0 || num_heads % num_heads_k != 0` → `num_heads_k == 0 || !num_heads.is_multiple_of(num_heads_k)` — identical semantics (the zero guard short-circuits first, so `is_multiple_of` is never evaluated at 0) |
+| unneeded_return ×8 (tail `return Ok(…)` inside the `#[cfg(feature = "cuda")]` blocks of the 8 kt entry points) | default only | **FIX (proper fix, not suppression).** Under cuda the cfg block IS the function tail (the `#[cfg(not(feature = "cuda"))]` Err arm is cfg-excluded), so `return` is redundant; removed. No effect under no-default (block excluded) or rocm (rocm branches precede and early-return, block excluded) |
+
+**kiln-gdn-kernel** (`69dcd574a`, net +7: 7 ins / 0 del):
+
+| warning (×N) | config | adjudication |
+|---|---|---|
+| dead_code ×1 (`gates_validate_inputs`) | no-default only | **KEEP + cfg_attr allow.** Live under BOTH default/cuda and rocm — all three `gdn_gates_*` entry points that call it are `#[cfg(any(feature = "cuda", feature = "rocm"))]` — so "dead in all configs" is false. Private (not public API). `#[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(dead_code))]` + in-tree justification, matching the kiln-flash-attn idiom above |
+
+Zero deletions, zero public API change, zero behavior change.
+
+### Verification (own runs, final state)
+
+- **clippy, both configs, own-code:** kiln-flash-attn `--no-default-features` **10 → 0**; kiln-flash-attn default (CUDARC_CUDA_VERSION=12080) **14 → 0**; kiln-gdn-kernel `--no-default-features` **1 → 0**; kiln-gdn-kernel default **0 → 0** (7 pre-existing tests/ warnings unchanged — hex literal grouping ×6 in `gated_rms_norm_parity.rs` / `gates_parity.rs`, loop var ×1 in `gated_rms_norm_parity.rs`; out of scope, baseline held)
+- **tests:** `cargo test -p kiln-flash-attn --no-default-features` **2/0/0** (baseline held); `cargo test -p kiln-gdn-kernel --no-default-features` **2/0/0** (baseline held). Default-features test binaries remain link-blocked in this container (`-lcuda -lnvrtc -lcurand -lcublas -lcublasLt` unresolvable — no CUDA toolkit; environmental, identical before and after — the steering's fallback applies: no-default test baseline + two-config clippy evidence)
+- **rocm lane:** `cargo clippy -p kiln-flash-attn --no-default-features --features rocm` rc=0, 18 pre-existing `rocm_sdpa.rs` warnings unchanged (the score_policy pair is *live* under this config — its new allow correctly scoped to `not(rocm)`)
+- `cargo fmt -p kiln-flash-attn -p kiln-gdn-kernel --check`: clean
+- standing gates: `python3 scripts/check_repository_artifacts.py` — pass (6697 tracked paths); `python3 scripts/check_production_file_budget.py` — pass (647 files)
+- `git status` clean after the three commits + this ledger commit
+
+**Headline net lines:** Part A net **0** (6/6); Part B net **+17** (flash-attn +10, gdn +7 — all additive: attributes + justification comments); round total net **+17**.
+Commits: `e054f96e2` (97a, Part A) + `fc9b10b81` (97b, flash-attn) +
+`69dcd574a` (97c, gdn) + this ledger commit.
+
+-Cleanup Agent (round 97)
