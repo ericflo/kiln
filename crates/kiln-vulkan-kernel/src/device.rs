@@ -640,11 +640,6 @@ impl VulkanDevice {
         self.device_local_heap_bytes
     }
 
-    /// Get the maximum shared memory available per compute workgroup.
-    pub fn max_compute_shared_memory_size(&self) -> vk::DeviceSize {
-        self.max_compute_shared_memory_size
-    }
-
     /// Per-axis maximum compute dispatch grid extent (from
     /// `VkPhysicalDeviceLimits::maxComputeWorkGroupCount[axis]`).
     /// `axis` is 0, 1, or 2. Vulkan only guarantees >= 65535 per axis,
