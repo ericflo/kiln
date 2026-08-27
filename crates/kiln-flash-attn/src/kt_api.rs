@@ -162,7 +162,7 @@ pub fn flash_attn_fwd_kt(
             )));
         }
 
-        return Ok((out_t, lse_t));
+        Ok((out_t, lse_t))
     }
 
     // Neither a ROCm device (handled above) nor a CUDA build: no backend can
@@ -314,6 +314,7 @@ fn alloc_cuda_tensor(
 
 /// `flash_attn_paged_decode` over `kiln_tensor::Tensor` operands.
 /// Mirrors [`crate::flash_attn_paged_decode`] one-for-one.
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_kt(
     q: &KtTensor,
@@ -445,7 +446,7 @@ pub fn flash_attn_paged_decode_kt(
                 "kt-flash-attn: paged_decode FFI returned {status}"
             )));
         }
-        return Ok(out_t);
+        Ok(out_t)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -463,6 +464,7 @@ pub fn flash_attn_paged_decode_kt(
 /// `flash_attn_paged_decode_dyn_seqlen` over `kiln_tensor::Tensor`
 /// operands. Mirrors [`crate::flash_attn_paged_decode_dyn_seqlen`].
 /// `seqused_k` is a per-batch u32 tensor of effective K/V lengths.
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_dyn_seqlen_kt(
     q: &KtTensor,
@@ -585,7 +587,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
                 "kt-flash-attn: paged_decode_dyn_seqlen FFI returned {status}"
             )));
         }
-        return Ok(out_t);
+        Ok(out_t)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -616,6 +618,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
 /// batch_dyn_seqlen_with_graph_outputs`. Bit-exact by construction —
 /// bottoms out in the same `kiln_flash_attn_fwd_paged_decode_dyn_
 /// seqlen` FFI symbol as the sibling kt entry above.
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
     q: &KtTensor,
@@ -768,7 +771,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
                 "kt-flash-attn: with_graph_outputs FFI returned {status}"
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -870,7 +873,7 @@ pub fn paged_kv_write_token_major_bf16_kt(
                 "kt-flash-attn: kv_write FFI returned {status}"
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -886,6 +889,7 @@ pub fn paged_kv_write_token_major_bf16_kt(
 // ============================================================================
 
 /// `paged_kv_write_token_major_bf16_slot` (device-slot variant) over kiln-tensor.
+#[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(unused_variables))]
 pub fn paged_kv_write_token_major_bf16_slot_kt(
     k_pool: &KtTensor,
     v_pool: &KtTensor,
@@ -959,7 +963,7 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
                 "kt-flash-attn: kv_write_slot FFI returned {status}"
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1084,7 +1088,7 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
                 "kt-flash-attn: kv_write_batch_slot FFI returned {status}"
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1263,7 +1267,7 @@ pub fn flash_attn_bwd_kt_with_mode(
                 "kt-flash-attn: bwd FFI returned {status}"
             )));
         }
-        return Ok((dq, dk, dv));
+        Ok((dq, dk, dv))
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1373,7 +1377,7 @@ fn collapse_expanded_gqa_grad_kt(
     if num_heads_k == num_heads {
         return Ok(expanded.clone());
     }
-    if num_heads_k == 0 || num_heads % num_heads_k != 0 {
+    if num_heads_k == 0 || !num_heads.is_multiple_of(num_heads_k) {
         return Err(FlashAttnError::Msg(format!(
             "kt-flash-attn: invalid GQA heads num_heads={num_heads} num_heads_k={num_heads_k}"
         )));

@@ -73,6 +73,11 @@ pub fn install_full_attention_score_budget_mib(budget_mib: usize) -> Result<(), 
     })
 }
 
+// Live under the `rocm` feature (the `rocm_sdpa` composite reads the policy);
+// dead under every other configuration, where no code path consults the
+// installed score-budget geometry. Keep the functions (the rocm lane depends
+// on them) and suppress the config-dependent `dead_code` warning elsewhere.
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub(crate) fn score_geometry() -> ScoreGeometry {
     SCORE_GEOMETRY
         .get_or_init(ScoreGeometry::default)
@@ -83,6 +88,7 @@ thread_local! {
     static TEST_SCORE_GEOMETRY: Cell<Option<ScoreGeometry>> = const { Cell::new(None) };
 }
 
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub(crate) fn effective_score_geometry() -> ScoreGeometry {
     TEST_SCORE_GEOMETRY
         .with(Cell::get)
