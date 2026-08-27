@@ -148,9 +148,9 @@ mod tests {
     #[test]
     fn full_like_arbitrary_value() {
         let t = Tensor::from_slice(&[0.0f32; 3], vec![3]).unwrap();
-        let y = full_like(&t, 3.14).unwrap();
+        let y = full_like(&t, std::f32::consts::PI).unwrap();
         for v in read_f32(&y) {
-            assert!((v - 3.14).abs() < 1e-6);
+            assert!((v - std::f32::consts::PI).abs() < 1e-6);
         }
     }
 

@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn f32_to_bytes_round_trip() {
-        let v = vec![1.0_f32, -2.5, 3.14];
+        let v = vec![1.0_f32, -2.5, std::f32::consts::PI];
         let bytes = <f32 as Element>::to_bytes(&v);
         assert_eq!(bytes.len(), 12);
         let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&bytes).to_vec();
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn from_bytes_inverts_to_bytes() {
         // f32
-        let f = vec![1.0_f32, -2.5, 3.14, 0.0];
+        let f = vec![1.0_f32, -2.5, std::f32::consts::PI, 0.0];
         assert_eq!(
             <f32 as Element>::from_bytes(&<f32 as Element>::to_bytes(&f)),
             f

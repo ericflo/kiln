@@ -84,7 +84,7 @@ fn topk_breaks_ties_to_lowest_index() {
     }
     // All-equal row: the top-k must be the FIRST k indices in order.
     let w = 512usize;
-    let data = vec![3.14f32; w];
+    let data = vec![std::f32::consts::PI; w];
     let t = Tensor::from_vec_on(Device::Rocm(0), data, vec![w]).expect("from_vec_on tie");
     let (_values, indices) = kiln_tensor::rocm_topk_last_axis(&t, 8).expect("rocm_topk tie");
     let got: Vec<u32> = indices;
