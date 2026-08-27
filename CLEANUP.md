@@ -5852,3 +5852,40 @@ Python gates pass; git status clean.
 round 98 — the last actionable own-code warning in kiln-gdn-kernel's
 test lane is now a documented judgment, consistent with the
 campaign's established lint-judgment protocol.
+
+## Cleanup Agent (round 99 — CONFIGURATION.md dead env-var row)
+
+**Date:** 2026-08-27
+
+**Context:** a full CONFIGURATION.md env-var audit was launched but the
+sub-agent timed out with zero output (round 99 attempt 1); the
+orchestrator salvaged the pre-verified core of the audit inline.
+
+**Work (1 line deleted):**
+- Table row "Metal SDPA and command cadence" cited three env vars;
+  orchestrator-verified each is a DEAD knob:
+  - `KILN_SDPA_SPLIT` — 0 repo-wide references (crates/, scripts/,
+    .github/, docs/) outside the doc line itself
+  - `KILN_SDPA_PREFILL_MIN` — 0 repo-wide references outside the doc
+    line
+  - `CANDLE_METAL_COMPUTE_PER_BUFFER` — 0 env-read sites; the only
+    code hits are the compile-time constant
+    `METAL_COMPUTE_PER_BUFFER: usize = 50`
+    (`kiln-tensor/src/metal_rt/commands.rs:66`), i.e. the knob was
+    replaced by a hardcoded constant at the kt migration. The doc
+    prose itself ("cannot change after startup") is consistent with
+    the value now being baked in.
+- Deletion-first (round-90): the whole row deleted (net −1); the
+  behavioral facts remain true in code.
+
+**Verification:** `git diff` shows a single deleted table row in
+`docs/CONFIGURATION.md`; surrounding table intact; both Python
+gates pass; git status clean (committed).
+
+**Follow-up (round 100):** the remaining ~430 env-var names in this
+file still need the same liveness audit (the timed-out round's Part
+A). Queue unchanged: `allow(dead_code)` re-adjudication
+(kiln-server 14 sites, kiln-model 20 sites) and the other 13
+crates' 30 sites.
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 99.

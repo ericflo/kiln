@@ -423,7 +423,6 @@ is fixed or owned by the typed backend profile shown above.
 | Diagnostics and legacy routing | `KILN_ARENA_FORCE_ZERO`, `KILN_CUDA_NATIVE_TRAINING` | Capture arenas zero only buffers whose allocation contract requests zero initialization. Server training uses the authoritative shared tensor tape; the obsolete legacy CUDA-native selector remains unavailable. |
 | Metal graph execution | `KILN_METAL_GRAPHS`, `KILN_FORCE_EAGER_DECODE`, `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | The owning runtime options select graph eligibility before `ModelRunner` construction. Eligible Metal runners use stable paged metadata; ineligible runners remain eager. Process state cannot change either decision during decode. |
 | Tape saved-tensor residency | `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS`, `KILN_TAPE_OFFLOAD_MATMUL_A`, `KILN_TAPE_OFFLOAD_MIN_BYTES` | GDN recurrence and matmul saved tensors remain device-resident. The unsupported host-offload experiment is unavailable until a typed training plan owns and qualifies its transfer and memory policy. |
-| Metal SDPA and command cadence | `KILN_SDPA_SPLIT`, `KILN_SDPA_PREFILL_MIN`, `CANDLE_METAL_COMPUTE_PER_BUFFER` | Split-K width follows the shape and occupancy heuristic, matrix-core prefill begins at 16 query tokens, and command buffers commit after 50 compute encodes. These fixed correctness/performance choices cannot change after startup. |
 
 `server.deterministic` remains the public deterministic control, with
 `KILN_SERVER_DETERMINISTIC` as its mechanically derived environment target and
