@@ -3139,3 +3139,93 @@ split.
 **Signature:** kiln cleanup agent, round 78 of the CLEANUP.md campaign —
 one focused duplication cleanup, zero deletions of live code, zero
 public API signature changes, all gates green.
+
+## Cleanup Agent (round 79) — 2026-08-26 — kiln-train duplicated-private-helper consolidation: the queued `is_lower_sha256` pair → 1 implementation (net −4 lines, 2 files)
+
+**Steering:** the queued follow-up from the kiln-server helper-dedup
+round (its ledger entry is labeled "round 78"; the steering notes call it
+round 79 — commit `e2d162e53` is the unambiguous template): consolidate
+kiln-train's byte-identical `is_lower_sha256` pair with the same
+`pub(crate)`-share pattern. Verify the bodies first; nothing may become
+`pub` — kiln-train is consumed by kiln-server and kiln-eval, so
+crate-internal sharing only.
+
+**Finding (re-verification of the queued claim, per the rounds 63/78
+"verify, don't trust the claim" rule):** the queued entry cited
+`crates/kiln-train/src/echo/diff.rs:295` and
+`crates/kiln-train/src/hf_interop.rs:364` — **neither path exists in the
+current tree nor anywhere in this repository's git history** (`git log
+--all -- <both paths>`: zero results; kiln-train has never had an `echo/`
+src path; `hf_interop.rs` at HEAD~1 contains no `is_lower_sha256`). The
+genuine kiln-train `is_lower_sha256` pair — the one consolidated this
+round — is:
+
+1. `crates/kiln-train/src/teacher_identity.rs:500` (before edit)
+2. `crates/kiln-train/src/logit_cache.rs:909` (before edit)
+
+**Body-identity evidence:** the two 7-line bodies extracted to files and
+`diff`-ed line by line — **byte-identical** (empty diff): both are
+`value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() ||
+(b'a'..=b'f').contains(&byte))` under the signature
+`fn is_lower_sha256(value: &str) -> bool`. No doc comment or call-site
+comment lived on either definition (checked the surrounding lines of both,
+so the round-78 orphaned-doc-block trap did not apply; the diff re-audit
+after the edit confirms it).
+
+**Change (value-identical consolidation, 2 files, +4/−8):**
+- `teacher_identity.rs` — the canonical home (round-78 pattern: the more
+  foundational / less-API-facing module — `logit_cache.rs` itself imports
+  `crate::TeacherIdentityV1` from this module). `fn is_lower_sha256`
+  became `pub(crate)` with a 2-line doc note ("SHA-256 digest shape
+  check: exactly 64 lowercase hexadecimal characters. Shared with the
+  logit-cache module for prefix-digest validation."); body untouched.
+  `pub(crate)` is crate-internal, so kiln-train's public API is
+  unchanged — kiln-server and kiln-eval see nothing new.
+- `logit_cache.rs` — deleted the private copy (−8 lines: 7 body + 1
+  blank) and added `use crate::teacher_identity::is_lower_sha256;`
+  (round-78 import pattern, placed after the `crate::logit_source` block
+  to keep rustfmt order). Both call sites —
+  `StoredCacheEntryV3::validate_self` (the `prefix_sha256` shape check)
+  and the test `prefix_hash_is_domain_separated_fixed_width_sha256` —
+  are **textually unchanged**. No imports orphaned: the body uses only
+  std methods, and `sha2::{Digest, Sha256}` is still used by
+  `hash_prefix` in logit_cache.rs and `sha256_hex` in teacher_identity.rs.
+
+**Verification (all green after the edit; the pre-edit tree was the
+committed HEAD that the round-78 entry verified with the same gates, and
+the post-edit numbers match that recorded baseline exactly):**
+- `cargo test -p kiln-train` — **532 passed / 0 failed / 2 pre-existing
+  ignores** (exactly the steering baseline; the 2 `#[ignore]`d tests
+  untouched).
+- `cargo clippy -p kiln-train --all-targets` — **0 kiln-train warnings**
+  (rounds 69–71 zero state preserved; the only remaining warnings in the
+  build are the protected kiln-tensor (14) + kiln-core (3) judgment sets,
+  unchanged).
+- `cargo check -p kiln-server -p kiln-eval` — clean (rc=0; consumers
+  unaffected by the `pub(crate)` item).
+- `cargo fmt --check` — clean repo-wide.
+- `python3 scripts/check_repository_artifacts.py` — "repository artifact
+  policy passed: 6697 tracked paths, 124749570 bytes" (exit 0).
+- `python3 scripts/check_production_file_budget.py` — "production file
+  budget passed: 647 files, 5000-line default, 14 reviewed exceptions"
+  (exit 0; teacher_identity.rs 1147→1149 and logit_cache.rs 1539→1533,
+  both far under the 5000-line default; opd.rs's exact 8496 ceiling
+  untouched).
+- `git status` clean after each commit.
+
+**Code commit:** `c8420183e` (this entry is its ledger record, following
+the round-78 "Record round-78 …" commit pattern).
+
+**Noted for future sessions (kept, not merged):**
+`crates/kiln-train/src/checkpoint.rs:904` carries a third, differently-
+written lowercase-hex-digest check (`.all(|byte|
+byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())` inlined inside
+an error-message expression) — functionally equivalent to
+`is_lower_sha256` but NOT byte-identical and stylistically different
+(rounds 63/78 rule: do not force-merge). A candidate for a future
+behavior-neutral refactor if the owner wants a single digest-shape
+helper crate-wide.
+
+**Signature:** kiln cleanup agent, round 79 of the CLEANUP.md campaign —
+the queued kiln-train dedup, one focused cleanup, zero public API
+changes, all gates green.
