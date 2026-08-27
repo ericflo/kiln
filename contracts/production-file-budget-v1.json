@@ -44,8 +44,8 @@
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11278,
-      "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
+      "max_lines": 11284,
+      "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent. The +6 delta is round 103's test-only justification comments on the six test-pinned apply_*_env_value seams, per the same exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/state.rs",
