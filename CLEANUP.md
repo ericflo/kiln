@@ -3338,3 +3338,95 @@ that `is_ascii_hexdigit()` adds over [0-9a-f].)
 **Signature:** kiln cleanup agent, round 80 of the CLEANUP.md campaign — the
 queued round-79 consolidation, verified character-by-character before merging,
 regression-locked, zero public API changes, all gates green.
+
+## Cleanup Agent (round 81) — 2026-08-26 — First-ever full-tree TODO/FIXME/XXX adjudication: every marker in crates/, scripts/, and root docs classified; 2 stale markers deleted, 2 stale cross-references fixed (comment-only, net −22 lines); 29 legitimate markers retained with per-hit evidence
+
+**Steering:** one focused cleanup round — do the never-before-done full-tree TODO/FIXME/XXX adjudication: run the prescribed `grep -rn "TODO\|FIXME\|XXX\|todo!\|unimplemented!" crates/ scripts/ --include="*.rs" --include="*.py" --include="*.sh" --include="*.mjs"` **plus** a broadened whole-repo sweep (all file types, minus `.git`/`target`/`node_modules`), adjudicate **every** hit into (a) RESOLVED, (b) STALE, (c) LEGITIMATE, or (d) OWNER-NARRATIVE with per-hit evidence; act only on rock-solid (a)/(b) (comment deletions/corrections only — zero behavior changes); respect the do-not-touch list (bench-results/, BENCH_RESULTS*.md, docs/archive/, docs/audits/, CHANGELOG.md, docs/plans/, capabilities/, .agents/, try_kt_paged_kv_*, the §9.9 OPD bench-gate cluster, swept crates).
+
+**Scan performed.** Prescribed grep + broadened sweep. `todo!()`/`unimplemented!()`: **zero hits** repo-wide. Every hit enumerated below. Node_modules hits (6 lines in 4 yargs/mdurl/markdown-it files under `scripts/docs-site/node_modules/`) are **gitignored, untracked** (`git ls-files` = 0) — local install, not repo content, excluded from the table.
+
+### Full adjudication table
+
+**(a) RESOLVED — described work is done; marker deleted (2):**
+
+| File:line | Evidence |
+|---|---|
+| `crates/kiln-tensor/src/ops/softmax.rs:158` (Metal TODO) | TODO: "implement `crate::metal_softmax_last_axis` … fall through to the CPU path" — the function **exists** (`metal_storage.rs:887`, Kiln-owned MSL kernel: "Allocate output buffer directly through metal-rs (no candle)" :941, "replaces candle's call_last_softmax" :944) and the code **dispatches it** (`Ok(Some(crate::metal_softmax_last_axis(x)?))`). The trailing landing note was **false**: it claimed the dispatch "wraps candle's `candle_nn::ops::softmax_last_dim` … shares the MTLBuffer between kt and candle storages" — no candle in `metal_storage.rs` at all. Deleted the TODO block + replaced the stale candle sentence with an accurate description of the shipped kernel. |
+| `crates/kiln-train/tests/vk_cuda_opd_parity.rs:19` | TODO: "inline-qualify the remaining `candle_core::*` sites … Both APIs still take candle types as of this commit." — the file has **zero** candle code sites (every "candle" mention is in comments; imports at :34–38 are kt-only; "No candle" :120; "Candle-free upload" :158–161); it uses `VkTensor::from_f32_slice` (:162) because `VkTensor::from_candle` was **removed in #1082** (`vk_tensor.rs:315` "The removed `Self::from_candle` (deleted by #1082)"). Deleted the TODO block; the dated (#1082, 2026-05-28) migration-history note directly below was retained. Not part of the §9.9 cluster — §9.9 covers the bench-gate scripts/baselines/CI job; this is a §9.2 parity test. |
+
+**(b) STALE — cross-reference no longer matches reality; fixed (2):**
+
+| File:line | Evidence |
+|---|---|
+| `crates/kiln-tensor/src/vulkan_storage.rs:133` | `from_arc_buffer` doc said the bridge is "referenced by the `vulkan_softmax_last_axis` **TODO**" — that TODO **became the implementation**: `vulkan_softmax_last_axis` now exists (`vulkan_storage.rs:1712`) and **uses this bridge** via `kt_tensor_from_vk` (`:1728` → `VulkanStorage::from_arc_buffer` `:350`). Reworded "referenced by the … TODO" → "used by `vulkan_softmax_last_axis`". |
+| *(BENCHMARKS.md:607 — reported, not edited, see (d)-adjacent note below)* | |
+
+**(c) LEGITIMATE — work is real and unfinished; retained (29):**
+
+kiln-tensor `src/ops/` phase-4 substrate-op TODOs (24) — **every one verified** to still fall through `Ok(None)` (CPU fallback) and **none** has a corresponding `metal_*`/`vulkan_*` kernel in-tree (per-file kernel-existence check):
+
+| File:line | Missing kernel (verified absent) |
+|---|---|
+| `flip.rs:181` (Metal), `flip.rs:223` (Vulkan) | `metal_flip_dim0` / `vulkan_flip_dim0` (note: `vulkan_index_select_dim0` for candidate-2 **does** exist — Vulkan flip now has a concrete path) |
+| `concat.rs:112` (Metal), `concat.rs:157` (Vulkan) | `metal_concat` / `vulkan_concat` |
+| `log_variants.rs:141` (Metal), `log_variants.rs:170` (Vulkan) | no Metal log/exp kernels; no Vulkan `vk_log`/`vk_exp` (corroborated by `log_softmax.rs:93` prose) |
+| `argmax.rs:139` (Metal) | `metal_argmax_last_axis` (Vulkan twin `vulkan_argmax_last_axis` **exists** — Metal-only gap) |
+| `repeat.rs:187` (Metal), `repeat.rs:233` (Vulkan) | `metal_repeat` / `vulkan_repeat` |
+| `cross_entropy.rs:90` (Vulkan) | `vulkan_cross_entropy_loss` |
+| `rope.rs:209` (Metal), `rope.rs:253` (Vulkan) | `metal_rope_*` / `vulkan_rope_*` |
+| `broadcast.rs:279` (Metal), `broadcast.rs:321` (Vulkan) | `metal_broadcast_to` / `vulkan_broadcast_to` |
+| `scatter_add.rs:287` (Metal), `scatter_add.rs:334` (Vulkan) | `metal_scatter_add` / `vulkan_scatter_add` |
+| `layernorm.rs:187` (Vulkan) | no Vulkan layernorm kernel in `kiln-vulkan-kernel` (zero TODOs in that crate) |
+| `trig.rs:179` (Vulkan) | no Vulkan trig kernels |
+| `hyperbolic.rs:124` (Metal), `hyperbolic.rs:148` (Vulkan) | `metal_tanh*` / `vulkan_tanh*` |
+| `chunk_split.rs:151,181,247,264` (Metal+Vulkan) | no chunk/split kernels on either backend (Metal note: parity untested) |
+
+Plus (5):
+
+| File:line | Evidence |
+|---|---|
+| `log_softmax.rs:93` | "the residual TODO is to author a `vk_ops::softmax::vk_log_softmax_lastdim` shader and route through it" — **no such shader exists** (zero `log_softmax` hits in `kiln-vulkan-kernel` except a comment). Real, unfinished, prose (not a marker). |
+| `vulkan_storage.rs:1690`, `:1708` | BF16/F16 Vulkan softmax support genuinely unimplemented (kernel F32-only, enforced at `:1707`); the "see TODO" pointer is loose (the ops/ TODO family it plausibly referenced is still live, but no dtype-specific TODO exists) — **reported for a future round to re-point** once the kernel lands; not touched now (work unfinished → (c)). |
+| `metal_rt/commands.rs:303` | "Avoid redundant allocation before drop" — **still true**: `commit_swap_locked` allocates a fresh command buffer on the drop path (`:331`). Real perf note. |
+| `crates/kiln-model/src/forward/model_dispatch.rs:3206` | "TODO(phase2 continuous batching): add graph capture/replay keyed by decode batch shape" — matches `cuda_graph.rs` current state ("Multi-batch (`bs > 1`) capture is unavailable … re-entry requires a source change plus … evidence"). Real, blocked-pending-evidence work. |
+
+**(d) OWNER-NARRATIVE / frozen-record territory — retained, reported (2):**
+
+| File:line | Evidence |
+|---|---|
+| `BENCHMARKS.md:607` | "Closing this is the next major perf lever — see TODO note in `cuda_graph.rs`" — `cuda_graph.rs` contains **no TODO** (it now carries a top-level "Multi-batch capture is unavailable" note, and the live marker lives at `model_dispatch.rs:3206`). The pointer is stale **but sits inside the dated "## Historical results" section (May-2026 vLLM head-to-head, "Picture as of `f3a5f95e`")** — campaign precedent (rounds 63/77/68) treats dated records as retained evidence and does not rewrite them; the pointer also lands in the **correct file**, which contains the relevant note. Kept; flagged for owner if a live-doc pointer fix is wanted. |
+| `scripts/c29_logits_compare_v2.py:53` | "updated in PR #XXX (H15b)" — placeholder in the retained-evidence C29 v2 comparator (round 77: c29 scripts are frozen post-migration artifacts; `git log` shows a single squashed import commit, so the real PR number is not recoverable from this tree). Kept; owner may fill in the PR number. |
+
+**Non-marker hits retained (12 lines, 9 files) — verified not TODOs:**
+
+| File:line | Why kept |
+|---|---|
+| `crates/kiln-server/src/training_queue.rs:3647` | prompt string inside an agent test fixture ("Find every TODO comment under src/…") |
+| `crates/kiln-server/tests/adapter_upload.rs:76` | `"----test-boundary-XXX"` multipart boundary fixture |
+| `crates/kiln-eval/src/scorers/tool_call.rs:1407,1408,1416` | `grep -R TODO src` inside raw-string test commands |
+| `scripts/check_miniopenenv_interop.sh:96`, `scripts/phase2_validation_steps_1_2_3.sh:56`, `deploy/runpod/kiln-smoke-check.sh:118` | `mktemp -d XXXXXX` templates (shell idiom) |
+| `docs/desktop/signing.md:29,67,76` | `AuthKey_XXXX.p8` filename placeholders |
+
+**Actions taken (3 files, comment/doc-only, net −17 lines, zero behavior change):**
+1. `crates/kiln-tensor/src/ops/softmax.rs` — deleted the 11-line stale Metal TODO block (work landed: kernel exists at `metal_storage.rs:887` and is dispatched) and replaced the false "wraps candle" landing-note sentences with an accurate description (Kiln-owned MSL, one threadgroup per row, output via metal-rs). Diff: 17 deletions / 4 insertions (two `metal_storage.rs` pointer lines survive verbatim), net **−13 lines**.
+2. `crates/kiln-train/tests/vk_cuda_opd_parity.rs` — deleted the 7-line stale candle-migration TODO block (file has zero candle code sites; `from_candle` deleted by #1082) plus its separator line. Diff: 9 deletions / 0 insertions, net **−9 lines**; the dated (#1082, 2026-05-28) migration-history note below it was retained.
+3. `crates/kiln-tensor/src/vulkan_storage.rs` — fixed the stale "referenced by the … TODO" cross-reference in `from_arc_buffer` docs (the referenced TODO became the implementation and actually uses the bridge). Diff: 3 deletions / 3 insertions, net **0 lines** (reworded).
+
+Committed total: **3 files changed, 7 insertions(+), 29 deletions(−) = net −22 lines** (commit `850cdaac7`).
+
+**Verification:**
+- `cargo fmt --check` — clean.
+- `cargo test -p kiln-tensor --lib` — **994 passed, 0 failed** (round-19 baseline was 992; the delta is tests added by later rounds, all green).
+- `cargo test -p kiln-train` — **534 passed / 0 failed / 2 ignored** — identical to the round-80 baseline. (The edited test file is `#![cfg(all(feature = "cuda", feature = "vulkan"))]`-gated and not compiled without CUDA; the edit is comment-only.)
+- `cargo clippy -p kiln-train --all-targets` — **0 kiln-train warnings** (zero-state preserved). `cargo clippy -p kiln-tensor --all-targets` — identical to the pristine-tree baseline (verified via `git stash` A/B: same 4 pre-existing `approx_constant` denies in untouched test files `element.rs`/`like.rs` + the protected 14-warning adjudicated set). Not a regression.
+- `python3 scripts/check_repository_artifacts.py` — **passed** (6697 tracked paths, unchanged — no files added/removed).
+- `python3 scripts/check_production_file_budget.py` — **passed** (647 files; net line deletions).
+
+**Notes for future rounds:**
+- The 24 `ops/` phase-4 TODOs are now individually evidence-checked: each lists candidate implementations, and for at least `flip.rs:223` (Vulkan) the candidate-2 dependency (`vulkan_index_select_dim0`) already exists — a future kernel round has a concrete path.
+- `vulkan_storage.rs:1690/1708` "see TODO" pointers should be re-pointed (or removed) when/if the BF16/F16 Vulkan softmax kernel lands.
+- The BENCHMARKS.md:607 pointer and c29 `PR #XXX` placeholder are owner-level; both sit in dated/frozen records.
+- No `todo!()`/`unimplemented!()` macros exist anywhere in crates/ or scripts/.
+- The §9.9 OPD cluster was verified untouched: `check_opd_regression.py`, `scripts/bench/opd_baseline_*`, `opd-bench-gate.yml`, and the round-78 `opd_tape_shim` all as-is; `opd_tape_shim` still exists in-tree (kt-native), `flce_candle_shim` confirmed deleted (matching the round-79 ledger).
+
+**Signature:** kiln cleanup agent, round 81 of the CLEANUP.md campaign — the first full-tree marker adjudication of the campaign: every TODO/FIXME/XXX hit in `crates/`, `scripts/`, and root docs classified with per-hit evidence; two rock-solid stale markers deleted and two stale cross-references fixed (comment-only, net −22 lines, commit `850cdaac7`); 29 legitimate markers retained with verified kernel-absence/unfinished-work evidence; frozen-record pointers reported rather than rewritten; all gates green; zero behavior changes.
