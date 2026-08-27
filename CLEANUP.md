@@ -5253,3 +5253,116 @@ of the CLEANUP.md campaign — 3 files, HEADLINE NET LINES **−29**,
 394/0 exact, 1 latent staleness (round-90 byproduct) found + fixed +
 root-caused; commits `89ea57e95` + `4dd185fdf` + `5692ec288` +
 `55dac859a` + this ledger commit.
+
+## Cleanup Agent (round 96b — kiln-model campaign, slice 2 of 4)
+
+**Date:** 2026-08-27
+
+**Scope:** kiln-model campaign slice 2 — the `forward/` family, 12 files
+from the round-95 census (~169 ref lines; 11 non-zero + 1 zero-ref
+skipped):
+- `model_dispatch.rs` (37 ref lines)
+- `full_attention.rs` (35)
+- `primitives.rs` (24)
+- `linear_attention_streaming.rs` (16)
+- `weight_loading.rs` (10)
+- `training_primitives.rs` (10)
+- `linear_attention.rs` (10)
+- `lm_head.rs` (8)
+- `ffn.rs` (12)
+- `transformer.rs` (3)
+- `linear_state.rs` (3)
+
+**Work (comment-only, zero code lines — filter-verified):**
+- `e106b8978` model_dispatch.rs — net **0** (23 lines reworded)
+- `4999252e5` full_attention.rs — net **−4** (incl. DELETE of a 4-line
+  "bridge kt K/V to candle for the candle-island write" block whose
+  mechanism no longer exists)
+- `37577e674` primitives.rs — net **0** (3 lines reworded)
+- `c601de3e2` linear_attention.rs — net **0** (1 line reworded)
+- `c04c2bd73` ffn.rs — net **−1** (stale "legacy path pays per-op
+  candle↔kt round-trips" clause deleted — the legacy path is verified
+  kt-native)
+- `365126140` transformer.rs — net **0** (3 lines reworded)
+- `037b56a59` linear_state.rs — net **−1** (stale "Candle's `Device`
+  enum" rationale deleted — the kt Device enum names all five
+  backends)
+- HEADLINE NET LINES **−6** (46 ins / 52 del, zero code lines)
+
+**Adjudication core:** `PagedKvCache` in kiln-model is now an **alias
+for `PagedKvCacheKt`** (kt-native), so every present-tense
+"candle writer / candle path / candle accessor" claim about the primary
+paged-KV path was false and reworded to "primary" (the mirror-write
+mechanism the comments describe is verified real — `bench.rs` in
+kiln-server calls `model_forward_paged_with_kt` with `Some(&kt)`,
+making the stale "no caller passes `Some(&kt)`" claim in the
+`model_forward_paged_with_kt` doc false as well: reworded to "opts
+into", and the kiln-server bench call site cited as evidence).
+
+**Verification evidence (all KEPT claims checked against code/git):**
+- `#1082` history kept: `model_forward` candle shim (absent from live
+  code), `model_forward_logits_kt_to_candle` (absent),
+  `kt_logits_to_candle` / `candle_to_kt_activation` (absent outside
+  other files' history comments), `vk_forward.rs` (added at
+  `10b96405b` as `crates/kiln-model/src/vk_forward.rs`, deleted in PR7
+  commit `a909d46ff`), `cuda_flash_attention_training_bf16`
+  (absent), `try_vulkan_rmsnorm_autograd` / `VulkanRmsNormOp`
+  (absent), `CudaRotaryOneBf16` island (absent),
+  `fused_rmsnorm_via_kt_forward_op` (absent from live code),
+  `kt_device_from_candle` / `candle_device_from_kt` (deleted per
+  kiln-kt-bridge's own ledger comment), `Tensor::from_raw_buffer`
+  (superseded by `from_raw_bytes_on` per kiln-tensor doc)
+- live-mechanism claims verified: kt-twin mirror block in
+  `gqa_attention_paged_with_rope_tables` (both the primary
+  `write_token_major_native_graph_slot` write and the
+  `try_kt_paged_kv_write_token_major_native_graph_slot` mirror),
+  `try_kt_paged_kv_*` accessor mirroring, `cuda_silu` ->
+  `try_tape_silu_kt` internal SiluBackward recording,
+  `try_tape_matmul_kt` / `try_tape_flash_attn_kt` recorders,
+  `kiln-flash-attn` U32 `seqused_k` requirement (kt_api.rs),
+  `aab07fa7` kt graph-outputs entry, Metal SDPA kernel kiln-owned in
+  kiln-tensor (replaced `candle_metal_kernels::call_sdpa_*`),
+  kiln-vulkan-kernel candle-core dropped (manifest + round 91),
+  `for_backend` (name, device) policy table
+- frozen code untouched: `candle_reshape_with_spec` symbol,
+  `cross_entropy_from_logits_grad_candle` fn + error strings, all
+  96a-landed root files
+
+**Adjudicated KEEP (no edit needed) — 4 files fully:**
+- `linear_attention_streaming.rs` (16/16 refs): all "seam flip:
+  kt-native ... recorder — no kt->candle->kt" lines verified true
+  against the live `try_tape_*_kt` call sites; plus verified
+  historical notes (candle `Device::synchronize` gone, ~7 DtoD
+  kt->candle bridge eliminated)
+- `weight_loading.rs` (10/10 refs): all "dropping the candle
+  `from_raw_buffer` leaf" + "Historically this bridged a candle
+  `Device`" lines are true #1082 migration history; the kt-native
+  loader claims verified against `Tensor::from_raw_bytes_on`
+- `training_primitives.rs` (10/10 refs): the `_candle`-suffixed fn
+  name + 7 error-message strings are frozen code (the comment at L102
+  correctly documents the suffix as a misnomer); the one prose ref is
+  that misnomer annotation — KEEP
+- `lm_head.rs` (8/8 refs): all true ("no candle round-trip" on the
+  kt matmul/argmax chain, "kt `argmax` returns I64 (candle returned
+  U32)" verified against the `to_vec1::<i64>` readback, "formerly the
+  candle-typed cross-file seam" past-tense, `kt_logits_to_candle`
+  bridge-island deletion history)
+
+**Verification (own runs, final state):** comment-only filter over all
+seven code commits = 0 non-comment lines; `cargo test -p kiln-model`
+**394/0/0 EXACT** (the 96a series baseline); `cargo clippy -p
+kiln-model` **0 own-code warnings** (all observed warnings are
+kiln-tensor's, unchanged); `cargo fmt -p kiln-model --check` clean;
+both Python gates pass (`check_repository_artifacts.py`: 6697 tracked
+paths; `check_production_file_budget.py`: 647 files); `git status`
+clean.
+
+**Campaign plan status:** 96a DONE, **96b DONE**. Remaining: **96c**
+`backend/` family (17 files, ~146 refs) → **96d** root tail (14 files,
+~78 refs). Each slice is disjoint; same protocol as 96a/96b.
+
+**Signature:** kiln cleanup agent, round 96b of the CLEANUP.md campaign
+— 7 files edited / 4 files verified-clean, HEADLINE NET LINES **−6**,
+394/0/0 exact, zero code lines, commits `e106b8978` + `4999252e5` +
+`37577e674` + `c601de3e2` + `c04c2bd73` + `365126140` + `037b56a59` +
+this ledger commit.
