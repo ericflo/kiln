@@ -44,7 +44,7 @@ use kiln_model::forward::{
     feature = "vulkan",
     feature = "rocm"
 ))]
-use kiln_model::forward::{model_forward_embed, model_forward_final_norm, model_forward_head};
+use kiln_model::forward::{model_forward_embed, model_forward_final_norm};
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 use kiln_model::sampling::{greedy_sample, try_topk_on_device};
 use kiln_model::{
