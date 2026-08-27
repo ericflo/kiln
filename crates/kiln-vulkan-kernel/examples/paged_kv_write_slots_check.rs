@@ -91,16 +91,16 @@ fn main() -> Result<()> {
     let k_got = read_back_f32(&dev, &k_pool)?;
     let v_got = read_back_f32(&dev, &v_pool)?;
 
-    for row in 0..batch {
-        let slot = slots[row] as usize;
+    for (row, slot) in slots.iter().take(batch).enumerate() {
+        let slot = *slot as usize;
         let src = row * elements_per_slot;
         let dst = slot * elements_per_slot;
         ensure!(
-            &k_got[dst..dst + elements_per_slot] == &k_in[src..src + elements_per_slot],
+            k_got[dst..dst + elements_per_slot] == k_in[src..src + elements_per_slot],
             "k row {row} was not written to slot {slot}"
         );
         ensure!(
-            &v_got[dst..dst + elements_per_slot] == &v_in[src..src + elements_per_slot],
+            v_got[dst..dst + elements_per_slot] == v_in[src..src + elements_per_slot],
             "v row {row} was not written to slot {slot}"
         );
     }

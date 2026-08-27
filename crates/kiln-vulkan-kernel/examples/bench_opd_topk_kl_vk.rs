@@ -49,9 +49,9 @@ fn deterministic_topk(t: usize, v: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
             .map(|kk| ((ti * 17 + (kk as usize) * 31 + 5) % v) as u32)
             .collect();
         let mut seen = std::collections::HashSet::new();
-        for kk in 0..k {
-            while !seen.insert(row[kk]) {
-                row[kk] = (row[kk] + 1) % v as u32;
+        for entry in row.iter_mut() {
+            while !seen.insert(*entry) {
+                *entry = (*entry + 1) % v as u32;
             }
         }
         idx.extend_from_slice(&row);
@@ -100,8 +100,8 @@ fn upload_bf16w(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Resul
     // BF16 kernels view storage as u32 words; round odd element counts up
     // so the final word is addressable.
     let mut needed = bytes.len().max(2);
-    if needed % 4 != 0 {
-        needed = ((needed + 3) / 4) * 4;
+    if !needed.is_multiple_of(4) {
+        needed = needed.div_ceil(4) * 4;
     }
     let buf =
         VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), needed as u64)

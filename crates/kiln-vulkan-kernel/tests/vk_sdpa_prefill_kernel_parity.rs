@@ -59,14 +59,14 @@ fn cpu_sdpa(
                 // scores
                 let mut scores = vec![0.0_f32; k_max];
                 let mut max_logit = f32::NEG_INFINITY;
-                for ki in 0..k_max {
+                for (ki, slot) in scores.iter_mut().enumerate() {
                     let k_base = b * stride_batch + ki * stride_token + h * head_dim;
                     let mut dot = 0.0_f32;
                     for d in 0..head_dim {
                         dot += q[q_base + d] * k[k_base + d];
                     }
                     let logit = dot * scale;
-                    scores[ki] = logit;
+                    *slot = logit;
                     max_logit = max_logit.max(logit);
                 }
                 let mut sum = 0.0_f32;
@@ -76,9 +76,9 @@ fn cpu_sdpa(
                 }
                 for d in 0..head_dim {
                     let mut acc = 0.0_f32;
-                    for ki in 0..k_max {
+                    for (ki, weight) in scores.iter().enumerate() {
                         let k_base = b * stride_batch + ki * stride_token + h * head_dim;
-                        acc += scores[ki] * v[k_base + d];
+                        acc += *weight * v[k_base + d];
                     }
                     out[q_base + d] = acc / sum;
                 }

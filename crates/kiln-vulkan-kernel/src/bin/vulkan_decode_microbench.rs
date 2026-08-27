@@ -251,7 +251,7 @@ fn parse_args_from(raw: &[String]) -> Result<MicrobenchArgs> {
         let name = raw[index].as_str();
         match name {
             "--only" => {
-                let selected = parse_csv(value(&raw, &mut index, name)?, name, |case| {
+                let selected = parse_csv(value(raw, &mut index, name)?, name, |case| {
                     anyhow::ensure!(
                         BENCH_NAMES.contains(&case),
                         "unknown microbenchmark case {case:?}; expected one of {}",
@@ -262,63 +262,63 @@ fn parse_args_from(raw: &[String]) -> Result<MicrobenchArgs> {
                 args.only = Some(selected);
             }
             "--batches" => {
-                args.batches = parse_csv(value(&raw, &mut index, name)?, name, |part| {
+                args.batches = parse_csv(value(raw, &mut index, name)?, name, |part| {
                     parse_positive(part, name)
                 })?;
             }
             "--warmup-iters" => {
-                args.timing.warmup_iters = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.timing.warmup_iters = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--timed-iters" => {
-                args.timing.timed_iters = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.timing.timed_iters = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--repeats" => {
-                args.timing.repeats = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.timing.repeats = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--attention-history" => {
-                args.attention_history = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.attention_history = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--paged-history" => {
-                args.paged_history = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.paged_history = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--paged-block-size" => {
-                args.paged_block_size = parse_positive(value(&raw, &mut index, name)?, name)?;
+                args.paged_block_size = parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--mlp-rows8-min-batch" => {
                 args.kernels.mlp_rows8_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--mlp-gate-up-rows4-min-batch" => {
                 args.kernels.mlp_gate_up_rows4_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--mlp-down-rows4-min-batch" => {
                 args.kernels.mlp_down_rows4_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--linear-rows8-min-batch" => {
                 args.kernels.linear_rows8_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--linear-rows4-min-batch" => {
                 args.kernels.linear_rows4_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--gdn-in-proj-rows4-min-batch" => {
                 args.kernels.gdn_in_proj_rows4_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--gdn-in-proj-rows8-min-batch" => {
                 args.kernels.gdn_in_proj_rows8_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--full-attn-qkv-rows8-min-batch" => {
                 args.kernels.full_attn_qkv_rows8_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--full-attn-qkv-rows4-min-batch" => {
                 args.kernels.full_attn_qkv_rows4_min_batch =
-                    parse_positive(value(&raw, &mut index, name)?, name)?;
+                    parse_positive(value(raw, &mut index, name)?, name)?;
             }
             "--disable-linear-rows4" => args.kernels.linear_rows4 = false,
             "--disable-linear-rows8" => args.kernels.linear_rows8 = false,
@@ -689,7 +689,7 @@ fn run(args: &MicrobenchArgs) -> Result<()> {
         // All f32. The bytes-typed dispatch takes them as &[u8]. (#1082)
         let weight_bytes = vec![0u8; channels * kernel_size * 4];
         for &batch in batches.as_slice() {
-            let x_bytes = vec![0u8; batch * channels * 1 * 4];
+            let x_bytes = vec![0u8; batch * channels * 4];
             let state_bytes = vec![0u8; batch * channels * (kernel_size - 1) * 4];
             time(args.timing, "causal_conv1d_update", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update_bytes(
@@ -764,8 +764,8 @@ fn run(args: &MicrobenchArgs) -> Result<()> {
         let a_log = upload_bf16_packed_buffer_from_slice(&device, &a_log_w)?;
         let dt_bias = upload_bf16_packed_buffer_from_slice(&device, &dt_bias_w)?;
         for &batch in batches.as_slice() {
-            let a_bytes = vec![0u8; batch * 1 * nv * 4];
-            let b_bytes = vec![0u8; batch * 1 * nv * 4];
+            let a_bytes = vec![0u8; batch * nv * 4];
+            let b_bytes = vec![0u8; batch * nv * 4];
             time(args.timing, "gdn_gates_cached", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
                     &device,
@@ -3009,6 +3009,11 @@ fn run_full_token_resident_paged(
     Ok(())
 }
 
+fn main() -> Result<()> {
+    let args = parse_args()?;
+    run(&args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3056,9 +3061,4 @@ mod tests {
             assert!(parse_args_from(&raw).is_err(), "accepted {raw:?}");
         }
     }
-}
-
-fn main() -> Result<()> {
-    let args = parse_args()?;
-    run(&args)
 }

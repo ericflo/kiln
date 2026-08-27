@@ -37,9 +37,7 @@ fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result
     };
     let (data, _) = extract_tensor_bytes(tensor)?;
     let f32_slice: &[f32] = bytemuck::cast_slice(&data);
-    Ok(kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(
-        vk_device, f32_slice,
-    )?)
+    kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, f32_slice)
 }
 
 fn cpu_bf16(data: Vec<f32>, shape: impl Into<Shape>) -> Result<Tensor> {
@@ -923,13 +921,13 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
     let q_expanded = q
         .squeeze(1)?
         .unsqueeze(2)?
-        .expand(&[batch, q_heads, gqa_ratio, dk])?
+        .expand([batch, q_heads, gqa_ratio, dk])?
         .contiguous()?
         .reshape((batch, heads, dk))?;
     let k_expanded = k
         .squeeze(1)?
         .unsqueeze(2)?
-        .expand(&[batch, q_heads, gqa_ratio, dk])?
+        .expand([batch, q_heads, gqa_ratio, dk])?
         .contiguous()?
         .reshape((batch, heads, dk))?;
     let v_expanded = v.squeeze(1)?.contiguous()?;

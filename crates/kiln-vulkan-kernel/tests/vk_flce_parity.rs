@@ -150,10 +150,7 @@ fn cpu_xent(
             logits[v] = s;
         }
         let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
-        let mut z = 0.0_f32;
-        for v in 0..vocab {
-            z += (logits[v] - mx).exp();
-        }
+        let z: f32 = logits.iter().map(|l| (l - mx).exp()).sum();
         let lse = mx + z.ln();
         let label = labels[n] as usize;
         loss_sum += lse - logits[label];
@@ -196,10 +193,7 @@ fn cpu_selected_log_probs_and_grpo(
             logits[v] = s;
         }
         let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
-        let mut z = 0.0_f32;
-        for v in 0..vocab {
-            z += (logits[v] - mx).exp();
-        }
+        let z: f32 = logits.iter().map(|l| (l - mx).exp()).sum();
         let lse = mx + z.ln();
         let label = labels[n] as usize;
         let policy_logprob = logits[label] - lse;
@@ -267,10 +261,7 @@ fn cpu_grpo_ext(
             logits[v] = s;
         }
         let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
-        let mut z = 0.0_f32;
-        for v in 0..vocab {
-            z += (logits[v] - mx).exp();
-        }
+        let z: f32 = logits.iter().map(|l| (l - mx).exp()).sum();
         let lse = mx + z.ln();
         let label = labels[n] as usize;
         let policy_logprob = logits[label] - lse;
@@ -361,10 +352,7 @@ fn grpo_scalar_loss(
             logits[v] = s;
         }
         let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
-        let mut z = 0.0_f32;
-        for v in 0..vocab {
-            z += (logits[v] - mx).exp();
-        }
+        let z: f32 = logits.iter().map(|l| (l - mx).exp()).sum();
         let lse = mx + z.ln();
         let label = labels[n] as usize;
         let policy_logprob = logits[label] - lse;
@@ -748,13 +736,13 @@ fn vk_grpo_cispo_policy_term_matches_pinned_trl_pytorch_oracle() -> Result<()> {
     let grad_seed = upload_f32(&dev, &[1.0], &[1])?;
     let hidden_grad =
         vk_grpo_backward_with_saved_state(&hidden, &saved, &grad_seed)?.to_vec_f32()?;
-    for index in 0..num_active {
+    for (index, grad) in hidden_grad.iter().enumerate().take(num_active) {
         let policy = case.policy_log_probs[index];
         let reference = case.kl_reference_log_probs[index];
         let k3_grad = case.loss_normalizer * case.kl_coeff * (1.0 - (reference - policy).exp());
         let expected_policy_grad = case.expected.policy_log_prob_grad[index] - f64::from(k3_grad);
         let log_prob_jacobian = 1.0 - policy.exp();
-        let actual_policy_grad = f64::from(hidden_grad[index] / log_prob_jacobian);
+        let actual_policy_grad = f64::from(grad / log_prob_jacobian);
         assert!(
             (actual_policy_grad - expected_policy_grad).abs()
                 <= fixture.tolerances.gradient_abs * 3.0,

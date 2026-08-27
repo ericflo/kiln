@@ -137,9 +137,9 @@ fn deterministic_case(
             .map(|k| ((t * 17 + (k as usize) * 31 + 5) % vocab) as u32)
             .collect();
         let mut seen = std::collections::HashSet::new();
-        for k in 0..top_k {
-            while !seen.insert(row[k]) {
-                row[k] = (row[k] + 1) % vocab as u32;
+        for entry in row.iter_mut() {
+            while !seen.insert(*entry) {
+                *entry = (*entry + 1) % vocab as u32;
             }
         }
         idx.extend_from_slice(&row);
@@ -414,7 +414,7 @@ fn vk_opd_metrics_parity_f32_k32() -> Result<()> {
         let hq: f64 = (0..top_k).map(|k| -q_hat[k] * log_q[k]).sum();
         let kl: f64 = (0..top_k).map(|k| p_hat[k] * (log_p[k] - log_q[k])).sum();
 
-        let got_hp = metrics[t * 3 + 0];
+        let got_hp = metrics[t * 3];
         let got_hq = metrics[t * 3 + 1];
         let got_kl = metrics[t * 3 + 2];
 

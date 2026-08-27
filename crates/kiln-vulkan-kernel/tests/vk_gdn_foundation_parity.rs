@@ -75,8 +75,8 @@ fn vk_linear_attention_state_zeros_initialized() -> Result<()> {
     let state = VkLinearAttentionState::zeros(&dev, 3, 1, 2, 4, 4, 6, 4)?;
     assert_eq!(state.layers.len(), 3);
     for layer in &state.layers {
-        assert_eq!(layer.recurrent_n_elements, 1 * 2 * 4 * 4);
-        assert_eq!(layer.conv_n_elements, 1 * 6 * 3); // kernel-1 = 3
+        assert_eq!(layer.recurrent_n_elements, 2 * 4 * 4);
+        assert_eq!(layer.conv_n_elements, 6 * 3); // kernel-1 = 3
     }
     Ok(())
 }
@@ -302,7 +302,7 @@ fn vk_gdn_autograd_wrappers_produce_input_grads() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
 
     let nv = 2;
-    let total = 1 * 4 * nv;
+    let total = 4 * nv;
     let a_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.13).sin()).collect();
     let b_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.17).cos()).collect();
     let a_log = upload(&dev, &[-0.4, -0.8], &[nv])?;
