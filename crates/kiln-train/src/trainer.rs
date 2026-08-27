@@ -46,18 +46,6 @@ use kiln_model::forward::{
     feature = "rocm"
 ))]
 use kiln_model::forward::{model_forward_embed, model_forward_final_norm, model_forward_head};
-// Candle-era tape parts (gdn/gqa/mlp family) — known feature-gated pattern per
-// CLEANUP steering: retained, deletion reserved for the dead-code round.
-#[allow(unused_imports)]
-use kiln_model::forward::{
-    GqaAttentionPrepared, gdn_attention_in_projections, gdn_attention_input_norm,
-    gdn_attention_residual_block, gdn_gated_norm_from_recurrent, gdn_out_proj_from_gated_norm,
-    gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
-    gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
-    gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
-    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, swiglu_ffn,
-    transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
-};
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 use kiln_model::sampling::{greedy_sample, try_topk_on_device};
 use kiln_model::{
