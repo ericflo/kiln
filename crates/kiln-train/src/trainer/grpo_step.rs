@@ -1515,6 +1515,12 @@ pub(super) fn validate_lora_gradient_tensor(
 #[derive(Clone, Copy)]
 pub(super) enum ExpectedLoraGradientSet {
     WholeAdapter,
+    // keep: used under GPU features (cuda/metal/vulkan/rocm) — constructed
+    // by `merge_checkpoint_lora_grad_segment` (below), which the
+    // checkpointed tape paths call (forward_backward.rs checkpointed SFT +
+    // GRPO, opd.rs checkpointed OPD) to validate per-layer-range gradient
+    // sets.
+    #[allow(dead_code)]
     CheckpointLayerRange,
 }
 
@@ -1637,6 +1643,13 @@ pub(super) fn validate_exact_lora_grad_map_metadata(
     )
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — merges one
+// checkpoint segment's LoRA gradients into the running accumulator from
+// `checkpointed_forward_backward_tape_authoritative_kt` (forward_backward.rs,
+// SFT + GRPO paths) and `checkpointed_opd_step_forward_backward_tape_authoritative`
+// (opd.rs); also exercised by plain tests (tests/mod.rs
+// `checkpoint_gradient_merge_*`).
+#[allow(dead_code)]
 pub(crate) fn merge_checkpoint_lora_grad_segment(
     params: &TrainableLoraParams,
     accumulated: &mut kiln_autograd::GradStore,
@@ -1719,6 +1732,11 @@ pub(super) fn observe_lora_grad_module_norms(
 /// When a rollout has no trajectory (legacy single-string `text` only),
 /// behaviour is bit-identical to the pre-ECHO path: `action_mask` is "true
 /// after the prompt" and `env_mask` is all-false.
+// keep: test-only callers (plain tests in tests/mod.rs) + live user docs —
+// README.md documents `tokenize_grpo_group` as the ECHO mask builder
+// (action_mask/env_mask separation). Thin wrapper over the live
+// `tokenize_grpo_group_timed`.
+#[allow(dead_code)]
 pub(super) fn tokenize_grpo_group(
     group: &GrpoGroup,
     tokenizer: &KilnTokenizer,
