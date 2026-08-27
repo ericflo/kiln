@@ -1252,6 +1252,9 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 // `device_output_ptr` / `alloc_device_tensor_like` / `device_stream_submission_of`),
 // which dispatches to either the CUDA or ROCm helper by the tensor's backend.
 // CUDA behavior is unchanged.
+// 8 params: flat mirror of the fused OPD bwd kernel contract (consistent with
+// the too_many_arguments allowance on kernel-parity signatures elsewhere).
+#[allow(clippy::too_many_arguments)]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     hidden: &KtTensor,
@@ -1278,6 +1281,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
 
 /// Same as [`opd_top_k_reverse_kl_phase_b_bwd_kt`], but reuses active/top-K
 /// device metadata returned by the matching forward pass.
+// 9 params: metadata-reuse variant of the same flat kernel-parity contract.
+#[allow(clippy::too_many_arguments)]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 #[doc(hidden)]
 pub fn opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt(
@@ -1359,6 +1364,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
     )
 }
 
+// 9 params: shared inner of the flat OPD bwd kernel-parity contract.
+#[allow(clippy::too_many_arguments)]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     hidden: &KtTensor,

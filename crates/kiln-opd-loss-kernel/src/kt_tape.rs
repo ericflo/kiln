@@ -650,7 +650,7 @@ mod tests {
             let seed = KtTensor::from_vec_on(kiln_tensor::Device::Rocm(0), vec![1.0f32], vec![])
                 .expect("scalar seed");
             let grads = tape
-                .backward(loss.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
+                .backward(loss.id(), seed, kiln_tensor::ops::add)
                 .expect("OPD tape backward on ROCm");
             let dh = grads.get(h.id()).expect("d_hidden present");
             assert!(
