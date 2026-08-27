@@ -1146,4 +1146,66 @@ mod tests {
         assert!(decode_base64url_no_pad("AAB").is_err());
         assert!(decode_base64url_no_pad("A").is_err());
     }
+
+    #[test]
+    fn is_lower_sha256_enforces_exactly_64_lowercase_hex_bytes() {
+        let valid = "0123456789abcdef".repeat(4);
+        assert_eq!(valid.len(), 64);
+        assert!(is_lower_sha256(&valid));
+
+        // Length divergence: 63 and 65 bytes are rejected even when every
+        // byte is otherwise valid.
+        assert!(!is_lower_sha256(&valid[..63]));
+        assert!(!is_lower_sha256(&format!("{valid}f")));
+
+        // Uppercase hex is rejected, fully and mixed.
+        assert!(!is_lower_sha256(&"0123456789ABCDEF".repeat(4)));
+        assert!(!is_lower_sha256(&"A123456789abcdef".repeat(4)));
+
+        // Non-hex letters are rejected in either case.
+        assert!(!is_lower_sha256(&"g123456789abcdef".repeat(4)));
+        assert!(!is_lower_sha256(&"z123456789abcdef".repeat(4)));
+        assert!(!is_lower_sha256(&"G123456789abcdef".repeat(4)));
+
+        // Non-ASCII is rejected even when the byte length is exactly 64:
+        // each two-byte char displaces two hex chars.
+        assert!(!is_lower_sha256(&format!("{}\u{e9}", "a".repeat(62))));
+        assert!(!is_lower_sha256(&"\u{e9}".repeat(32)));
+    }
+
+    #[test]
+    fn is_lower_sha256_matches_the_legacy_checkpoint_predicate() {
+        // Round 80 routed checkpoint.rs through this helper, replacing its
+        // inline `value.len() == 64 && value.bytes().all(|byte|
+        // byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())` check.
+        // This test locks the behavioral identity against that removed
+        // expression across the full ASCII byte space, so a future edit
+        // cannot let the two shapes drift.
+        let legacy = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        let base: Vec<char> = vec!['0'; 64];
+        for byte in 0u8..=127 {
+            let mut chars = base.clone();
+            chars[0] = byte as char;
+            let case: String = chars.into_iter().collect();
+            assert_eq!(
+                is_lower_sha256(&case),
+                legacy(&case),
+                "divergence at ASCII byte {byte:#04x}"
+            );
+        }
+        // Length boundary around exactly 64.
+        for case in ["0".repeat(63), format!("{}0", "0".repeat(64))] {
+            assert_eq!(
+                is_lower_sha256(&case),
+                legacy(&case),
+                "divergence at length boundary: len={}",
+                case.len()
+            );
+        }
+    }
 }

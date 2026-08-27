@@ -19,6 +19,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::teacher_identity::is_lower_sha256;
+
 pub const TRAINING_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub const TRAINING_CHECKPOINT_MANIFEST_TYPE: &str = "kiln.training-checkpoint.v1";
 pub const TRAINING_CHECKPOINT_MANIFEST_FILENAME: &str = "checkpoint_manifest.json";
@@ -898,10 +900,7 @@ fn validate_nonempty(field: &str, value: &str) -> Result<()> {
 
 fn validate_sha256(field: &str, value: &str) -> Result<()> {
     ensure!(
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        is_lower_sha256(value),
         "{field} must be 64 lowercase hexadecimal characters"
     );
     Ok(())
