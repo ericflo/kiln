@@ -7,7 +7,7 @@
 //! to topologically order all reachable nodes, then walks them in
 //! reverse, accumulating gradients in a per-op-id map. Parameter leaves
 //! (those with `param_id: Some(_)`) accumulate into the returned
-//! `VkGradStore`, keyed by candle's `TensorId` so the existing
+//! `VkGradStore`, keyed by `TensorId` so the existing
 //! optimizer dispatch path can consume the grads.
 //!
 //! Multi-use accumulation uses `vk_ops::elementwise::vk_add_no_grad`,
