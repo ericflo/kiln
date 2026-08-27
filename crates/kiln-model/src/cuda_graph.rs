@@ -759,7 +759,7 @@ impl CudaGraphRunner {
         let key = CudaBatchedGraphKey::new(batch_size, max_seq_len, paged_cache);
 
         // Phase 1: per-bucket warmup. Each new `batch_size` bucket
-        // runs eager once so Candle / cudarc prime any lazy
+        // runs eager once so cudarc primes any lazy
         // allocator state before we record the graph for that
         // bucket. The global `warmup_done` flag covers the bs=1
         // path; batched needs its own per-bucket tracker because a
@@ -1684,15 +1684,10 @@ impl CudaGraphRunner {
         // directly on the kt device (`weights.embed_tokens.device()`),
         // so NO candle alloc + per-buffer candle->kt bridge any more.
         // The capture-control FFI (`begin_capture` / `end_capture` /
-        // `capture_status` / `synchronize`) used to live on a candle
-        // `CudaStream` handle — capture now runs on the kt context's
-        // default stream directly, so every kt op (alloc + the captured
-        // forward) lands on it.
+        // `capture_status` / `synchronize`) now targets a kt context
+        // stream (used to live on a candle `CudaStream` handle).
         let device = weights.embed_tokens.device();
         let dtype = weights.embed_tokens.dtype();
-        // (#1082) kt-native capture stream: the model + captured forward run kt
-        // ops on the kt context's default stream, so capture on THAT stream
-        // directly (was a kt->candle device bridge just to reach `cuda_stream()`).
         let device_idx = match device {
             kiln_tensor::Device::Cuda(i) => i,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
