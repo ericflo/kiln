@@ -202,8 +202,7 @@ fn tiny_weights_preferring_token(
         embeddings[row * h] = 1.0;
     }
     embeddings[preferred_id as usize * h] = 2.0;
-    let embed =
-        Tensor::from_vec_on(device.clone(), embeddings, vec![config.vocab_size, h]).unwrap();
+    let embed = Tensor::from_vec_on(device, embeddings, vec![config.vocab_size, h]).unwrap();
     weights.embed_tokens = embed.clone();
     weights.embed_tokens_t = embed.t().unwrap().contiguous().unwrap();
     weights.final_norm = Tensor::ones((h,), DType::F32, device).unwrap();
@@ -4394,7 +4393,7 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
                 (patterned as f32 / 257.0 - 0.5) * 0.08
             })
             .collect();
-        Tensor::from_vec_on(device.clone(), values, shape.to_vec()).unwrap()
+        Tensor::from_vec_on(device, values, shape.to_vec()).unwrap()
     };
     let rnd_t = |shape: &[usize]| {
         let w = rnd(shape);
@@ -4801,7 +4800,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let control_cache = prefix_test_paged_cache_on(&config, cache_device.clone());
+    let control_cache = prefix_test_paged_cache_on(&config, cache_device);
     let mut control = runner
         .prepare_paged_batched_decode_with_prefix_cache(
             &prompt,
@@ -4821,7 +4820,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let chunked_cache = prefix_test_paged_cache_on(&config, cache_device.clone());
+    let chunked_cache = prefix_test_paged_cache_on(&config, cache_device);
     let start = runner
         .begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
             &prompt,
