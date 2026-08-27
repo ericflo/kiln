@@ -1902,11 +1902,6 @@ impl CudaGraphRunner {
         capture_result.context("forward pass failed during graph capture")?;
         capture_arena_result?;
 
-        // #1082: `graph_inputs` borrows the owned kt buffers
-        // (`block_table_buffer`, `rotary_*`, `paged_decode_*`, …); drop it
-        // so those buffers can be moved into `CapturedDecodeGraph` below.
-        drop(graph_inputs);
-
         // Check graph capture success
         match graph_result {
             Ok(Some(graph)) => {
@@ -2343,12 +2338,6 @@ impl CudaGraphRunner {
                 max_seqlen_k = key.max_seqlen_k,
                 "CUDA graph captured for batched decode (HiddenOnly + eager lm_head)"
             );
-
-            // #1082: `graph_inputs` borrows the owned kt buffers
-            // (`token_buffer`, `output_hidden`, …) and `persistent_state`;
-            // drop it so those buffers can be moved into
-            // `CapturedBatchedDecodeGraph` below.
-            drop(graph_inputs);
 
             CapturedBatchedDecodeGraph {
                 graph,

@@ -7632,7 +7632,6 @@ impl RocmGraphRunner {
             ))?;
             return Err(err).context("forward pass failed during graph capture");
         }
-        drop(graph_inputs);
 
         let graph = match graph_result {
             Ok(graph) => graph,
@@ -10303,7 +10302,6 @@ mod tests {
         for seq_len in 73..=78 {
             assert_hidden_step(&mut graph_runner, PREFIX_OWNER, seq_len);
         }
-        drop(assert_hidden_step);
 
         let seq_len = 79usize;
         let table = BlockTable {
