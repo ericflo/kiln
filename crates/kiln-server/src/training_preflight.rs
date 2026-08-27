@@ -16,19 +16,19 @@ use kiln_train::{CheckpointBoundaryPolicy, GrpoGroup, Optimizer, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
 ///
-/// On Vulkan today (Phase 0) every base weight lives BOTH as a candle
+/// On Vulkan today (Phase 0) every base weight lives BOTH as a kt
 /// CPU tensor AND as one or two `VulkanBuffer` mirrors on the device.
 /// On a unified-memory APU those mirrors are backed by the same
 /// physical RAM, so the working set must count weights as if they
 /// were resident twice over. After Phase 1.2-1.4 lands the resident
-/// registry, the candle storage is stubbed and weights live in
+/// registry, the kt CPU storage is stubbed and weights live in
 /// exactly one place — the preflight then drops the multiplier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightResidency {
-    /// CUDA / Metal / dGPU paths where candle owns the weights and the
+    /// CUDA / Metal / dGPU paths where the kt layer owns the weights and the
     /// device backend doesn't keep parallel copies.
     SingleCopy,
-    /// Vulkan without the resident registry: weights live in candle CPU
+    /// Vulkan without the resident registry: weights live in kt CPU
     /// storage AND in `VulkanBuffer` caches simultaneously.
     DualResidentCpuAndVulkan,
 }
@@ -80,7 +80,7 @@ impl WeightResidency {
     /// working-set estimate.
     fn weight_multiplier(self) -> u64 {
         match self {
-            // 1x for the candle copy + ~1x for the cached VulkanBuffer.
+            // 1x for the kt CPU copy + ~1x for the cached VulkanBuffer.
             // Add a small headroom (0.25x) for the bf16-packed cache that
             // is computed alongside the f32 cache for many weights.
             Self::DualResidentCpuAndVulkan => 2,
@@ -94,7 +94,7 @@ impl WeightResidency {
         if vram.unified {
             Self::DualResidentCpuAndVulkan
         } else {
-            // Discrete: candle keeps weights in CPU RAM but the GPU's
+            // Discrete: the kt layer keeps weights in CPU RAM but the GPU's
             // separate VRAM pool is its own memory; only the CPU copy
             // counts against the same budget the trainer estimates
             // against on the host. SingleCopy is honest there.
@@ -650,13 +650,13 @@ pub fn lora_rank_ceiling_for_budget(
 /// `residency` controls how many copies of the base weights to count.
 /// Until the Phase 1 resident registry is deployed, callers on Vulkan
 /// must pass `WeightResidency::DualResidentCpuAndVulkan` so the host
-/// RAM pressure from both the candle CPU mirror and the device-side
+/// RAM pressure from both the kt CPU mirror and the device-side
 /// `VulkanBuffer` caches is reflected. After Phase 1 lands and the
-/// candle storage is stubbed, callers switch to `SingleCopy`.
+/// kt CPU storage is stubbed, callers switch to `SingleCopy`.
 ///
 /// `weights_already_resident` should be `true` when the available
 /// budget already accounts for the loaded model (e.g. `MemAvailable`
-/// at submission time, with the model already in candle/Vulkan
+/// at submission time, with the model already in kt/Vulkan
 /// caches). In that case the base-weight contribution is excluded
 /// from the working-set estimate to avoid double-counting them
 /// against a budget that's already deducted them. For static budgets
@@ -1012,7 +1012,7 @@ pub fn estimate_vk_native_recompute_working_set_with_residency(
 /// at submission time so the preflight reflects what's actually free
 /// — the static VRAM number is the absolute ceiling but inference
 /// has typically already eaten KV cache + Vulkan weight caches +
-/// candle CPU storage from that pool by the time training is
+/// kt CPU storage from that pool by the time training is
 /// submitted.
 ///
 /// Discrete GPUs keep the static behavior: reserve a fraction of the budget
