@@ -6141,3 +6141,37 @@ headline: 62/62 sites adjudicated, 21 redundant allows deleted, 41 kept and all 
 
 **Signature:** kiln cleanup agent (sub-agent), round 104b —
 headline: 60/60 sites adjudicated (26 redundant allows deleted, 34 kept and all newly justified), net +58 comment lines, 1 in-scope miss self-corrected, both budget ceilings synced, all gates identical to baseline; 124/124 campaign sites now closed.
+
+## Cleanup Agent (round 105 — two more dead items in the docs smoke script; round-101 correction)
+
+**Date:** 2026-08-27
+
+**Round-101 correction:** the round-101 entry recorded
+"`expectedCliCodeExamples` … declared AND referenced (2 occurrences)".
+That count was **wrong** — `git show adae8e541:scripts/check_docs_site_smoke.mjs`
+(the pre-round-101 revision) shows exactly **one** occurrence of
+`expectedCliCodeExamples` (the declaration), i.e. it was dead all along
+and round 101 missed it. (Same for the `assertOpenAIClientSetupNearChatCreate`
+function, also 1 occurrence pre-round-101.) Lesson: re-verify dead-code
+claims with `git show <pre-state> | grep` before relying on them.
+
+**Work (1 file, net −40 lines):**
+`scripts/check_docs_site_smoke.mjs` (4924 → 4884) — deleted:
+- `expectedCliCodeExamples` (22 lines) — declaration-only const array
+- `assertOpenAIClientSetupNearChatCreate` (17 lines + blank) —
+  declaration-only function
+Each verified dead by: full-file occurrence count = 1 (stricter
+`grep -o | wc -l` sweep of ALL top-level consts/functions in
+`scripts/*.mjs` — these two are the only ones left), zero quoted
+string references, no `export`, zero cross-file references in
+scripts/ and .github/.
+
+**Verification (orchestrator, own runs):**
+- `node --check` — syntax OK.
+- `node scripts/check_docs_site_smoke.mjs` — exit 1 identically before
+  and after (chromium-environment stop; all static assertions pass in
+  both runs, per the round-101 correction's flow analysis).
+- `git status` clean (committed).
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 105 —
+headline net **−40** lines.

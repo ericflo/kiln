@@ -1185,29 +1185,6 @@ const expectedApiReaderCodeExamples = [
   { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
 ];
 
-const expectedCliCodeExamples = [
-  { label: 'serve command', terms: ['kiln_model_path=./Qwen3.5-4B', 'kiln serve'] },
-  { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
-  { label: 'OpenEnv commands', terms: ['kiln openenv inspect', 'kiln openenv tasks', 'kiln openenv train', '--environment http://127.0.0.1:8990'] },
-  { label: 'OpenEnv persisted run commands', terms: ['kiln openenv start --request openenv-run.json', '--idempotency-key experiment:arcade:17 --follow', 'kiln openenv artifact', 'environment_eval_receipt --output receipt.json'] },
-  { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
-  { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot', '--checkpoint-interval 25'] },
-  { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot', '--checkpoint-interval 25', '--resume-checkpoint'] },
-  { label: 'OPD training command', terms: ['kiln train opd', '--file opd-request.json', '--adapter distilled-bot', '--teacher qwen35@vllm', '--checkpoint-interval 25', '--resume-checkpoint'] },
-  { label: 'HF/TRL export and import commands', terms: ['kiln train hf export-sft', '--file /data/corrections.jsonl', '--dataset corrections:active', '--name support-hf-01', 'kiln train hf import-peft', '--bundle ./support-hf-01.kiln-hf', '--name support-v2', 'kiln train hf list --json', 'kiln train hf delete', '--name retained-export', '--export-sha256'] },
-  { label: 'training status command', terms: ['kiln train status'] },
-  { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
-  { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
-  { label: 'CUDA graph policy config', terms: ['[memory]', 'cuda_graphs = true', 'cuda_graph_cache_entries = 8'] },
-  { label: 'CUDA graph policy verification', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml', "jq '.cuda_graphs'", "jq '.decode_runtime.cuda_graphs'"] },
-  { label: 'batching policy config', terms: ['[batching]', 'rowwise_decode = false', 'prefix_aware_admission = true', 'prefill_admission_quantum = "auto"', 'actor_cycle_idle_ms = 0'] },
-  { label: 'batching policy verification', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml', "jq '.batching'"] },
-  { label: 'streaming-prefill policy config', terms: ['[streaming_prefill]', 'mode = "auto"', 'threshold_tokens = "auto"', 'tile_tokens = "auto"', 'tape_tile_tokens = "auto"', 'detached_full_attn_tile_tokens = "auto"', 'last_token_lm_head = true'] },
-  { label: 'streaming-prefill policy verification', terms: ["jq '.streaming_prefill'", "jq '.prefill_runtime.streaming_prefill'"] },
-  { label: 'typed benchmark commands', terms: ['kiln-bench --model-path', '--config kiln.toml', '--paged --latency-only', 'vulkan_decode_microbench --only', 'full_step_resident,full_token_resident_paged', '--warmup-iters 10', '--timed-iters 30', '--repeats 5'] },
-  { label: 'verbosity commands', terms: ['kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
-];
-
 const expectedCliReaderSections = [
   { label: 'command chooser', terms: ['choose a task'] },
   { label: 'binary availability', terms: ['know which commands the release archive includes'] },
@@ -2657,23 +2634,6 @@ function assertRequestsImportNearPost(section, context) {
     const nearbyPrefix = section.slice(Math.max(0, requestPost.index - 800), requestPost.index);
     if (!nearbyPrefix.includes('import requests')) {
       fail(`${context}: requests.post must have import requests nearby before use`);
-    }
-  }
-}
-
-function assertOpenAIClientSetupNearChatCreate(section, context) {
-  const chatCreates = Array.from(section.matchAll(/client\.chat\.completions\.create/g));
-  if (chatCreates.length === 0) {
-    fail(`${context}: missing client.chat.completions.create generate call`);
-  }
-
-  for (const chatCreate of chatCreates) {
-    const nearbyPrefix = section.slice(Math.max(0, chatCreate.index - 800), chatCreate.index);
-    if (!nearbyPrefix.includes('import openai')) {
-      fail(`${context}: client.chat.completions.create must have import openai nearby before use`);
-    }
-    if (!nearbyPrefix.includes('openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")')) {
-      fail(`${context}: client.chat.completions.create must set OpenAI base_url and api_key nearby before use`);
     }
   }
 }
