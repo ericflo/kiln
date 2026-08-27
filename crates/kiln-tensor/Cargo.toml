@@ -99,8 +99,7 @@ default = []
 # last candle dependency in kiln-tensor's CUDA path; with `CudaStorage`/
 # `CudaAllocator` holding `Arc<CudaContext>` (not `Arc<CudaDevice>`) and
 # the test helper moved to `primary_cuda_context`, nothing under
-# `--features cuda` touches candle. (candle-core stays an optional dep
-# below for the `metal` feature only, until CP-2 closes that path.)
+# `--features cuda` touches candle.
 cuda = ["dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 #

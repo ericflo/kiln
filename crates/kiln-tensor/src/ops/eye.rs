@@ -50,7 +50,7 @@ pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
 /// kernel, and the cost is dominated by the H→D transfer anyway).
 /// **Candle-free as of #1082** — caller no longer passes an
 /// `Arc<CudaDevice>`; the cudarc `CudaContext` is derived internally
-/// via `primary_cuda_device` inside `host_to_cuda_copy_ctx`.
+/// via `primary_cuda_context` inside `host_to_cuda_copy_ctx`.
 #[cfg(feature = "cuda")]
 pub fn eye_on_device(n: usize, dtype: DType, device: crate::Device) -> Result<Tensor> {
     let host = eye(n, dtype)?;
