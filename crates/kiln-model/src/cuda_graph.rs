@@ -205,7 +205,6 @@ struct CudaGraphOwnerTimeline {
 /// this file for the surrounding plan.
 #[cfg(feature = "cuda")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-#[allow(dead_code)]
 struct CudaBatchedGraphKey {
     /// Number of rows the captured graph was specialized for.
     batch_size: usize,
@@ -216,7 +215,6 @@ struct CudaBatchedGraphKey {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 impl CudaBatchedGraphKey {
     /// Build a batched key from the same primitives used by
     /// [`CudaGraphKey::new`], applied to the largest seq_len in the
@@ -472,6 +470,8 @@ struct CapturedBatchedDecodeGraph {
 /// Manages CUDA graph lifecycle for decode forward passes.
 pub struct CudaGraphRunner {
     /// Immutable startup policy supplied by the owning product.
+    // Read by the cuda-lane `decode_step_paged` cache-bound check; never
+    // read in the default build, so the allow is required.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     policy: CudaGraphExecutionPolicy,
     /// Whether CUDA graphs are enabled.
@@ -485,7 +485,6 @@ pub struct CudaGraphRunner {
     /// Captured batched graphs keyed on `(batch_size, max_seqlen_k, …)`.
     /// Empty today; populated by the planned multi-batch capture path.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     captured_batched: HashMap<CudaBatchedGraphKey, CapturedBatchedDecodeGraph>,
     /// Per-batch-size warmup tracker. Each new bucket needs one eager
     /// call to prime the allocator before its first capture attempt;
@@ -493,7 +492,6 @@ pub struct CudaGraphRunner {
     /// an earlier bs=1 capture caused new batched buckets to capture
     /// against a cold allocator and hit `CUDA_ERROR_ILLEGAL_ADDRESS`.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     batched_bucket_warmup_done: std::collections::HashSet<usize>,
     /// Persistent batched [`LinearAttentionState`] pool, one slot per
     /// `batch_size` bucket. The captured-batched forward reads the GDN
@@ -504,7 +502,6 @@ pub struct CudaGraphRunner {
     /// conv-state equivalent landed alongside the forward wrapper)
     /// before each replay.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     batched_state_pool: HashMap<usize, crate::forward::LinearAttentionState>,
     /// Adapter generation counter; incremented on LoRA swap.
     adapter_generation: u64,
@@ -593,7 +590,6 @@ impl CudaGraphRunner {
     /// Returns `None` when the runner is disabled or the device is not
     /// CUDA — the batched graph path is CUDA-only.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     pub(crate) fn persistent_batched_state(
         &mut self,
         batch_size: usize,
@@ -1531,7 +1527,6 @@ impl CudaGraphRunner {
     /// captured graph picks up the new per-row input tokens on the next
     /// replay.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn update_batched_token_buffer(token_buffer: &Tensor, token_ids: &[u32]) -> Result<()> {
         anyhow::ensure!(
             !token_ids.is_empty(),
@@ -1544,7 +1539,6 @@ impl CudaGraphRunner {
     /// Rewrite the contents of the batched position buffer in place
     /// from per-row `start_positions`.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn update_batched_position_buffer(
         position_buffer: &Tensor,
         start_positions: &[usize],
@@ -1562,7 +1556,6 @@ impl CudaGraphRunner {
     /// in place. Same contract as the bs=1
     /// `update_paged_metadata_buffers` but every buffer is `[batch, …]`.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn update_batched_paged_metadata_buffers(
         block_table_buffer: &Tensor,
         seqused_k_buffer: &Tensor,
@@ -1618,7 +1611,6 @@ impl CudaGraphRunner {
     /// of per-row decode positions. Each row computes its own table,
     /// then the rows are stacked into the `[batch, half]` buffer.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn update_batched_rotary_buffers(
         rotary_cos_buffer: &Tensor,
         rotary_sin_buffer: &Tensor,
@@ -2492,7 +2484,6 @@ impl CudaGraphRunner {
     /// runner refreshes the contents in place via `cuda_write_host_in_place`
     /// before each replay.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_token_buffer(device: Device, token_ids: &[u32]) -> Result<Tensor> {
         anyhow::ensure!(
             !token_ids.is_empty(),
@@ -2507,7 +2498,6 @@ impl CudaGraphRunner {
     /// capture — the captured kernels see the same device pointer and
     /// read whatever the runner writes before each replay.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_position_buffer(device: Device, start_positions: &[usize]) -> Result<Tensor> {
         anyhow::ensure!(
             !start_positions.is_empty(),
@@ -2594,7 +2584,6 @@ impl CudaGraphRunner {
     /// helper and stacks the rows. Used by the batched capture path so
     /// flash-attention reads page metadata from a graph-stable pointer.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_block_table_buffer(
         block_tables: &[&BlockTable],
         paged_cache: &PagedKvCacheKt,
@@ -2628,7 +2617,6 @@ impl CudaGraphRunner {
     /// Allocate a `[batch]` per-row seqused_k buffer pre-filled from
     /// each row's `start_pos + 1`. #1082: U32 (kt flash-attn contract).
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_seqused_k_buffer(device: Device, start_positions: &[usize]) -> Result<Tensor> {
         anyhow::ensure!(
             !start_positions.is_empty(),
@@ -2646,7 +2634,6 @@ impl CudaGraphRunner {
     /// Allocate a `[batch] u32` per-row KV-write-slot buffer for the
     /// current decode step.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_kv_slot_buffer(
         block_tables: &[&BlockTable],
         paged_cache: &PagedKvCacheKt,
@@ -2805,7 +2792,6 @@ impl CudaGraphRunner {
     /// each replay so the captured RoPE kernels see updated angles
     /// while reading from a graph-stable pointer.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_rotary_cos_buffer(
         config: &ModelConfig,
         device: Device,
@@ -2821,7 +2807,6 @@ impl CudaGraphRunner {
     /// `position 0`. See `new_batched_rotary_cos_buffer` for the
     /// replay-time refresh semantics.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_rotary_sin_buffer(
         config: &ModelConfig,
         device: Device,
@@ -2861,7 +2846,6 @@ impl CudaGraphRunner {
     /// shaped for `[batch, 1, n_heads, head_dim]` and `[batch, n_heads, 1]`.
     /// One element per full-attention layer in the model.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_paged_decode_outputs(
         config: &ModelConfig,
         device: Device,
@@ -2896,7 +2880,6 @@ impl CudaGraphRunner {
     /// `[batch, 1, linear_num_value_heads, linear_value_head_dim]`.
     /// One element per linear-attention (GDN) layer in the model.
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_gdn_decode_outputs(
         config: &ModelConfig,
         device: Device,
