@@ -3968,3 +3968,240 @@ opd.rs shape and missed the second same-shaped function in
 forward_backward.rs. Queued-candidate lists are a STARTING point, not
 an inventory — the executor must `grep -rn` the exact token repo-wide
 before declaring the class complete (this round did: 0 remaining).
+
+
+## Cleanup Agent (round 89)
+
+**Date:** 2026-08-27
+
+**Scope (steered, two-part):** PRIMARY — the stale-comment sweep in
+`kiln-kt-bridge` (37 case-insensitive "candle" refs in `src/` + 4 in
+`tests/` + 2 in `Cargo.toml` = 43): classify every ref (live / stale /
+history) and fix only present-tense claims refuted by the current code.
+SECONDARY — triage `kiln-tensor` (734 refs in `src/` + 25 in
+`Cargo.toml`) into a per-file table; fix only if a clearly-refuted set
+(≤15 refs) emerges. Comment-only, behavior/API-preserving, per-file
+commit discipline.
+
+**Preconditions verified before classifying:**
+- Working tree clean at start (local HEAD `87f196f13`, round 78).
+- No candle packages in `Cargo.lock`; kiln-tensor and kiln-kt-bridge
+  manifests are candle-free ("fully candle-free under every feature",
+  kiln-tensor/Cargo.toml L48-49; kiln-kt-bridge/Cargo.toml L11).
+- Dangling-symbol audit (repo-wide, all file types): `pub fn
+  primary_cuda_device` — **absent**; `pub fn cuda_zeros(` (non-ctx) —
+  **absent**; `to_candle` / `candle_input_device_ptr` — **absent as
+  live fns** (kt-bridge shims deleted, per its own manifest);
+  candle-keyed `register_input_mapping` and `candle_output_kt` paths —
+  **absent**. Every remaining textual mention is a comment.
+- kt `TensorId` is `AtomicU64::new(1)` (kiln-tensor-id) — confirms the
+  `tape_bridge.rs` id-collision narrative as true history.
+- 11 downstream crates consume kiln-kt-bridge; zero consumers of the
+  (removed) `candle` feature.
+
+**PRIMARY result: 43 refs adjudicated; 4 refs in 3 hunks fixed; 39 refs
+KEPT. Two commits.**
+
+*Fixed set (all present-tense claims refuted by the current tree):*
+
+| File:line (pre-edit) | Stale claim | Refutation (evidence) | New text |
+|---|---|---|---|
+| `src/lib.rs` :144-145 | "cuda_zeros_ctx (#1082) derives the candle device internally from device_index, so we don't read .candle_device() off source" | `cuda_zeros_ctx` (kiln-tensor/cuda_storage.rs:582-596) derives a **cudarc `CudaContext`** via `primary_cuda_context` — its own comment: "exactly what `candle_core::Device::new_cuda` used to do"; no live `fn candle_device` exists anywhere in crates/ | "derives the cudarc CudaContext internally from device_index (primary_cuda_context), so we only read the device index off source" |
+| `src/lib.rs` :186-187 | "every op uses the candle device's default stream" | no candle device exists in the tree; the stream resolves via `active_cuda_stream` → `ctx.default_stream()` (active_stream.rs:98) and `CudaStorage::device_ptr_raw` (cuda_storage.rs:363-382) | "every op uses the device's default stream" |
+| `src/tape_bridge.rs` :344 | "Same grad-map build as the candle variant" | `build_deposit_grad_map` (tape_bridge.rs:52) is the **only** grad-map builder tree-wide and is kt-native; the candle GradStore bridge was deleted in the #1082 drop (lib.rs L38-44; manifest candle-free) | "Same grad-map build as the (removed) candle variant" |
+
+*KEPT set (39 refs) — adjudication by file:*
+
+| File | Refs | Verdict | Evidence |
+|---|---|---|---|
+| `src/lib.rs` L4 | 1 | KEEP (live design surface) | "surface alongside its candle-typed twin (per #1082 line 322's pattern)" — accurate: marlin-gemm / flce-kernel still carry candle-typed twins; the bridge exists to serve that mixed phase |
+| `src/lib.rs` L38-44 | 5 | KEEP (labeled history) | "candle fully removed … were all dead … and have been deleted" — verified: no candle dep in manifest, no candle types in code |
+| `src/lib.rs` L136 | 1 | KEEP (parity) | "output tensors that mirror the candle path's [shape]" — accurate design statement |
+| `src/lib.rs` L202 | 1 | KEEP (labeled) | "after the candle->kt [flip]" — migration-context annotation |
+| `src/lib.rs` L521-524 | 4 | KEEP (labeled history) | "candle dtype/device-mapper tests … were deleted alongside the candle bridge fns … The crate is candle-free now" — verified |
+| `src/tape_bridge.rs` L3-6 | 2 | KEEP | "After the candle drop (#1082), training is fully kt-native … no candle GradStore round-trip anymore" — verified against kiln-train (kt-native fwd/bwd per rounds 87-88) |
+| `src/tape_bridge.rs` L199-221 | 7 | KEEP (labeled history, true) | candle-keyed `register_input_mapping` "(now-removed)"; collision story verified: candle `TensorId` = `AtomicUsize::new(1)` vs kt `AtomicU64::new(1)` — same starting value, coherent history |
+| `src/tape_bridge.rs` L266 | 1 | KEEP (design rationale) | namespacing tag defends against the historical id-space collision — mechanism live, described accurately |
+| `src/tape_bridge.rs` L331-332 | 2 | KEEP (accurate negative) | "no candle round-trip, no `candle_output_kt` resolution" — verified absent |
+| `src/tape_bridge.rs` L376-377 | 2 | KEEP (labeled history) | "kt-tape replacement for the legacy candle gradient-checkpointing reverse, which was grad-severed by the flip" |
+| `src/tape_bridge.rs` L477-500 (test mod) | 9 | KEEP (test-fixture narrative) | `decode_kt_param_deposit` rejects untagged ids — asserted live by `kt_param_deposit_tag_roundtrips_and_rejects_candle_ids`; the "candle id" labels name the historical collision class |
+| `tests/host_to_cuda_copy.rs` L5-13 | 4 | KEEP (accurate negatives) | "fully candle-free — its signature is (src, device_index)" — verified; "no candle imports" — verified |
+| `Cargo.toml` L11, L20 | 2 | KEEP (accurate + labeled) | "candle fully removed … kt-native bridge only"; "the metal lane is candle-free (#1082)" — verified |
+
+**SECONDARY result: kiln-tensor triaged (72 files, 734 src/ refs + 25
+Cargo.toml). Strict line-level adjudication (ref = one comment line
+containing a "candle" token inside a refuted present-tense claim) finds
+the clearly-refuted set is **107 refs across 26 files** — far above the
+15-ref fix cap — so NO kiln-tensor edits were made this round (per the
+steering's contingency). The table below is the deliverable; the 107-ref
+inventory is the round-90 fix queue.**
+
+*Per-file classification (refs / verdict / one-line evidence):*
+
+| File | Refs | Verdict | Evidence (one line) |
+|---|---|---|---|
+| `src/method_api.rs` | 149 | KEEP — live design surface | candle-API-compatible façade; every ref is a parity spec ("signatures are matched against candle-core's upstream tensor.rs") |
+| `src/metal_storage.rs` | 133 | **23 STALE** + history | L5/L11/L14/L54/L60-62/L65/L97 header+import claims ops "call directly into `candle_metal_kernels::call_*`", the companion is "built entirely from `candle_metal_kernels` primitives", "the only remaining `candle-core` dependency … lives in `metal_types.rs` (~48 callsites in kiln-model)" — refuted: ops call kiln-owned `crate::metal_kernels::*` (L946/1499/1648/1799), imports resolve via `crate::metal_rt` (L73-74), manifest candle-free; L270/L282/L308/L432-437/L487/L521/L556/L558/L587/L2477/L2614 repeat the same `candle_metal_kernels::…` substrate claims in companion/`Device::all()`/`Buffer` docs |
+| `src/cuda_storage.rs` | 77 | **16 STALE** + history | L4 header "Wraps … `Arc<candle_core::cuda_backend::CudaDevice>`" (field is `Arc<CudaContext>`); L46/L50-51/L60-61 SliceOwner::Borrowed "candle CudaStorage … Phase 7 candle→kt adapter … `candle::Storage`" narrative (live Borrowed caller is the kt-native capture arena, capture_alloc.rs:272); L108 dangling `primary_cuda_device`; L128-130 deleted free fn `cuda_zeros` "still accepts a candle device"; L259-260/L312 "Arc-wrapped candle `Storage::Cuda` … canonical caller"; L454-455 "`kiln-kt-bridge::to_candle` needs a candle `CudaDevice`" (shim deleted); L5376 "Pull candle_device" (code pulls `ctx`) |
+| `src/cuda_allocator.rs` | 45 | **9 STALE** + history | L3 "Wraps an `Arc<candle_core::cuda_backend::CudaDevice>`" (field is `Arc<CudaContext>`); L14 "CI compile path (which links `cuda` against `candle-core`)" (manifest candle-free); L51/L53 + L158/L161 + L253 direct callers to absent `primary_cuda_device` / `CudaStorage.candle_device()`; L56 "produced `CudaStorage` still carries a candle device"; L70 "immediately forwards to `CudaStorage::zeros(candle_device, …)`" (live entry is `zeros_ctx`) |
+| `src/metal_allocator.rs` | 33 | **9 STALE** + history | L10 "CI compile path (which links `metal` against `candle-core`)" (manifest candle-free); L32-36 "substrate ops … still derive a candle `MetalDevice` per call … `candle_metal_kernels::call_*` FFI … the follow-up substrate lift moves … onto `MetalStorage`" (lift HAS landed: `MetalStorage::companion`); L60/L62/L89/L152/L155 direct callers to `primary_metal_companion` / `.candle_device()` for a "candle wrapper" that no longer exists in the tree |
+| `src/metal_kernels.rs` | 31 | **2 STALE** + history | L9-10 "These still reach the GPU through the `MetalCompanion`'s candle-derived `Device` / command pool — that substrate is the *last* candle dependency" (refuted: `MetalCompanion` holds `crate::metal_rt` primitives; kiln-tensor has zero candle deps); rest is "replaces `candle_metal_kernels::call_X`" provenance + faithful-port parity |
+| `src/tensor.rs` | 25 | KEEP | anti-pattern-1 negatives + "candle-free constructor" + labeled flip notes; 0 refuted |
+| `src/operators.rs` | 18 | KEEP — live design surface | candle-API operator-overload façade; "Faithful mirror of candle's `bin_trait!`" |
+| `src/metal_rt/mod.rs` | 12 | KEEP | "vendored from candle-metal-kernels 0.10.2 … candle-free replacement" |
+| `src/cuda_matmul.rs` | 11 | KEEP | "No primary_cuda_device materialization needed" is an accurate negative; rest #1082 history |
+| `src/shape.rs` | 10 | KEEP — live design surface | "candle-compatible shape-argument façade … mirrors candle_core::Shape" |
+| `src/metal_types.rs` | 10 | KEEP | "Candle drop (#1082 final step) … repoint … to crate::metal_rt … no longer depends on candle_metal_kernels" |
+| `src/error.rs` | 10 | KEEP | "migration target for candle_core::Error (106 sites) … mirrors candle's" |
+| `src/device.rs` | 10 | KEEP | "Replaces candle_core::Device at 91 call sites"; parity notes; L32-33 phase-anchored (borderline, kept) |
+| `src/probe.rs` | 7 | KEEP | "candle-free as of #1082; Equivalent to candle_core::utils::cuda_is_available()" |
+| `src/fp8.rs` | 7 | **2 STALE** + keep | L3 "(the candle-typed reference)" — the cited kiln-model/src/fp8.rs is now candle-free ("no candle_core end-to-end"); L174-175 "The reference impl in kiln-model does the same thing (just through candle)" — refuted |
+| `src/vulkan_storage.rs` | 6 | KEEP | "transitive candle dependency — kiln-vulkan-kernel is already candle-free"; "No candle types appear in the type signature" |
+| `src/metal_matmul.rs` | 6 | KEEP | "bench_mlx_reference removed (#1082 final step): it was the only remaining consumer of candle's call_mlx_gemm" |
+| `src/ops/rmsnorm.rs` | 7 | **5 STALE** + keep | L199-205: "`crate::metal_rmsnorm_last_axis` which wraps candle's `candle_nn::ops::rms_norm` (… shares the MTLBuffer between kt and candle storages) … Phase 7 follow-up replaces the candle inner call with a direct `candle_metal_kernels::call_rms_norm` or a vendored MSL kernel" — the "future" follow-up HAS landed (`metal_storage.rs:1401`: "Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_rms_norm`") |
+| `src/ops/gumbel_sample.rs` | 7 | KEEP | "candle-free replacement for candle_nn::sampling::gumbel_softmax" + parity |
+| `src/ops/activation.rs` | 7 | **3 STALE** + keep | L200/L202/L204 "metal_activation_unary which wraps candle's production Metal `unary_*` kernels (the same path `candle::Tensor::{silu,gelu,tanh,relu}()` take) … shared with the candle wrapper via Arc<metal::Buffer>" — refuted (kiln-owned MSL); L207 sigmoid fall-through note kept (behavior accurate, candle-coverage fact true) |
+| `src/ops/trig.rs` | 6 | **3 STALE** + keep | L132/L134/L136 "wraps candle's … the same path `candle::Tensor::{sin, cos}()` take … shared with the candle wrapper" — refuted; L56-57/L138 candle-`UnaryOp`-coverage facts kept (accurate external) |
+| `src/ops/sign_and_round.rs` | 6 | **3 STALE** + keep | L140/L142/L144 "wraps candle's … `candle::Tensor::{recip,sign,floor,ceil,round}()` take … shared with the candle wrapper" — refuted; L69-70/L146 `UnaryOp`-coverage facts kept |
+| `src/ops/layernorm.rs` | 6 | **5 STALE** + keep | L150-156 same shape as rmsnorm: "wraps candle's `candle_nn::ops::layer_norm` (… kt and candle storages) … Phase 7 follow-up replaces the candle inner call with a direct `candle_metal_kernels::call_layer_norm`" — the follow-up has landed (`metal_storage.rs:1534`) |
+| `src/ops/index_select.rs` | 5 | **3 STALE** + keep | L231/L233/L235 "metal_index_select_dim0 which wraps candle's production Metal `call_index_select` kernel (the same path `candle::Tensor::index_select(ids, 0)` takes) … shared with the candle wrapper" — refuted; L226 dtype-coverage note kept (accurate external) |
+| `src/ops/embedding.rs` | 5 | **2 STALE** + keep | L129/L133 "metal_index_select_dim0 which wraps candle's … shared with the candle wrapper via Arc<metal::Buffer>" — refuted; L123 coverage note kept |
+| `tests/metal_ops_parity.rs` | 8 | KEEP (+1 borderline) | "these are **candle-free**" suite; L12 contrast with the cuda parity suite is stale-flavored but suite-purpose text — kept |
+| `src/storage.rs` | 4 | KEEP | "Replaces the candle storage layer … over 600 of the 1,799 candle call sites the Phase 0.1 audit captured" |
+| `src/metal_rt/commands.rs` | 4 | KEEP | "Vendored from candle-metal-kernels 0.10.2 src/metal/commands.rs" + divergence rationale |
+| `src/dtype.rs` | 4 | KEEP | "no candle-style superset"; L49/L55 accurate external facts (marlin-gemm is still candle-based); L178 past-tense |
+| `src/device_op.rs` | 3 | KEEP | "Replaces candle's CustomOp1/CustomOp2/CustomOp3 traits" |
+| `tests/metal_gemm_sweep.rs` | 3 | KEEP | "live candle call_mlx_gemm reference comparison was removed (#1082 final step)"; "the exact config candle's MLX selects for BF16/nn on M1" (accurate external fact) |
+| `src/safetensors.rs` | 3 | KEEP | "Replaces candle_core::safetensors::load at the 14 call sites" |
+| `src/ops/unary_arith.rs` | 3 | **3 STALE** | L139/L141/L143 "metal_activation_unary which wraps candle's … the same path `candle::Tensor::{neg,abs,sqrt,exp,log}()` take … shared with the candle wrapper" — refuted (kiln-owned MSL) |
+| `src/element.rs` | 3 | KEEP | "the candle-free replacement for candle's Tensor::to_vec1"; "surfaced during the candle->kt GpuWeights flip" |
+| `src/active_stream.rs` | 3 | **1 STALE** + keep | L5-8 "Production decode opens the CUDA device through candle's new_cuda_with_stream" — present-tense, refuted (production path is kt-native; later lines say candle "used to" thread streams) |
+| `src/ops/triangular.rs` | 2 | **2 STALE** | L81-82 "host_to_cuda_copy_ctx (#1082) derives the candle device from device_index, so no .candle_device() read is needed" — refuted (derives a cudarc context; the identical claim was refuted-and-fixed in kt-bridge lib.rs this round) |
+| `src/ops/softmax.rs` | 2 | KEEP | "Replaces candle's candle_nn::ops::softmax_last_dim"; "Matches candle's behaviour on attention masks" |
+| `src/ops/scatter_add.rs` | 2 | **2 STALE** | L179-180 "cuda_zeros_ctx (#1082): the helper derives the candle device internally from device_index" — refuted (same cudarc-context fact) |
+| `src/ops/roll.rs` | 2 | **2 STALE** | L54-55 same "derives the candle device" claim — refuted |
+| `src/ops/repeat.rs` | 2 | **2 STALE** | L148-149 same "derives the candle device" claim — refuted |
+| `src/ops/repeat_interleave.rs` | 2 | **2 STALE** | L52-53 same "derives the candle device" claim — refuted |
+| `src/ops/like.rs` | 2 | **2 STALE** | L54/L56 "derives the candle device [internally — no need to] … forward .candle_device().clone()" — refuted |
+| `src/ops/elementwise.rs` | 2 | **1 STALE** + keep | L188 "metal_elementwise_binary which wraps candle's …" — refuted; L3 "Replaces candle's Tensor::{add,sub,mul,div}" kept |
+| `src/ops/cast.rs` | 2 | **1 STALE** + keep | L182 "metal_cast which wraps candle's production Metal [cast]" — refuted; L3 kept |
+| `src/ops/broadcast.rs` | 2 | **2 STALE** | L207/L209 "derives the candle device [internally — no need to] downcast x's storage to read .candle_device()" — refuted |
+| `src/ops/argmax.rs` | 2 | KEEP | "Replaces candle's … candle_core::Tensor::argmax" parity |
+| `src/metal_rt/buffer.rs` | 2 | KEEP | "Vendored from candle-metal-kernels 0.10.2 src/metal/buffer.rs" |
+| `src/layout.rs` | 2 | KEEP | "Replaces candle's Layout at the shape/stride/start-offset level" |
+| `src/ops/eye.rs` | 2 | **1 STALE** + keep | L11 documents a signature with a `candle_device` param (live `eye_on_device(n, dtype, device)` has none); L51 "Candle-free as of #1082 — caller no longer passes an [candle device]" kept (accurate) |
+| `src/ops/flip.rs` | 1 | **1 STALE** + keep | L143 "derives the candle device …" — refuted |
+| `tests/rocm_argmax_last_axis_parity.rs` | 1 | KEEP | "matching … and candle's argmax" parity |
+| `src/vulkan_allocator.rs` | 1 | KEEP | "No candle dependency — kiln-vulkan-kernel is candle-free" |
+| `src/stream_planner.rs` | 1 | KEEP | quoted issue design principle ("CUDA inherits candle's cuBLAS handle + default stream") |
+| `src/rocm_storage.rs` | 1 | KEEP | "The candle-free ROCm analog of cuda_storage" |
+| `src/rocm_ops/argmax_last_axis.rs` | 1 | KEEP | "as candle_core::Tensor::argmax and kt's CPU argmax_last_dim" parity |
+| `src/ops/silu_mul.rs` | 1 | KEEP | "Replaces candle's silu(gate)?.mul(&up)? pattern" |
+| `src/ops/rope_split_half.rs` | 1 | KEEP | "fills that gap for the #1082 candle->kt [flip]" |
+| `src/ops/rope.rs` | 1 | KEEP | "Replaces candle's candle_nn::rotary_emb::rope" |
+| `src/ops/range_ctors.rs` | 1 | KEEP | "#1082 flip: U32 ramps (candle arange(0u32, n, dev) mask builders)" |
+| `src/ops/matmul.rs` | 1 | KEEP | "Dispatch MatmulOp. Mirrors candle's Tensor::matmul" |
+| `src/ops/mask.rs` | 1 | KEEP | "Replaces candle's Tensor::where_cond + Tensor::tril" |
+| `src/ops/l2norm.rs` | 1 | KEEP | "Replaces candle's Tensor::l2_normalize(-1)" |
+| `src/ops/dropout.rs` | 1 | KEEP | "modern framework (PyTorch, JAX, candle) uses" — accurate external fact |
+| `src/ops/cross_entropy.rs` | 1 | KEEP | "candle_nn::loss::cross_entropy and kiln-flce-kernel's [parity]" |
+| `src/metal_rt/{library,encoder,device,compute_pipeline,command_buffer}.rs` | 1 each | KEEP | "Vendored from candle-metal-kernels 0.10.2 src/metal/<name>.rs" |
+| `src/lib.rs` | 1 | KEEP | version-pin rationale ("may break against minor version bumps until candle is [removed]") |
+| `Cargo.toml` | 25 | KEEP | all labeled removal history / accurate negatives ("fully candle-free under every feature") |
+
+**Round-90 fix queue (the 107-ref stale set, five patterns — all
+mechanical once the three authorities are accepted: kiln-tensor/
+Cargo.toml (no candle deps), `metal_types.rs` ("no longer depends on
+candle_metal_kernels"), `metal_rt/mod.rs` ("vendored … candle-free
+replacement")):**
+1. **Metal-substrate dispatch narrative (34 refs):** metal_storage.rs
+   (23), metal_allocator.rs (9), metal_kernels.rs (2). Fix shape:
+   "candle_metal_kernels::call_X / primitives / re-export" → "kiln-
+   owned `metal_kernels::Y` MSL kernel (vendored port of the same
+   algorithm)" / "`crate::metal_rt` primitives"; delete the "only
+   remaining candle-core dependency … lives in metal_types.rs" claim
+   and the "follow-up substrate lift" note (already landed as
+   `MetalStorage::companion`); drop the "links `metal` against
+   `candle-core`" CI-lane justification (manifest is candle-free).
+2. **Ops "wraps candle's" cluster (29 refs):** rmsnorm (5), layernorm
+   (5), activation (3), trig (3), sign_and_round (3), unary_arith (3),
+   index_select (3), embedding (2), elementwise (1), cast (1). Fix
+   shape: "wraps candle's `candle_nn::ops::X` / the same path
+   `candle::Tensor::X` takes … shared with the candle wrapper" → "
+   wraps the kiln-owned `metal_kernels` MSL kernel (same algorithm);
+   the buffer is shared within the kt substrate"; drop the "Phase 7
+   follow-up replaces the candle inner call" lines (already landed);
+   keep the `UnaryOp`-coverage and dtype-coverage notes (accurate
+   external facts).
+3. **`primary_cuda_device` / candle-device derivation dangling set
+   (41 refs):** cuda_storage.rs (16), cuda_allocator.rs (9), the ops
+   "derives the candle device from device_index" cluster (triangular
+   2, scatter_add 2, roll 2, repeat 2, repeat_interleave 2, like 2,
+   broadcast 2, flip 1 = 15), eye.rs (1, plus its dangling
+   `primary_cuda_device` intra-doc link). Fix shape: "derives the
+   candle device from device_index" → "derives the cudarc
+   `CudaContext` via `primary_cuda_context`" (identical fix already
+   landed in kt-bridge lib.rs this round); delete references to the
+   absent `primary_cuda_device` / free `cuda_zeros` /
+   `kiln-kt-bridge::to_candle`; fix the cuda_allocator.rs L3 field
+   type ("`Arc<candle_core::cuda_backend::CudaDevice>`" →
+   `Arc<CudaContext>`); rewrite the SliceOwner::Borrowed narrative
+   around the live kt-native capture-arena caller (capture_alloc.rs:272).
+4. **Stale consumer/label claims (3 refs):** fp8.rs L3 "(the candle-
+   typed reference)" label + L174 "does the same thing (just through
+   candle)" (the cited kiln-model fp8 reference is now candle-free);
+   active_stream.rs L5 "Production decode opens the CUDA device
+   through candle's" (production path is kt-native; the module's own
+   L13-16 already use past tense).
+
+Counts reconcile: 34 + 29 + 41 + 3 = 107 refs across 26 files (7
+non-ops + 19 ops files).
+
+**Verification (all green):**
+- `cargo fmt --check -p kiln-kt-bridge` — clean, after each group and
+  at the end.
+- `cargo check -p kiln-kt-bridge` (default features) — clean, after
+  both commits.
+- `cargo check -p kiln-kt-bridge --features vulkan` — clean (feature-
+  enabled compile lane; substitutes for the lanes below).
+- `cargo test -p kiln-kt-bridge` — **7 passed / 0 failed / 0 ignored**
+  (lib) + 0 integration tests (cuda-gated) + 1 doctest ignored
+  (pre-existing) — exact round-66 baseline.
+- `cargo clippy -p kiln-kt-bridge` — **0 own-code warnings** (the
+  kiln-tensor warnings visible in output are pre-existing and untouched).
+- `scripts/check_repository_artifacts.py` — pass (6697 tracked paths).
+- `scripts/check_production_file_budget.py` — pass (647 files;
+  kiln-kt-bridge not in the exact-ceiling set; net −1 line in lib.rs).
+- Environmental limits (not caused by these edits):
+  `--features cuda` fails in `cudarc-0.19.7/build.rs` (`nvcc` absent on
+  this host — pre-existing, external crate), `--features metal` fails
+  in `objc2` (macOS-only crate) — both identical before the edits;
+  the vulkan lane covers the feature-enabled compile check.
+
+**Landed as** two commits:
+`5868c23b1` — `refactor(kiln-kt-bridge): fix stale candle-era claims
+in lib.rs (round 89, primary file 1/2)` (3 refs: 2 in the
+`alloc_cuda_tensor` `cuda_zeros_ctx` derivation comment, 1 in the
+stream-guard doc) and `cc42dab4d` —
+`refactor(kiln-kt-bridge): mark the removed candle grad-map variant as
+removed in with_tape_authoritative_scope_kt (round 89, primary file
+2/2)` (1 ref).
+
+**Round-90 recommendation:** fix the queued 107-ref kiln-tensor stale
+set in one round — it collapses to four mechanical patterns with three
+authorities, so the work is a bounded search-and-verify, not fresh
+adjudication: (a) the `candle_metal_kernels` dispatch narrative
+(34) → `crate::metal_rt` / kiln-owned `metal_kernels` MSL wording,
+(b) the ops "wraps candle's" cluster (29) → "wraps the kiln-owned
+MSL kernel" wording, (c) the `primary_cuda_device` / candle-device-
+derivation dangling set (41) → `primary_cuda_context` / "cudarc
+CudaContext" wording (the kt-bridge fix this round is the template),
+(d) the consumer/label claims (3). Split by pattern group, one commit
+per group (metal_storage.rs alone carries 23 refs — its own commit),
+verify each group with fmt + check (vulkan lane; cuda/metal lanes are
+host-blocked as documented above), one `cargo test -p kiln-tensor`
+at the end, and re-run the two budget scripts. Keep the `metal_rt/*`
+"Vendored from candle-metal-kernels 0.10.2" provenance lines, the
+`method_api.rs` / `operators.rs` / `shape.rs` parity-surface refs, the
+`UnaryOp`/dtype-coverage facts, and all #1082-labeled migration history
+exactly as-is — those were adjudicated KEEP this round with evidence.
