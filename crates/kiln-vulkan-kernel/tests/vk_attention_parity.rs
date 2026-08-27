@@ -38,6 +38,8 @@ fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
 }
 
 /// CPU reference for SDPA causal prefill, GQA with `groups = heads_q/heads_kv`.
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_sdpa(
     q: &[f32],
     k: &[f32],

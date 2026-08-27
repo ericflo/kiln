@@ -37,6 +37,8 @@ fn fill(n: usize, seed: u32) -> Vec<f32> {
 
 /// CPU online-softmax reference matching the kernel's contract:
 /// token-major `[B, T, H, dh]`, causal, all heads present (no GQA here).
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_sdpa(
     q: &[f32],
     k: &[f32],

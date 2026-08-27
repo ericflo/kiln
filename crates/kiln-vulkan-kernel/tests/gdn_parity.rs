@@ -271,6 +271,8 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
 /// `dispatch_gdn_recurrent_step_with_options_bytes`. Keeps the candle-typed
 /// parity tests readable without re-exposing candle types in the kernel
 /// crate's public API.
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_recurrent_step_with_options_tensor(
     vk: &VulkanDevice,
     q: &Tensor,
@@ -2381,56 +2383,6 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     assert_close("full chunk out", &got_out, &expected_out, 2e-2)?;
     assert_close("full chunk state", &got_state, &expected_state, 3e-2)?;
     Ok(())
-}
-
-/// CPU reference for SDPA forward at the [B, T, H, dh] layout that
-/// `dispatch_sdpa_prefill_f32` consumes.  Used by the parity tests.
-///
-/// Performs the standard `softmax((Q @ K^T) / sqrt(dh)) @ V` against
-/// candle CPU broadcast_matmul + softmax. Returns a tensor with shape
-/// `[B, T, H, dh]` (token-major), F32.
-fn cpu_sdpa_reference(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    let (b, t, h, _dh) = q.dims4()?;
-    // Token-major → head-major: [B, T, H, dh] → [B, H, T, dh]
-    let q_h = q.transpose(1, 2)?.contiguous()?;
-    let k_h = k.transpose(1, 2)?.contiguous()?;
-    let v_h = v.transpose(1, 2)?.contiguous()?;
-    // Scores: [B, H, T, T]
-    let scores = q_h.broadcast_matmul(&k_h.transpose(2, 3)?.contiguous()?)?;
-    let scores = (scores * (softmax_scale as f64))?;
-    let scores = if causal {
-        // Causal mask: scores[..., i, j] = -inf for j > i.
-        let mut mask = vec![0.0f32; t * t];
-        for i in 0..t {
-            for j in 0..t {
-                if j > i {
-                    mask[i * t + j] = f32::MIN;
-                }
-            }
-        }
-        let mask = Tensor::from_vec(mask, (t, t))?
-            .reshape((1, 1, t, t))?
-            .broadcast_as((b, h, t, t))?;
-        scores.broadcast_add(&mask)?
-    } else {
-        scores
-    };
-    // Manual softmax (last dim) — candle-nn isn't a dep of this crate.
-    let last_dim = scores.dims().len() - 1;
-    let max_per_row = scores.max_keepdim(last_dim)?;
-    let shifted = scores.broadcast_sub(&max_per_row)?;
-    let exp_shifted = shifted.exp()?;
-    let sum_exp = exp_shifted.sum_keepdim(last_dim)?;
-    let probs = exp_shifted.broadcast_div(&sum_exp)?;
-    let out_h = probs.broadcast_matmul(&v_h)?;
-    // Back to token-major: [B, H, T, dh] → [B, T, H, dh]
-    Ok(out_h.transpose(1, 2)?.contiguous()?)
 }
 
 #[test]

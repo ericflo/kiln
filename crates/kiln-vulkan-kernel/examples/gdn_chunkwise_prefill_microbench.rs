@@ -168,6 +168,8 @@ fn upload_inputs(
     Ok((q, k, v, beta, g, state))
 }
 
+// Mirrors the flat ABI of record_gdn_chunkwise_prefill_block_into (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn run_once(
     cfg: Args,
     q: &VkTensor,
@@ -187,6 +189,8 @@ fn run_once(
     Ok((out, state))
 }
 
+// Mirrors the flat ABI of record_gdn_chunkwise_prefill_block_into (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn time_path(
     cfg: Args,
     q: &VkTensor,

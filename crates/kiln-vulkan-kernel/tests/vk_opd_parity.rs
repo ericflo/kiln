@@ -54,6 +54,8 @@ fn bf16_round_trip(data: &[f32]) -> Result<Vec<f32>> {
 /// `weight^T`.
 ///
 /// `weight` is `[V, H]` row-major (column c = weight[c*H + h]).
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_oracle(
     hidden: &[f32],       // [T_active * H]
     weight: &[f32],       // [V * H]

@@ -168,6 +168,8 @@ fn cpu_xent(
     (loss_sum / num_active as f32, grad_hidden)
 }
 
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_selected_log_probs_and_grpo(
     hidden: &[f32],
     weight: &[f32],

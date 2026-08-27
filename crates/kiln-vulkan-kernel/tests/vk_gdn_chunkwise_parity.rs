@@ -49,6 +49,8 @@ fn assert_close(label: &str, got: &[f32], want: &[f32], tol: f32) {
 /// v: [B, nv, T, dv]
 /// beta, g: [B, nv, T]
 /// state: [B, nv, dk, dv]
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_per_token_recurrence(
     q: &[f32],
     k: &[f32],

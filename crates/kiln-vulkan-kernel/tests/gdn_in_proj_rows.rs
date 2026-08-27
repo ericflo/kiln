@@ -45,6 +45,8 @@ fn silu(x: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+// The 7-tuple mirrors the seven SoA outputs of the fused GDN in-proj reference.
+#[allow(clippy::type_complexity)]
 fn cpu_conv_split(
     qkv: &[f32],
     z: &[f32],
@@ -151,7 +153,7 @@ fn run_gdn_in_proj_case(shader: &'static str, row_group_size: usize, batch: usiz
         .map(|i| bf16::from_f32((((i * 29 + 11) % 127) as f32 - 63.0) * 0.0048828125))
         .collect();
     let b_w: Vec<bf16> = (0..hidden * b_dim)
-        .map(|i| bf16::from_f32((((i * 31 + 13) % 131) as f32 - 65.0) * 0.00439453125))
+        .map(|i| bf16::from_f32((((i * 31 + 13) % 131) as f32 - 65.0) * (9.0 / 2048.0)))
         .collect();
 
     let x_buf = kernels::upload_f32_buffer_from_slice(&dev, &x)?;
@@ -256,7 +258,7 @@ fn gdn_in_proj_rows4_conv_split_matches_cpu_with_tail_rows_and_odd_pairs() -> Re
         .map(|i| bf16::from_f32((((i * 29 + 11) % 127) as f32 - 63.0) * 0.0048828125))
         .collect();
     let b_w: Vec<bf16> = (0..hidden * b_dim)
-        .map(|i| bf16::from_f32((((i * 31 + 13) % 131) as f32 - 65.0) * 0.00439453125))
+        .map(|i| bf16::from_f32((((i * 31 + 13) % 131) as f32 - 65.0) * (9.0 / 2048.0)))
         .collect();
     let conv_w: Vec<f32> = (0..qkv_dim * kernel_size)
         .map(|i| (((i * 13 + 3) % 41) as f32 - 20.0) * 0.0125)

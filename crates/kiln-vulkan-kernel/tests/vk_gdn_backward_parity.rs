@@ -176,6 +176,8 @@ fn vk_gdn_gates_bwd_matches_cpu() -> Result<()> {
 
 // ---------------- vk_causal_conv1d_bwd ----------------
 
+// Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
+#[allow(clippy::too_many_arguments)]
 fn cpu_conv1d_linear_bwd(
     d_out: &[f32],
     weight: &[f32],
