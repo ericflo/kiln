@@ -4374,7 +4374,7 @@ mod tests {
         assert_eq!(num_active, 3, "fixture sanity");
 
         // Random F32 logits [1, T, V] on CUDA (deterministic seed).
-        let mut rng = StdRng::seed_from_u64(0xC0FFEE_1082_u64);
+        let mut rng = StdRng::seed_from_u64(0x00C0_FFEE_1082_u64);
         let logits_host: Vec<f32> = (0..seq_len * vocab)
             .map(|_| rng.random_range(-2.0f32..2.0f32))
             .collect();

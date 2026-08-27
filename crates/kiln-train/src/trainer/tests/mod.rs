@@ -3405,7 +3405,7 @@ fn tape_grad_matches_finite_difference_bf16() {
         4,
         8.0,
         &device,
-        Some(0xF1_17E_D1FF_u64),
+        Some(0x000F_117E_D1FF_u64),
     )
     .expect("params");
     let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
@@ -3563,7 +3563,7 @@ fn tape_grad_matches_finite_difference_bf16() {
 
         // Deterministic F32 direction r in [-1,1], seeded per-Var so each
         // run probes the same direction. Built ON the CUDA device.
-        let mut rng = StdRng::seed_from_u64(0xF1_17E_D1FF_u64 ^ vi as u64);
+        let mut rng = StdRng::seed_from_u64(0x000F_117E_D1FF_u64 ^ vi as u64);
         let r: Vec<f32> = (0..n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
         let r_tensor = KtTensor::from_vec_on(device.clone(), r.clone(), shape.clone())
             .expect("fd direction tensor on cuda");
@@ -3882,7 +3882,7 @@ fn tape_authoritative_sft_converges_bf16() {
         4,
         8.0,
         &device,
-        Some(0xF1_17E_D1FF_u64),
+        Some(0x000F_117E_D1FF_u64),
     )
     .expect("params");
     let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
