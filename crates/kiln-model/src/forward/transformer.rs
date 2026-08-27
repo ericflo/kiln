@@ -129,7 +129,7 @@ pub fn transformer_block_with_policy(
     // Residual connection
     //
     // CP-4 (#1082) Increment 2: route through `residual_add` (which threads
-    // `try_tape_add_cuda` onto the kt `Tape`) instead of a raw candle `+`.
+    // `try_tape_add_cuda` onto the kt `Tape`) instead of a raw kt `+`.
     // The GDN block already used `residual_add`; `transformer_block` used a
     // raw `+`, which fragmented the tape at the full-attn residual so grads
     // never reached attention / FFN projections below the loss.

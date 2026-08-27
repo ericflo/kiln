@@ -167,9 +167,9 @@ pub struct VulkanBackend {
         Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core).
     ///
-    /// `Arc` rather than `Box` so a `CustomOp1` impl that wants to dispatch
-    /// a Vulkan kernel from inside `cpu_fwd` can capture a refcounted
-    /// handle to the device — the candle CustomOp trait requires the op
+    /// `Arc` rather than `Box` so a dispatch path that wants a Vulkan
+    /// kernel from inside a forward can capture a refcounted handle to
+    /// the device — the former candle CustomOp trait required the op
     /// state to be `'static + Send + Sync`, which a borrow off `&self`
     /// can never satisfy.
     pub(super) vulkan_device: Option<Arc<kiln_vulkan_kernel::VulkanDevice>>,

@@ -1,7 +1,7 @@
 //! CUDA backend: FlashAttention-2 and Gated DeltaNet fused kernels.
 //!
 //! Wraps the vendored `kiln-flash-attn` and `kiln-gdn-kernel` crates.
-//! `Ok(None)` responses route the caller to the portable candle path.
+//! `Ok(None)` responses route the caller to the portable kt path.
 
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
@@ -1541,7 +1541,7 @@ impl GdnBackend for CudaBackend {
         // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
         // Args are already kt (#1082 DoD-101/102), so no candle↔kt
         // bridge. Non-bf16 envelopes (f32/f32, f32/bf16) return
-        // Ok(None) so the caller's candle fallback engages. bf16 was
+        // Ok(None) so the caller's kt fallback engages. bf16 was
         // the only envelope on the production decode/prefill path for
         // Qwen3.5-4B GDN.
         if !(a.dtype() == kiln_tensor::DType::BF16
@@ -1789,8 +1789,8 @@ impl ReplayBackend for CudaBackend {
         // through to. The kt-typed
         // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
         // accept a caller-owned (out, lse) pair — it allocates them
-        // internally through the bridge — so the `graph_outputs ==
-        // Some` case must stay on the candle path. That path
+        // internally — so the `graph_outputs ==
+        // Some` case must stay on the with-graph-outputs kt path. That path
         // specifically exists to fix the dangling-pointer hazard
         // documented in
         // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects

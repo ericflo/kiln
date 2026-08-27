@@ -19,9 +19,9 @@ pub struct GdnGatedRmsNormFrozenWeightBackwardGrads {
     pub dz: Tensor,
 }
 
-/// Candle-composite analytic backward for [`gated_rms_norm_fallback`] with a
+/// kt-composite analytic backward for [`gated_rms_norm_fallback`] with a
 /// frozen normalization weight (`out = rms_norm(x, weight, eps) * silu(z)`).
-/// Device-agnostic (runs in candle F32; works on CUDA without a host
+/// Device-agnostic (runs in kt F32; works on CUDA without a host
 /// round-trip), so the kt-tape `crate::tape_forward::GdnGatedRmsNormBackward`
 /// op can wrap it the same way `crate::tape_forward::GdnRecurrentBackward`
 /// wraps [`gdn_recurrent_backward_no_grad`].
@@ -98,16 +98,16 @@ pub fn gdn_gated_rms_norm_frozen_weight_backward_no_grad(
 ///
 /// Computes `dL/d(full logits)` for the next-token-prediction masked
 /// cross-entropy loss that `crate::tape_forward::try_tape_cross_entropy_from_logits_kt`
-/// (and the candle-authoritative fallback `kiln_train::trainer::cross_entropy_loss`)
+/// (and the authoritative fallback `kiln_train::trainer::cross_entropy_loss`)
 /// produces. Device-agnostic (F32, kt in/out — the `_candle` suffix is a misnomer
 /// kept for history) so the kt-tape `CrossEntropyFromLogitsKtBackward` op can wrap
 /// it exactly the way [`gdn_recurrent_backward_no_grad`] /
 /// [`sdpa_fallback_backward_no_grad`] are wrapped. It runs (and is parity-tested)
-/// on CPU where candle's own autograd is the oracle — no CUDA needed.
+/// on CPU where the kt autograd is the oracle — no CUDA needed.
 ///
 /// # Why one fused node
 ///
-/// The forward `cross_entropy_loss` chains FOUR un-taped candle ops
+/// The forward `cross_entropy_loss` chains FOUR un-taped kt ops
 /// (`squeeze(0)` → `narrow(0, 0, T-1)` → `index_select(active)` → `to_dtype(F32)`)
 /// before the loss op, so a kt-tape rooted at the loss had a fresh-borrow input
 /// island and the chain died one op below the loss (`tape_has_grad=0/50`). This
@@ -206,7 +206,7 @@ pub fn cross_entropy_from_logits_grad_candle(
 
     // p = softmax(active_f32, last). Numerically-stable max-shift (matches the
     // forward's log_sum_exp; kept inline so this stays a self-contained
-    // device-agnostic candle-F32 composite, like the SDPA fallback backward).
+    // device-agnostic kt-F32 composite, like the SDPA fallback backward).
     let max_val = active_f32.max_keepdim(LAST_DIM)?; // [A, 1]
     let exp_shifted = active_f32.broadcast_sub(&max_val)?.exp()?;
     let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?; // [A, 1]
@@ -251,9 +251,9 @@ pub fn cross_entropy_from_logits_grad_candle(
     Ok(grad_logits.to_dtype(logits_dtype)?)
 }
 
-/// Candle-composite analytic backward for the GDN L2-qk-norm forward
+/// kt-composite analytic backward for the GDN L2-qk-norm forward
 /// `y = l2_normalize(x) * scale` (the Step-4/5 `gdn_qk_norm` op: Q uses
-/// `scale = 1/sqrt(dk)`, K uses `scale = 1.0`). Device-agnostic (candle F32),
+/// `scale = 1/sqrt(dk)`, K uses `scale = 1.0`). Device-agnostic (kt F32),
 /// so the kt-tape `crate::tape_forward::GdnL2NormScaleBackward` op can wrap it
 /// the same way the gated-rms-norm and recurrence ops wrap their composites.
 ///
@@ -308,10 +308,10 @@ pub struct SdpaFallbackBackwardGrads {
     pub dv: Tensor,
 }
 
-/// Candle-composite analytic backward for the naive SDPA fallback that
+/// kt-composite analytic backward for the naive SDPA fallback that
 /// [`gqa_attention_core_prefill`] runs when flash-attention is unavailable
 /// (e.g. `head_dim` ∉ {128, 256}, as on the tiny synthetic test model with
-/// `head_dim = 16`). Device-agnostic (runs in candle F32; works on CUDA
+/// `head_dim = 16`). Device-agnostic (runs in kt F32; works on CUDA
 /// without a host round-trip), so the kt-tape
 /// `crate::tape_forward::SdpaBackward` op can wrap it the same way
 /// `crate::tape_forward::GdnRecurrentBackward` wraps
@@ -418,9 +418,8 @@ pub fn sdpa_fallback_backward_no_grad(
         scores
     };
     // Numerically-stable softmax over the last axis (max-shift), matching the
-    // forward's `cuda_softmax_last_dim` composite. Kept inline (rather than
-    // `candle_nn::ops::softmax_last_dim`) so this stays a self-contained
-    // device-agnostic candle-F32 composite.
+    // forward's `cuda_softmax_last_dim` composite. Kept inline so this
+    // stays a self-contained device-agnostic kt-F32 composite.
     let max_val = scores.max_keepdim(LAST_DIM)?; // [B, nq, T, 1]
     let exp_shifted = scores.broadcast_sub(&max_val)?.exp()?;
     let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?; // [B, nq, T, 1]
@@ -511,11 +510,11 @@ pub(super) fn gdn_chunk_prep_f32(
         .broadcast_as((batch, heads, chunk, chunk))?;
     // Phase 7 (#1082): route the two `where_cond(...).exp()` steps
     // through `try_kt_exp` when stable KT routes are enabled. The where_cond itself stays
-    // candle-side (candle's masked-select plumbing handles the
-    // selection), but the resulting tensor's exp goes through the
-    // kt-API dispatch instead of the candle `.exp()` composite.
+    // composite-side (the kt masked-select plumbing handles the
+    // selection), and the resulting tensor's exp goes through the
+    // kt-API dispatch.
     // Mirrors the `big_g.exp()` and `g_last.exp()` wirings already
-    // in this function. Falls through to the candle path when any
+    // in this function. Falls through to the kt path when any
     // precondition fails so behavior is identical with the gate
     // off.
     let strict_decay = {
@@ -548,7 +547,7 @@ pub(super) fn gdn_chunk_prep_f32(
     };
     // Phase 7 (#1082): route `big_g.exp()` through
     // `try_kt_exp` when stable KT routes are enabled. Falls through to the
-    // candle composite when any precondition fails so behavior is
+    // kt composite when any precondition fails so behavior is
     // identical with the gate off.
     let p = {
         #[cfg(feature = "cuda")]
@@ -595,11 +594,11 @@ pub(super) fn gdn_chunk_prep_f32(
     // Phase 7 (#1082): route the `g_last.broadcast_sub(&big_g).exp()`
     // step through `try_kt_exp` when stable KT routes are enabled. Mirrors the same gate that
     // already wraps `big_g.exp()` and `g_last.exp()` in this same
-    // function. The `broadcast_sub` itself stays candle-side
-    // (candle's broadcast plumbing handles the shape), but the
-    // resulting tensor goes through the kt-API exp dispatch
-    // instead of the candle `.exp()` composite. Falls through to
-    // the candle path when any precondition fails so behavior is
+    // function. The `broadcast_sub` itself stays composite-side
+    // (the kt broadcast plumbing handles the shape), and the
+    // resulting tensor goes through the kt-API exp dispatch.
+    // Falls through to
+    // the kt path when any precondition fails so behavior is
     // identical with the gate off.
     let decay_last_col = {
         let g_diff = g_last.broadcast_sub(&big_g)?;
@@ -671,7 +670,7 @@ pub(super) fn solve_tri_transpose_f32(
             // Phase 7 (#1082): route the chunkwise-backward sum-over-time
             // reduction through kiln_tensor::cuda_sum_axis when
             // stable KT routes.
-            // Falls through to candle on any precondition failure.
+            // Falls through to the kt composite on any precondition failure.
             let acc_pre = dr_future.broadcast_mul(&weights)?;
             let acc_sum = {
                 #[cfg(feature = "cuda")]
@@ -872,8 +871,8 @@ pub fn gdn_recurrent_backward_no_grad(
             // `(s_in * d_s_exit)?.sum(3)?.sum(2)?` reduction chain
             // for `d_p_last_acc`. Both sums collapse a tensor axis
             // (axis 3 then axis 2), and `try_kt_sum_axis` is the
-            // axis-removing kt-API analogue of candle's
-            // `Tensor::sum(axis)`. Falls through to the candle
+            // axis-removing kt-API analogue of
+            // `Tensor::sum(axis)`. Falls through to the kt
             // composite when any precondition fails so behavior is
             // identical with the gate off.
             let prod = (s_in * d_s_exit)?;
@@ -903,7 +902,7 @@ pub fn gdn_recurrent_backward_no_grad(
             // `(&k_c * &tmp_dk)?.sum(D::Minus1)?` reduction for
             // `d_decay_last_col_acc`. The operand is a 4D tensor
             // [B, H, C, dim] so `D::Minus1` resolves to axis 3 at
-            // runtime; the helper falls through to the candle
+            // runtime; the helper falls through to the kt
             // composite on any precondition failure so behavior is
             // identical with the gate off.
             let prod_kc = (&k_c * &tmp_dk)?;
@@ -928,7 +927,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // `(&pre_beta * &dr)?.sum(D::Minus1)?` reduction for
         // `d_beta`. The operand is a 4D tensor [B, H, C, dim] so
         // `D::Minus1` resolves to axis 3 at runtime; the helper
-        // falls through to the candle composite on any precondition
+        // falls through to the kt composite on any precondition
         // failure so behavior is identical with the gate off.
         let prod_pb = (&pre_beta * &dr)?;
         #[cfg(feature = "cuda")]
@@ -952,7 +951,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // Phase 7 (#1082): route the `beta_c.neg()` step through
         // `try_kt_neg` when stable KT routes are enabled. Mirrors the wirings
         // already in this same backward function and in `softplus`
-        // / `cuda_sigmoid`. Falls through to the candle composite
+        // / `cuda_sigmoid`. Falls through to the kt composite
         // when any precondition fails so behavior is identical with
         // the gate off.
         let beta_c_neg = {
@@ -976,7 +975,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // Phase 7 (#1082): route the `big_g.exp()` step through
         // `try_kt_exp` when stable KT routes are enabled. Mirrors the prefill
         // chunkwise `p = big_g.exp()` wirings (ca8de9eb, 288531c7,
-        // 38e4ea3d). Falls through to the candle `.exp()` composite
+        // 38e4ea3d). Falls through to the kt `.exp()` composite
         // when any precondition fails so behavior is identical with
         // the gate off.
         let p = {
@@ -997,9 +996,9 @@ pub fn gdn_recurrent_backward_no_grad(
         // Phase 7 (#1082): route the `.neg()` step of the
         // `d_ks_entry` computation through `try_kt_neg` when stable KT routes
         // are enabled. The intermediate `d_v_prime.broadcast_mul(&p_col)`
-        // stays candle-side; only the elementwise `.neg()` migrates
+        // stays composite-side; only the elementwise `.neg()` migrates
         // to a single `cuda_activation_unary` kind 12 (Neg)
-        // dispatch. Falls through to candle on any precondition
+        // dispatch. Falls through to the kt composite on any precondition
         // failure.
         let d_ks_entry_pre = d_v_prime.broadcast_mul(&p_col)?;
         let d_ks_entry = {
@@ -1023,7 +1022,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // `(&q_s * &dq_s_scaled).broadcast_mul(&p_col).sum(D::Minus1)?`
         // accumulator. Both operands are 4D tensors so `D::Minus1`
         // resolves to axis 3 at runtime; the helper falls through
-        // to the candle composite on any precondition failure so
+        // to the kt composite on any precondition failure so
         // behavior is identical with the gate off.
         let g_acc_prod = (&ks_entry * &d_ks_entry)?;
         #[cfg(feature = "cuda")]
@@ -1060,10 +1059,10 @@ pub fn gdn_recurrent_backward_no_grad(
         let causal_mask_f32 = &chunk_masks.causal_mask_f32;
         // Phase 7 (#1082): route both `where_cond(...).exp()` steps
         // through `try_kt_exp` under the same stable KT routes
-        // gate. The where_cond stays candle-side; only the
+        // gate. The where_cond stays composite-side; only the
         // elementwise `.exp()` migrates. Mirrors the chunkwise
         // forward `gdn_chunk_prep_f32` strict/causal_decay wirings
-        // (commit 38e4ea3d). Falls through to candle on any
+        // (commit 38e4ea3d). Falls through to the kt composite on any
         // precondition failure.
         let strict_decay = {
             let masked = strict_bool.where_cond(&decay_delta, &zero_delta)?;
@@ -1109,7 +1108,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // Phase 7 (#1082): wire `try_kt_sum_axis` into the
         // `term.sum(D::Minus1)?` row-sum reduction. The operand is
         // a 4D tensor [B, H, C, C] so `D::Minus1` resolves to axis
-        // 3 at runtime; the helper falls through to the candle
+        // 3 at runtime; the helper falls through to the kt
         // composite on any precondition failure so behavior is
         // identical with the gate off. Complements the col-sum
         // (axis 2) which is already wired below.
@@ -1126,10 +1125,10 @@ pub fn gdn_recurrent_backward_no_grad(
         // Phase 7 (#1082): route the col-sum reduction (axis 2,
         // the strict-mask row dim) through
         // kiln_tensor::cuda_sum_axis when stable KT routes are enabled. Falls
-        // through to candle on any precondition failure. The complementary
-        // `row_sum` (last-dim non-keepdim) stays on candle since this helper
+        // through to the kt composite on any precondition failure. The complementary
+        // `row_sum` (last-dim non-keepdim) stays on the kt composite since this helper
         // targets `sum(axis)` shapes and
-        // candle's `.sum(D::Minus1)` here already feeds the
+        // the kt `.sum(D::Minus1)` here already feeds the
         // existing fused-decode fast paths upstream.
         let col_sum = {
             #[cfg(feature = "cuda")]
@@ -1194,7 +1193,7 @@ pub fn gdn_recurrent_backward_no_grad(
     // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the
     // gdn_chunkwise_recurrence cat_out wiring and the conv1d
     // prefill/decode cat_dim2 wirings. Falls through to the
-    // candle composite when any precondition fails so behavior
+    // kt composite when any precondition fails so behavior
     // is identical with the gate off. The closure is invoked
     // five times per backward (dq/dk/dv/dbeta/dg) so this
     // covers five fast-path sites in one wire-up.

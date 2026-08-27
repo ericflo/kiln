@@ -1,8 +1,9 @@
-//! Candle-based forward pass layers for Qwen3.5-4B.
+//! Forward pass layers for Qwen3.5-4B.
 //!
 //! Implements the foundational compute primitives: embedding lookup, RMSNorm,
-//! RoPE (rotary position embeddings), and SwiGLU FFN. These operate on candle
-//! `Tensor` objects and are composed into the full transformer forward pass.
+//! RoPE (rotary position embeddings), and SwiGLU FFN. These operate on kt
+//! (`kiln_tensor`) `Tensor` objects and are composed into the full transformer
+//! forward pass.
 
 use anyhow::{Context, Result};
 use kiln_core::execution_provenance::ExecutionProvenanceV1;
@@ -45,12 +46,11 @@ use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, W
 
 use kiln_core::block::{BlockTable, contiguous_slot_run_start};
 
-/// kt-tensor type alias (#1082). Bare `Tensor` in this file is
-/// `candle_core::Tensor`; `KtTensor` is the kiln-native
-/// `kiln_tensor::Tensor`. Used by the kt-native embedding + lm_head
-/// helpers and the `GpuWeights` kt accessors so the candle↔kt seam
-/// is explicit at the region boundaries while public signatures stay
-/// candle-typed. Always available (the alias itself pulls in no CUDA
+/// kt-tensor type alias (#1082). Bare `Tensor` in this file is the
+/// kiln-native `kiln_tensor::Tensor`; `KtTensor` is a retained alias
+/// for the same type (the pre-flip kt side of the seam). Used by the
+/// kt-native embedding + lm_head helpers and the `GpuWeights` kt
+/// accessors. Always available (the alias itself pulls in no CUDA
 /// toolchain dependency); the accessors and helpers that construct
 /// `KtTensor` device storage are `#[cfg(feature = "cuda")]`.
 #[allow(unused_imports)]
@@ -126,8 +126,8 @@ fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
 /// tensors take the kt composite path by default. The entire four-step
 /// `neg -> exp -> add_scalar(1) -> recip` composite is replaced with a
 /// single `kiln_tensor::cuda_activation_unary(kind=1)` call via the kt-bridge
-/// borrow adapter. Autograd-tracked tensors continue through the existing
-/// candle-tracked composite until the training tape surface is kt-native.
+/// borrow adapter. Autograd-tracked tensors route through the per-step kt
+/// composite (each step is tape-recorded).
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
@@ -209,7 +209,7 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
 }
 
 /// Phase 7 (#1082) — kt-API sigmoid whole-composite migration
-/// helper. Routes a contiguous CUDA candle tensor through
+/// helper. Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 1 (Sigmoid),
 /// replacing the four-step neg/exp/add/recip composite with a
 /// single kernel dispatch.
@@ -818,8 +818,7 @@ fn require_active_tape_output<T>(output: Option<T>, operation: &str) -> Result<T
 /// tensors take the kt composite path by default. The entire `sigmoid(x) * x`
 /// composite is replaced with a single `kiln_tensor::cuda_activation_unary`
 /// call (SiLU) via the kt-bridge borrow adapter. Autograd-tracked tensors
-/// continue through the existing candle-tracked composite until the training
-/// tape surface is kt-native.
+/// route through the per-step kt composite (each step is tape-recorded).
 fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     // A scope is an authoritative request for a connected graph. Route before
     // every backend-specific leaf (and before feature-specific eligibility
@@ -866,7 +865,7 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
 }
 
 /// Phase 7 (#1082) — kt-API SiLU whole-composite migration helper.
-/// Routes a contiguous CUDA candle tensor through
+/// Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 0 (SiLU),
 /// replacing the two-step `sigmoid(x) * x` composite with a single
 /// kernel dispatch.
@@ -1128,11 +1127,10 @@ fn add_lora_delta_to_base(
     }
     // #1082 forward-flip: `base`/`x`/`proj.a`/`proj.b` are all kt; the
     // BackendRuntime trait and `compute_lora_delta` are kt-typed (item 4/5).
-    // Only the kt-tape adapter (`try_tape_lora_add_cuda`, candle-typed
-    // cross-file seam) and the metal LoRA-add helpers still need a candle bridge.
-    // Take the kt-native production CUDA path FIRST (it is on by default and
-    // serves the hot BF16 decode), so the candle bridge below only runs on
-    // the training / Metal / Vulkan / CPU fallback paths — no hot-path copy.
+    // The kt-tape adapter (`try_tape_lora_add_kt`) and the metal LoRA-add
+    // helpers are all kt-native. Take the kt-native production CUDA path
+    // FIRST (it is on by default and serves the hot BF16 decode), so the
+    // fallback paths below are pure kt composites — no hot-path copy.
     #[cfg(feature = "cuda")]
     {
         if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)? {
@@ -1148,20 +1146,18 @@ fn add_lora_delta_to_base(
         }
     }
 
-    // (#1082) bridge — remove when tape_forward.rs flips to kt. The only
-    // remaining candle consumer here is the kt-tape adapter
-    // `try_tape_lora_add_cuda` (candle-typed cross-file seam); bridge the kt
-    // base/x to candle once for it (CUDA copy; only reached when the kt-native
-    // path above declined).
+    // (#1082) tape_forward.rs has flipped to kt: the kt-tape adapter is
+    // `try_tape_lora_add_kt` (kt-typed, reached above when a tape scope is
+    // active).
     // CP-4 (#1082) seam flip: kt-native tape-routed LoRA add — records a
-    // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
-    // ids), no kt->candle->kt round-trip.
+    // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their
+    // tensor ids), no kt->candle->kt round-trip.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder. Active scopes
     // already returned through that recorder above; only inference reaches the
     // backend-specific leaves below.
     // (#1082) Deleted the dead candle-CustomOp `cuda_lora_add_training_f32` /
     // `cuda_lora_add_training_bf16` fallbacks: the kt tape's
-    // `try_tape_lora_add_cuda` above is the sole autograd LoRA-add producer.
+    // `try_tape_lora_add_kt` above is the sole autograd LoRA-add producer.
     // The binding below is consumed only by the `cuda`-gated calls; on
     // non-cuda builds the allow silences the otherwise unused binding
     // (same pattern as model_dispatch.rs resident-route locals).
@@ -1191,10 +1187,9 @@ fn add_lora_delta_to_base(
     }
     #[cfg(feature = "metal")]
     {
-        // (#1082) The `backend::metal::*` module is a candle-typed cross-file
-        // seam flipped to kt as a unit in Wave F (like the cuda backend trait
-        // already was). Pass kt directly here, matching the kt sig metal.rs
-        // will produce — every other metal call site in this file does the same.
+        // (#1082) The `backend::metal::*` module was flipped to kt as a unit
+        // in Wave F (like the cuda backend trait was). Pass kt directly here —
+        // every metal call site in this file does the same.
         if crate::backend::metal::metal_lora_add_decode_supports(&base, x, &proj.a, &proj.b) {
             return crate::backend::metal::metal_lora_add_decode_bf16(
                 &base, x, &proj.a, &proj.b, lora_scale,
@@ -1269,9 +1264,9 @@ fn linear_with_lora_t_backend_decode_if(
     // below (gated on `x.track_op()`) is not reliably hit. No-ops (returns
     // None) otherwise — the production dispatch is untouched in the default
     // configuration.
-    // #1082: `x`/`weight_t` are kt. Only the kt-tape adapter
-    // (`try_tape_lora_linear_cuda`, candle-typed cross-file seam) needs a candle
-    // bridge; the BackendRuntime trait is kt-typed (item 4) so the
+    // #1082: `x`/`weight_t` are kt. The kt-tape adapter
+    // (`try_tape_lora_linear_kt`, kt-typed) is the tape path; the
+    // BackendRuntime trait is kt-typed (item 4) so the
     // decode/prefill methods take/return kt directly.
     {
         // Only training opens a tape scope; decode falls straight through to
@@ -1510,7 +1505,7 @@ fn full_attn_qkv_proj_decode_if(
 /// Phase 7 (#1082): by default, when the input is a contiguous CUDA
 /// tensor of {F32, BF16, F16}, route through
 /// `kiln_tensor::cuda_softmax_last_axis` via the kt-bridge borrow
-/// adapter. Falls through to the portable candle composite when the
+/// adapter. Falls through to the portable kt composite when the
 /// default-on kt route is disabled or any precondition fails.
 fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
@@ -1519,9 +1514,8 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
         // CP-4 (#1082): the kt-API softmax (`try_kt_softmax_last_dim`) returns a
-        // `kt_tensor_to_candle_cuda_copy` — a FRESH candle leaf with NO candle
-        // `BackpropOp`. For an autograd-tracked input that SEVERS candle's
-        // `loss.backward()` graph at the softmax. That was invisible while the
+        // FRESH kt leaf with NO recorded backward op. For an autograd-tracked
+        // input that SEVERS the autograd graph at the softmax. That was invisible while the
         // full-attention block was disconnected from the loss, but CP-4 Inc 7
         // wired the SDPA-fallback attention chain onto the kt `Tape`: the
         // tape-authoritative backward now propagates the full attention
@@ -1530,7 +1524,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         // two diverged on every layer BELOW the full-attn layer (the BF16 gate's
         // lower-layer MLP grads jumped 0.13 → 0.63). Gate the kt-API fast path on
         // `!x.track_op()` so an autograd-tracked softmax falls through to the
-        // candle-differentiable composite (same forward value, bit-close),
+        // kt-differentiable composite (same forward value, bit-close),
         // matching the established `!track_op()` guard on the other kt-API
         // forward-only ops (rms_norm, sigmoid, etc.). Inference / tape paths
         // (track_op == false) keep the kt-API fast path unchanged.
@@ -1562,7 +1556,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     // tensor of {F32, BF16, F16}, route the
     // `max_keepdim(D::Minus1)` reduction (the softmax-stabilization
     // max step) through `kiln_tensor::cuda_max_axis` plus a
-    // zero-cost `unsqueeze(-1)`. Falls through to the candle
+    // zero-cost `unsqueeze(-1)`. Falls through to the kt
     // composite when any precondition fails so behavior is
     // identical with the gate off.
     let max_val = {
@@ -1583,7 +1577,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `.exp()` step of the softmax composite through
     // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
-    // Falls through to the candle composite when any
+    // Falls through to the kt composite when any
     // precondition fails so behavior is identical with the
     // gate off.
     let exp_shifted = {
@@ -1603,7 +1597,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `sum_keepdim(-1)` reduction through
     // `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
-    // `unsqueeze(-1)`. Falls through to the candle composite when
+    // `unsqueeze(-1)`. Falls through to the kt composite when
     // any precondition fails so behavior is identical with the
     // gate off.
     let sum_exp = {
@@ -1624,13 +1618,13 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
 }
 
 /// Phase 7 (#1082) — kt-API `sum_keepdim(-1)` migration helper.
-/// Routes a contiguous CUDA candle tensor through
+/// Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_sum_last_axis` (which reduces the trailing
 /// axis) and re-applies `unsqueeze(-1)` so the output shape
 /// matches `sum_keepdim`.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/sum_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1660,7 +1654,7 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 }
 
 /// Phase 7 (#1082) — kt-API `sum(axis)` (non-keepdim, arbitrary
-/// axis) migration helper. Routes a contiguous CUDA candle tensor
+/// axis) migration helper. Routes a contiguous CUDA kt tensor
 /// through `kiln_tensor::cuda_sum_axis` (which reduces an arbitrary
 /// axis with the axis dim removed, matching candle's
 /// `Tensor::sum(axis)` semantics directly — no `unsqueeze(-1)`
@@ -1668,14 +1662,14 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0, or axis out of range) so the
-/// caller falls through to the candle composite. NVTX range
+/// caller falls through to the kt composite. NVTX range
 /// `kiln/sum_axis_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 ///
 /// Distinct from [`try_kt_sum_last_dim_keepdim`] (the trailing-axis
 /// + keepdim variant). The kt kernel under both helpers is the
 /// same `reduce_arbitrary_axis` (commit `7ca6cabd`) — this helper
-/// just exposes its native non-keepdim shape directly to candle
+/// just exposes its native non-keepdim shape directly to kt
 /// `Tensor::sum(axis)` call sites.
 #[cfg(feature = "cuda")]
 fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
@@ -1702,13 +1696,13 @@ fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API `max_keepdim(-1)` migration helper.
-/// Routes a contiguous CUDA candle tensor through
+/// Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_max_axis` (which reduces an arbitrary axis
 /// with the axis dim removed) and re-applies `unsqueeze(-1)` so the
 /// output shape matches `max_keepdim`.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/max_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1740,11 +1734,11 @@ pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 }
 
 /// Phase 7 (#1082) — kt-API softmax migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_softmax_last_axis`.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range `kiln/softmax_kt`
+/// through to the kt composite. NVTX range `kiln/softmax_kt`
 /// brackets the migrated call so nsys traces separate the path
 /// from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1768,7 +1762,7 @@ fn try_kt_softmax_last_dim(x: &Tensor) -> Result<Option<Tensor>> {
 /// Routes through `AttentionBackend::runtime_flash_attn_prefill`. Returns `Ok(Some(out))` with
 /// `out` shaped `[batch, seq_len, num_heads * head_dim]` (already reshaped for
 /// output projection) when the backend handles it, or `Ok(None)` when the
-/// backend declines — callers must fall back to the portable candle path.
+/// backend declines — callers must fall back to the portable kt path.
 fn flash_attention_forward(
     backend: &dyn BackendRuntime,
     q: &Tensor,

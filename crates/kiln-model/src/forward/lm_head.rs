@@ -2,7 +2,7 @@ use super::*;
 
 /// Pre-allocated lm-head output buffer installed by the captured-graph
 /// runner. When present, [`try_kt_lm_head`] writes the matmul result
-/// directly into this candle Tensor via [`kiln_tensor::cuda_matmul_into`]
+/// directly into this kt Tensor via [`kiln_tensor::cuda_matmul_into`]
 /// instead of allocating a fresh per-call output. The buffer's device
 /// pointer is then stable across captured-graph replays, so the
 /// downstream `slice_set(&logits, …)` records a memcpy whose source
@@ -19,7 +19,7 @@ thread_local! {
 }
 
 /// Install a pre-allocated lm-head output buffer for the duration of
-/// `f`. The buffer must be a CUDA candle Tensor of shape
+/// `f`. The buffer must be a CUDA kt Tensor of shape
 /// `[batch, 1, vocab]` (or any shape that matches the expected
 /// lm-head output shape for the captured forward) and dtype matching
 /// `weights.embed_tokens.dtype()`. On exit, the previous slot value
@@ -41,8 +41,8 @@ pub fn with_lm_head_output_buffer<R>(buf: Tensor, f: impl FnOnce() -> R) -> R {
 /// `Ok(None)` if no buffer is installed, the shape doesn't match, the
 /// dtype doesn't match, or the buffer isn't on a CUDA device.
 ///
-/// On success the returned `Tensor` is a candle clone of the
-/// pre-allocated buffer (storage Arc is shared; the wrapper is a new
+/// On success the returned `Tensor` is a kt handle over the
+/// pre-allocated buffer (storage Arc is shared; a new
 /// `Tensor` handle with the same dims). The caller is responsible
 /// for writing the matmul result into that storage via
 /// `kiln_tensor::cuda_matmul_into`.
@@ -96,14 +96,14 @@ pub(super) fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Ten
 /// the `base + delta` final accumulator from
 /// [`add_lora_delta_to_base`] (and analogous Marlin LoRA call
 /// sites) through `kiln_tensor::cuda_elementwise_binary` with
-/// kind tag 0 (Add) directly, ahead of the candle composite.
+/// kind tag 0 (Add) directly, ahead of the kt composite.
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// unsupported dtype, dtype/shape mismatch, non-contiguous,
-/// rank-0) so the caller falls through to the candle
+/// rank-0) so the caller falls through to the kt
 /// `Add<Tensor>` composite. NVTX range `kiln/lora_add_kt`
 /// brackets the migrated call so nsys traces separate the path
-/// from the candle baseline.
+/// from the kt composite baseline.
 #[cfg(feature = "cuda")]
 pub(super) fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Tensor>> {
     if !crate::kt_api_policy::stable_routes_enabled() {
@@ -138,7 +138,7 @@ pub(super) fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Te
 /// [`crate::lora_loader::compute_lora_delta`] through
 /// `kiln_tensor::ops::matmul_rhs_transposed` +
 /// `kiln_tensor::ops::matmul_rhs_transposed` +
-/// `kiln_tensor::ops::mul_scalar` directly, ahead of the candle composite.
+/// `kiln_tensor::ops::mul_scalar` directly, ahead of the kt composite.
 ///
 /// Flattens any leading dims to a 2D `[lead, in_features]` view
 /// before dispatching to keep the cublasLt entry shape canonical;
@@ -149,9 +149,9 @@ pub(super) fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Te
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// unsupported dtype, dtype/rank mismatch, non-contiguous,
 /// non-finite scale, K-dim mismatch) so the caller falls through
-/// to the candle composite. NVTX range `kiln/lora_delta_kt`
+/// to the kt composite. NVTX range `kiln/lora_delta_kt`
 /// brackets the migrated call so nsys traces separate the path
-/// from the candle baseline.
+/// from the kt composite baseline.
 #[cfg(feature = "cuda")]
 pub(super) fn try_kt_lora_delta(
     x: &Tensor,
@@ -251,11 +251,10 @@ pub(super) fn try_kt_lora_delta(
 /// both already borrowed as kt tensors, performs the final projection
 /// via `kiln_tensor::ops::matmul` and returns the `[lead, vocab]`
 /// logits as a `KtTensor`. This is the consolidated kt-internal
-/// computation for the lm_head region; the candle↔kt
-/// bridging (and the captured-graph output-buffer fast path) lives in
-/// the [`try_kt_lm_head`] wrapper.
+/// computation for the lm_head region; the seam (and the captured-graph
+/// output-buffer fast path) lives in the [`try_kt_lm_head`] wrapper.
 ///
-/// The matmul is bit-exact to the candle baseline for the LM head
+/// The matmul is bit-exact to the kt composite baseline for the LM head
 /// while letting the kt `MatmulOp` contract choose the active backend's
 /// native implementation. The `kiln/lm_head_kt` NVTX range is opened by
 /// the [`try_kt_lm_head`] wrapper (covering both this core and the
@@ -278,17 +277,17 @@ pub(super) fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<
 /// Flattens any leading dims to a 2D `[lead, K]` view before
 /// dispatching to keep the kt path on the `M-N-K` cublasLt entry
 /// shape; reshapes the result back to match the input rank. The
-/// candle↔kt boundaries are: borrow-in (hidden + weight) and
-/// dtod-copy-out (logits) — except on the captured-graph fast path,
-/// which writes the matmul result directly into a pre-allocated,
-/// graph-stable candle output buffer via `cuda_matmul_into`.
+/// the kt seam is the identity borrow-in (hidden + weight);
+/// except on the captured-graph fast path, which writes the matmul
+/// result directly into a pre-allocated,
+/// graph-stable kt output buffer via `cuda_matmul_into`.
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off,
 /// non-{BF16,F16,F32}, dtype mismatch, non-contiguous, non-rank-2
 /// weight, K-dim mismatch) so the caller falls through to
 /// [`broadcast_matmul_cpu_compatible`]. NVTX range `kiln/lm_head_kt`
 /// brackets the migrated call so nsys traces separate the path from
-/// the candle baseline.
+/// the kt composite baseline.
 #[cfg(feature = "cuda")]
 pub(super) fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>> {
     if !crate::kt_api_policy::stable_routes_enabled() {
@@ -330,8 +329,7 @@ pub(super) fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Opti
     // Phase 5 #1082 — if a captured-graph runner installed a
     // pre-allocated lm-head output buffer matching our expected shape
     // and dtype, write the matmul result directly into it instead of
-    // allocating a transient candle Tensor via
-    // `kt_tensor_to_candle_cuda_copy`. The pre-allocated buffer's
+    // allocating a transient kt Tensor. The pre-allocated buffer's
     // device pointer is graph-stable across replays, so the downstream
     // `slice_set(&logits, …)` records a memcpy whose source address
     // remains valid on every replay — fixing the
@@ -385,8 +383,8 @@ pub(super) fn lm_head_forward_backend_decode_if(
     // because the authoritative path's input is a DETACHED kt-copy
     // (`track_op()==false`), so the autograd-safe `linear_prefill_apply` branch
     // below (gated on `x.track_op()`) is not reliably hit. No-ops otherwise.
-    // #1082: only the kt-tape adapter (`try_tape_lora_linear_cuda`, candle-typed
-    // cross-file seam) needs a candle bridge; the BackendRuntime trait is
+    // #1082: the kt-tape adapter (`try_tape_lora_linear_kt`, formerly the
+    // candle-typed cross-file seam) is kt-native now; the BackendRuntime trait is
     // kt-typed (item 4) so `linear_prefill_apply`/`linear_decode` take/return kt.
     // (#1082) Vulkan added: `try_tape_lora_linear_kt` is device-agnostic and is
     // the producer that connects the CE loss back through the lm_head into the
@@ -455,8 +453,8 @@ pub(super) fn lm_head_argmax_with_backend(
     }
     // Fused matmul + argmax path: when stable KT routes are enabled, chain
     // `MatmulOp` -> `cuda_argmax_last_axis` directly in kt-storage,
-    // skipping the intermediate candle copy-back the
-    // unfused composition would pay between the two stages.
+    // skipping the intermediate buffer the
+    // unfused composition would allocate between the two stages.
     #[cfg(feature = "cuda")]
     if let Some(token) = try_kt_lm_head_argmax(x, embed_tokens_t)? {
         return Ok(token);
@@ -495,8 +493,8 @@ pub(super) fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32>
 /// Routes the `[1, 1, hidden] @ [hidden, vocab] -> argmax` pipeline
 /// through `kiln_tensor::ops::matmul` followed directly by
 /// `kiln_tensor::cuda_argmax_last_axis` in kt-storage, skipping the
-/// intermediate candle copy-back that the unfused
-/// `try_kt_lm_head` -> `try_kt_argmax_1d` composition would pay.
+/// intermediate buffer that the unfused
+/// `try_kt_lm_head` -> `try_kt_argmax_1d` composition would allocate.
 ///
 /// Only fires when the LM head input flattens to exactly one row
 /// (`lead == 1`) — the canonical single-token decode case in
@@ -524,7 +522,7 @@ pub(super) fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Resu
     let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
     // Fused path only handles the single-row case so the matmul
     // output's last-axis argmax matches the flattened-1D argmax
-    // semantics of the candle baseline. Multi-row inputs would
+    // semantics of the kt composite baseline. Multi-row inputs would
     // need argmax over the full flattened logits, not per-row.
     if lead != 1 {
         return Ok(None);
@@ -565,14 +563,14 @@ pub(super) fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Resu
 }
 
 /// Phase 7 (#1082) — kt-API argmax migration helper. Routes a 1-D
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_argmax_last_axis` (which on rank-1 reduces
-/// to a single I64 scalar). The result is copied back through the
-/// kt-bridge to a candle scalar and then cast to `u32` to match the
+/// to a single I64 scalar). The result is read back as a kt scalar
+/// and then cast to `u32` to match the
 /// existing return type.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to candle's `argmax`. NVTX range `kiln/argmax_kt` brackets
+/// through to the kt `argmax` op. NVTX range `kiln/argmax_kt` brackets
 /// the migrated call so nsys traces separate the path from the
 /// baseline.
 #[cfg(feature = "cuda")]
@@ -619,10 +617,10 @@ pub(super) fn lm_head_argmax_backend_decode_if(
 /// Phase 7 (#1082) — kt-API sampler argmax migration helper for
 /// the multi-row case used by
 /// [`crate::sampling::greedy_sample_rows`]. Routes a 2-D or
-/// higher contiguous CUDA candle logits tensor through
+/// higher contiguous CUDA kt logits tensor through
 /// `kiln_tensor::cuda_argmax_last_axis`, which reduces the last
 /// axis and yields an I64 tensor with one fewer rank. The result
-/// is copied back through the kt-bridge to a candle tensor,
+/// is read back as kt,
 /// flattened, and cast to a `Vec<u32>` to match the existing
 /// `greedy_sample_rows` return type.
 ///
@@ -635,18 +633,18 @@ pub(super) fn lm_head_argmax_backend_decode_if(
 ///
 /// Default-on for compatible CUDA tensors. Returns `Ok(None)` when
 /// the input is incompatible (non-CUDA, unsupported dtype,
-/// non-contiguous, rank-0) so the caller falls through to candle's
-/// `argmax(vocab_dim)` + `flatten_all` + `to_vec1::<u32>()`. NVTX range
+/// non-contiguous, rank-0) so the caller falls through to the kt
+/// `argmax(vocab_dim)` + `flatten_all` + `to_vec1::<u32>()` op chain. NVTX range
 /// `kiln/sampling_argmax_rows_kt` brackets the migrated call so
 /// nsys traces separate the path from the baseline.
 ///
 /// Wired into [`crate::sampling::greedy_sample_rows`]: when the
 /// logits tensor is a contiguous CUDA tensor of a supported dtype,
-/// the kt-API path runs and the rest of the candle composite
+/// the kt-API path runs and the rest of the kt composite
 /// (`argmax(vocab_dim)` + `flatten_all` + `to_vec1::<u32>()`) is
 /// bypassed entirely. The fallback remains for CPU/Metal/Vulkan,
 /// non-contiguous views, and unsupported dtypes while the public
-/// sampler signature is still candle-typed.
+/// sampler signature is kt-typed.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<u32>>> {
     if !matches!(logits.device(), Device::Cuda(_))
@@ -885,11 +883,9 @@ pub(super) fn lm_head_argmax_rows_with_backend(
     } else {
         lm_head_forward(x, embed_tokens_t)?
     };
-    // #1082: `greedy_sample_rows` is a candle-typed host-sampler island; bridge
-    // the kt logits to candle for it.
-    // #1082: un-stubbed for no-CUDA — `kt_logits_to_candle` + `greedy_sample_rows`
-    // (candle host sampler) work on any candle build.
-    // #1082: greedy_sample_rows is kt-native now — pass kt logits directly.
+    // #1082: greedy_sample_rows is kt-native now — pass kt logits directly
+    // (the former `kt_logits_to_candle` bridge island was removed; works on any
+    // build).
     crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
 }
 

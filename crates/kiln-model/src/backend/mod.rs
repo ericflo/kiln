@@ -1,15 +1,15 @@
 //! Backend runtime abstraction for Kiln's platform-specific kernels.
 //!
-//! Most of the forward pass is expressed as `candle_core::Tensor` ops that
-//! run on any candle device. A few ops — FlashAttention-2 forward /
+//! Most of the forward pass is expressed as `kiln_tensor::Tensor` (kt)
+//! ops that run on any kt device. A few ops — FlashAttention-2 forward /
 //! paged-decode and the Gated DeltaNet fused recurrent + forward-substitution
-//! kernels — have no candle equivalent and are implemented per-platform as
+//! kernels — have no kt-composite equivalent and are implemented per-platform as
 //! CUDA or (later) Metal kernels. This trait is the seam that lets the
 //! forward pass dispatch those ops without threading `#[cfg(feature = "cuda")]`
 //! gates through every call site.
 //!
-//! **`Option<candle_core::Tensor>` return**: `Ok(None)` means "this backend declines this
-//! call — fall back to the portable candle path". Matches the existing
+//! **`Option<kiln_tensor::Tensor>` return**: `Ok(None)` means "this backend declines this
+//! call — fall back to the portable kt path". Matches the existing
 //! `try_flash_attn_paged_decode` precondition-miss contract and extends it
 //! to all kernel ops.
 //!
@@ -70,10 +70,10 @@ pub struct DecodeWeightPrewarmCancelled;
 
 /// Process-global flag set when Vulkan is the active backend.
 ///
-/// candle-core has no `candle_core::Device::Vulkan`, so call sites in `forward.rs` and
-/// `trainer.rs` see `candle_core::Device::Cpu` even when the real compute lives on a
+/// kt `Device` has no `Vulkan` variant, so call sites in `forward.rs` and
+/// `trainer.rs` see `Device::Cpu` even when the real compute lives on a
 /// `vk::Device`. They use this flag to choose Vulkan-aware behavior
-/// (e.g., always dropping the per-projection candle CPU originals after
+/// (e.g., always dropping the per-projection kt CPU originals after
 /// upload, since on Vulkan they would double the system-RAM footprint
 /// of every weight) without having to thread a `BackendRuntime` handle
 /// through every helper.
@@ -680,10 +680,9 @@ pub trait BackendRuntime:
     /// Returned by value: `kiln_tensor::Device` is `Copy` and small (one
     /// discriminant + a `usize` index). Phase 7 of #1082 migrated the
     /// return type off `&candle_core::Device` so backend selection no
-    /// longer threads candle types through every trait method. Backends
-    /// that still need a candle `candle_core::Device` internally (e.g. for the kernel
-    /// trait methods that take `candle_core::Tensor` parameters) keep a
-    /// candle device cached alongside the kt one and bridge as needed.
+    /// longer threads candle types through every trait method. All backends
+    /// are kt-native after #1082 — none holds a candle device, and no
+    /// trait method takes a candle `Tensor`.
     fn device(&self) -> kiln_tensor::Device {
         BackendIdentity::runtime_device(self)
     }

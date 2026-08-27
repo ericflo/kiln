@@ -1,7 +1,7 @@
 //! ROCm backend: FlashAttention-2 and Gated DeltaNet fused kernels.
 //!
 //! Wraps the vendored `kiln-flash-attn` and `kiln-gdn-kernel` crates.
-//! `Ok(None)` responses route the caller to the portable candle path.
+//! `Ok(None)` responses route the caller to the portable kt path.
 
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
@@ -137,8 +137,8 @@ pub struct RocmBackend {
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
     // sibling. The `rocm_use_kt_api_flash_attn` gate is gone. The
     // `_with_graph_outputs` site dispatches both branches through
-    // kt: `Some((out, lse))` borrows the caller's candle tensors
-    // into kt and writes through them via the new with_graph_outputs
+    // kt: `Some((out, lse))` borrows the caller's kt tensors
+    // and writes through them via the new with_graph_outputs
     // entry; `None` calls the existing internally-allocating
     // `flash_attn_paged_decode_dyn_seqlen_kt`.
     /// Forward-only ROCm LoRA delta/add for decode. Training declines because
@@ -317,8 +317,8 @@ impl AttentionBackend for RocmBackend {
         // Phase 7 (#1082): kt-typed surface is now the only path. Args
         // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
         // are gone — the kernel runs directly on the caller's kt
-        // tensors. candle wrapper discards softmax_lse, kt path does
-        // the same here.
+        // tensors. The legacy candle wrapper discarded softmax_lse; the
+        // kt path does the same here.
         kiln_nvtx::range!(c"kiln/flash_attn_kt");
         let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
         let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
@@ -1557,7 +1557,7 @@ impl GdnBackend for RocmBackend {
         // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
         // Args are already kt (#1082 DoD-101/102), so no candle↔kt
         // bridge. Non-bf16 envelopes (f32/f32, f32/bf16) return
-        // Ok(None) so the caller's candle fallback engages. bf16 was
+        // Ok(None) so the caller's kt fallback engages. bf16 was
         // the only envelope on the production decode/prefill path for
         // Qwen3.5-4B GDN.
         if !(a.dtype() == kiln_tensor::DType::BF16

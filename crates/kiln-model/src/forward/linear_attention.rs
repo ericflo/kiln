@@ -10,7 +10,7 @@ use super::*;
 /// Phase 7 (#1082): by default, when the (F32-promoted) input is a
 /// contiguous CUDA tensor, route through
 /// `kiln_tensor::cuda_l2norm_last_axis` via the kt-bridge borrow
-/// adapter. Falls through to the portable candle composite when the
+/// adapter. Falls through to the portable kt composite when the
 /// default-on kt route is disabled or any precondition fails.
 pub(super) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
@@ -44,7 +44,7 @@ pub(super) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     // contiguous CUDA tensor, route the `sqr().sum_keepdim(-1)`
     // two-op composite through `kiln_tensor::cuda_sum_squared_last_axis`
     // (single fused kernel) plus a zero-cost `unsqueeze(-1)` to
-    // restore the trailing-dim shape. Falls through to the candle
+    // restore the trailing-dim shape. Falls through to the kt
     // composite when any precondition fails so behavior is identical
     // with the gate off.
     let sq_sum = {
@@ -64,14 +64,14 @@ pub(super) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     // Phase 7 (#1082): when stable KT routes are enabled and `sq_sum` is a contiguous
     // CUDA tensor of {F32, BF16, F16}, route the `+ 1e-6` epsilon
     // step through `kiln_tensor::cuda_scalar_op` with kind 0
-    // (AddScalar). Falls through to the candle composite when any
+    // (AddScalar). Falls through to the kt composite when any
     // precondition fails so behavior is identical with the gate
     // off. Mirrors the softplus + sigmoid wirings of try_kt_add_scalar.
     //
     // Phase 7 (#1082): when stable KT routes are enabled and the addend is a
     // contiguous CUDA tensor of a supported dtype, route the
     // `.sqrt()` step through `kiln_tensor::cuda_activation_unary`
-    // with kind 14 (Sqrt). Falls through to the candle composite
+    // with kind 14 (Sqrt). Falls through to the kt composite
     // when any precondition fails.
     let sq_sum_eps = {
         #[cfg(feature = "cuda")]
@@ -106,14 +106,14 @@ pub(super) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
 }
 
 /// Phase 7 (#1082) — kt-API `sqr().sum_keepdim(-1)` migration
-/// helper. Routes a contiguous CUDA candle tensor through
+/// helper. Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_sum_squared_last_axis` (which reduces the
 /// trailing axis) and re-applies `unsqueeze(-1)` so the output
 /// shape matches `sum_keepdim`. The squaring and reduction are
 /// fused into a single kernel by the kt path.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/sum_sq_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -143,11 +143,11 @@ pub(super) fn try_kt_sum_squared_last_dim_keepdim(x: &Tensor) -> Result<Option<T
 }
 
 /// Phase 7 (#1082) — kt-API l2-normalize migration helper. Routes
-/// a contiguous F32 CUDA candle tensor through
+/// a contiguous F32 CUDA kt tensor through
 /// `kiln_tensor::cuda_l2norm_last_axis`.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/l2_normalize_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -268,7 +268,7 @@ pub(super) fn softplus(x: &Tensor) -> Result<Tensor> {
     // contiguous CUDA tensors of {F32, BF16, F16}, route the
     // pointwise `max(x, 0)` (relu) through
     // `kiln_tensor::cuda_binary_minmax` with kind 1 (Max). Falls
-    // through to the candle `.maximum(&zeros)` when any
+    // through to the kt `.maximum(&zeros)` op when any
     // precondition fails so behavior is identical with the gate
     // off.
     let relu_x = {
@@ -291,7 +291,7 @@ pub(super) fn softplus(x: &Tensor) -> Result<Tensor> {
     // through a single `kiln_tensor::cuda_activation_unary` call
     // with kind 13 (Abs) — one fused kernel replacing the
     // `neg + relu(-x) + add(relu(x), relu(-x))` composite (three
-    // candle ops + two intermediate buffers). Falls through to the
+    // kt ops + two intermediate buffers). Falls through to the
     // `relu(x) + relu(-x)` identity when any precondition fails so
     // behavior is identical with the gate off. First production
     // call site for `try_kt_abs`.
@@ -299,7 +299,7 @@ pub(super) fn softplus(x: &Tensor) -> Result<Tensor> {
     // Phase 7 (#1082): when stable KT routes are enabled and the input is a contiguous
     // CUDA tensor of a supported dtype, route the `.neg()` through
     // `kiln_tensor::cuda_activation_unary` with kind 12 (Neg).
-    // Falls through to the candle composite when any precondition
+    // Falls through to the kt composite when any precondition
     // fails.
     let abs_x = {
         #[cfg(feature = "cuda")]
@@ -350,14 +350,14 @@ pub(super) fn softplus(x: &Tensor) -> Result<Tensor> {
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `.exp()` step of the softplus composite through
     // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
-    // Falls through to the candle composite when any precondition
+    // Falls through to the kt composite when any precondition
     // fails.
     //
     // Phase 7 (#1082): when stable KT routes are enabled and the exp() output is a
     // contiguous CUDA tensor of a supported dtype, route the
     // `+ 1.0` step of the softplus composite through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
-    // Falls through to the candle composite when any precondition
+    // Falls through to the kt composite when any precondition
     // fails.
     let exp_neg_abs = {
         #[cfg(feature = "cuda")]
@@ -389,7 +389,7 @@ pub(super) fn softplus(x: &Tensor) -> Result<Tensor> {
     // Phase 7 (#1082): when stable KT routes are enabled and the input is a contiguous
     // CUDA tensor of a supported dtype, route the `.log()` through
     // `kiln_tensor::cuda_activation_unary` with kind 5 (Log = ln(x)).
-    // Falls through to the candle composite when any precondition
+    // Falls through to the kt composite when any precondition
     // fails so behavior is identical with the gate off.
     let log_term = {
         #[cfg(feature = "cuda")]
@@ -484,7 +484,7 @@ pub(super) fn gated_rms_norm_fallback(
     // is a contiguous CUDA tensor, route the `mean_keepdim(-1)`
     // step through `kiln_tensor::cuda_mean_last_axis` plus a
     // zero-cost `unsqueeze(-1)`. Mirrors the rms_norm_fallback
-    // wiring (line ~7298). Falls through to the candle
+    // wiring. Falls through to the kt
     // `.mean_keepdim()` when any precondition fails so behavior
     // is identical with the gate off.
     let sq = x_f32.sqr()?;
@@ -506,7 +506,7 @@ pub(super) fn gated_rms_norm_fallback(
     // contiguous CUDA tensor, route the `+ eps` step through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
     // Mirrors the rms_norm_fallback wiring. Falls through to the
-    // candle `+ f64` composite when any precondition fails.
+    // kt `+ f64` composite when any precondition fails.
     let variance_plus_eps = {
         #[cfg(feature = "cuda")]
         {
@@ -524,8 +524,8 @@ pub(super) fn gated_rms_norm_fallback(
     // Phase 7 (#1082): when stable KT routes are enabled, route the RMSNorm-tail
     // `(variance + eps).sqrt().recip()` composite through
     // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
-    // single fused kernel that replaces the two candle calls + the
-    // intermediate sqrt buffer. Falls through to the candle
+    // single fused kernel that replaces the two kt calls + the
+    // intermediate sqrt buffer. Falls through to the kt
     // composite when any precondition fails.
     let rms_inv = {
         #[cfg(feature = "cuda")]
@@ -628,7 +628,7 @@ pub(super) fn causal_conv1d_prefill_with_dtype(
     // Phase 7 (#1082): when stable KT routes are enabled and both pieces are
     // contiguous CUDA tensors of a supported dtype, route the
     // time-axis (axis=2) concat through
-    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
+    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the kt
     // composite when any precondition fails so behavior is
     // identical with the gate off.
     let conv_state_compute = conv_state.to_dtype(compute_dtype)?;
@@ -713,7 +713,7 @@ pub(super) fn causal_conv1d_decode(
     // Phase 7 (#1082): when stable KT routes are enabled and both pieces are
     // contiguous CUDA tensors of a supported dtype, route the
     // decode-path time-axis (axis=2) concat through
-    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
+    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the kt
     // composite when any precondition fails so behavior is
     // identical with the gate off.
     let conv_state_f32 = conv_state.to_dtype(DType::F32)?;
@@ -738,7 +738,7 @@ pub(super) fn causal_conv1d_decode(
     // Phase 7 (#1082): when stable KT routes are enabled, the `sum(2)` reduction along
     // the kernel dim is routed through `kiln_tensor::cuda_sum_axis`
     // via the kt-bridge borrow adapter (NVTX range
-    // `kiln/sum_axis_kt`). Falls through to candle's `sum(2)` when
+    // `kiln/sum_axis_kt`). Falls through to the kt `sum(2)` op when
     // any precondition fails. This is the GDN single-token conv
     // path's per-channel dot-product, called once per layer per
     // decode step — a less-trafficked but consistent migration site
@@ -993,7 +993,7 @@ pub(super) fn gdn_single_token_recurrence(
     // composite runs every GDN decode token on every layer of
     // the 24 GDN layers. Stable KT policy controls the three-op cluster as
     // one route set. Each helper still falls through cleanly when
-    // any single op's preconditions fail (the candle `?`
+    // any single op's preconditions fail (the `?`
     // operator preserves identical numerics).
     let p = {
         #[cfg(feature = "cuda")]
@@ -1374,7 +1374,7 @@ pub(super) fn gdn_chunkwise_recurrence(
 
         // Fused prep: cumsum + decay + exp + masked scales + v_prime +
         // q_s_scaled + decay_last_col + p_last in a single CUDA launch.
-        // Falls back to the candle-op chain when the backend declines
+        // Falls back to the kt-op chain when the backend declines
         // (non-CUDA, non-bf16, envelope violation).
         //
         // Post-conditions on all four paths:
@@ -1439,7 +1439,7 @@ pub(super) fn gdn_chunkwise_recurrence(
                     // `.exp()?.to_dtype(dtype)?` in the chunkwise GDN
                     // decay-matrix prep all migrate under the stable KT route
                     // policy. Each leg
-                    // (EXP, then TO_DTYPE) falls through to the candle
+                    // (EXP, then TO_DTYPE) falls through to the kt
                     // op when its precondition fails, so behavior is
                     // identical with the gates off. These ops run
                     // per chunkwise prep on every GDN layer; the
@@ -1577,7 +1577,7 @@ pub(super) fn gdn_chunkwise_recurrence(
     // time-axis (axis=2) per-chunk concat through
     // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the conv1d
     // prefill/decode cat_dim2 wirings. Falls through to the
-    // candle composite when any precondition fails so behavior
+    // kt composite when any precondition fails so behavior
     // is identical with the gate off. This is the
     // gdn_chunkwise_recurrence final assembly step that joins
     // per-chunk outputs into the seq_len-shaped attention
@@ -1760,8 +1760,8 @@ pub(super) fn gated_deltanet_gates_fallback(
         // contiguous CUDA tensor of a supported dtype, route the
         // `a_log_f32.exp()` step through
         // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp) via
-        // the kt-bridge borrow adapter. Falls through to candle's
-        // `.exp()` on any precondition failure.
+        // the kt-bridge borrow adapter. Falls through to the kt
+        // `.exp()` op on any precondition failure.
         //
         // Same fallback path as the `.neg()` migration immediately below.
         // Wiring the exp step in addition to the neg step
@@ -1787,12 +1787,12 @@ pub(super) fn gated_deltanet_gates_fallback(
         // contiguous CUDA tensor of a supported dtype, route
         // `a_log_exp.neg()` through `kiln_tensor::cuda_activation_unary`
         // with kind 12 (Neg) via the kt-bridge borrow adapter. Falls
-        // through to candle's `.neg()` on any precondition failure.
+        // through to the kt `.neg()` op on any precondition failure.
         //
         // This is the GDN gates fallback path. Wiring here exercises the
         // kt-API on a less-
         // trafficked code path that mirrors the fused kernel's
-        // -exp(A_log) decay computation in candle composites, so kt-API
+        // -exp(A_log) decay computation in kt composites, so kt-API
         // parity coverage extends to the parity baseline itself.
         let neg_decay = {
             #[cfg(feature = "cuda")]

@@ -1,4 +1,4 @@
-//! Metal backend: candle's fused SDPA for the attention hot path, portable
+//! Metal backend: the kiln-owned fused SDPA for the attention hot path, portable
 //! fallback for GDN and paged-decode.
 //!
 //! The chokepoint-routed `sdpa` symbol (imported at module level from the

@@ -163,7 +163,7 @@ pub fn gated_deltanet_forward_streaming(
     // contiguous CUDA tensors of a supported dtype, route the
     // `Tensor::cat(&tile_refs, 1)` step through
     // `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
-    // adapter. Falls through to the candle composite when any
+    // adapter. Falls through to the kt composite when any
     // precondition fails.
     let out = {
         #[cfg(feature = "cuda")]
@@ -626,7 +626,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         // (batch, channel). It returns F32 with SiLU already fused, so the
         // subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Unsupported
         // backends, non-bf16, and kernel_size != 4 all route through the
-        // portable candle path below, which is the parity oracle.
+        // portable kt path below, which is the parity oracle.
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv. At seq_len == 1 the
@@ -666,12 +666,12 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                     reshaped
                 } else {
                     // CP-4 Increment 3 (#1082): the [B,T,C]->[B,C,T] conv-input
-                    // transpose mints a fresh candle id between the in_proj_qkv
+                    // transpose mints a fresh kt tensor id between the in_proj_qkv
                     // keystone output (`mixed_qkv`) and the conv. Wrap it so the
                     // conv backward's input grad flows back to in_proj_qkv. The
                     // transpose adapter materialises a contiguous copy (matching
                     // the `.contiguous()` here), so it's value-faithful. No-op +
-                    // candle fallback unless the gate is on + a tape scope is
+                    // composite fallback unless the gate is on + a tape scope is
                     // active.
                     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
                     #[cfg(any(
@@ -919,9 +919,9 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             // Transpose back to [B, T, qkv_dim].
             //
             // CP-4 Increment 3 (#1082): the [B,C,T]->[B,T,C] conv-output
-            // transpose mints a fresh candle id between the wired SiLU and the
+            // transpose mints a fresh kt tensor id between the wired SiLU and the
             // qkv_split. Wrap it so the split's narrow grads flow back through
-            // the conv. No-op + candle fallback unless the gate is on + a tape
+            // the conv. No-op + composite fallback unless the gate is on + a tape
             // scope is active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
             #[cfg(any(
@@ -960,12 +960,12 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         let (q, k, v, z) = {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
             // CP-4 Increment 3 (#1082): the narrow (QKV split) + reshape ops mint
-            // fresh candle ids between the wired conv output (`mixed_qkv`) and the
+            // fresh kt tensor ids between the wired conv output (`mixed_qkv`) and the
             // head_expand / recur_prep. Wrap each on the kt Tape (narrow adjoint =
             // zero-pad; reshape adjoint = inverse reshape) so the recurrence's
             // dq/dk/dv flow back into `mixed_qkv` (and thence conv → in_proj_qkv).
             // The z reshape connects the in_proj_z keystone output to the
-            // gated-RMSNorm gate input. No-op + candle fallback unless the gate is
+            // gated-RMSNorm gate input. No-op + composite fallback unless the gate is
             // on + a tape scope is active.
             #[cfg(any(
                 feature = "cuda",
@@ -1050,12 +1050,12 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         //
         // Fast paths: Metal/CUDA/ROCm default to fused F32->BF16 kernels for
         // supported bf16 tensors. These collapse the l2-normalize(Q) + scale(Q) +
-        // l2-normalize(K) + dtype-cast chain (~11 candle launches on tiny per-row
+        // l2-normalize(K) + dtype-cast chain (~11 composite launches on tiny per-row
         // tensors at decode shape) into a single launch. Backend route profiles
         // own the accelerated/fallback selection for the process lifetime.
         //
         // Both paths produce bf16 outputs in `input_dtype`; only the kernel
-        // path skips the F32 round-trip through HBM. The candle path is the
+        // path skips the F32 round-trip through HBM. The kt composite path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
         let defer_backend_qk_norm_to_recurrent = {
@@ -1243,13 +1243,13 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                                 .contiguous()?
                                 .reshape((batch, seq_len, nv, dk))?;
                             // CP-4 Increment 3 (#1082): the unsqueeze+expand+
-                            // contiguous+reshape chain mints a fresh candle id
+                            // contiguous+reshape chain mints a fresh kt tensor id
                             // between the wired qk_split (below) and qk_norm. A
                             // single GqaExpandBackward (adjoint = reshape+sum
                             // over the broadcast head sub-dim) keeps the chain
                             // connected so the recurrence's dq/dk reach the
                             // post-split q/k (and thence in_proj_qkv). No-op +
-                            // candle fallback unless the gate is on + a tape
+                            // composite fallback unless the gate is on + a tape
                             // scope is active.
                             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
                             #[cfg(any(
@@ -1664,7 +1664,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         //
         // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
         // the sigmoid + softplus + exp + mul chain into one launch, and the
-        // candle-op reference path for everything outside the kernel's
+        // kt-op reference path for everything outside the kernel's
         // envelope (unsupported backend, non-bf16, nv > 256, or a disabled
         // backend policy route). The two are algorithmically
         // identical — the reference path is the original Phase-6 implementation
@@ -1901,8 +1901,8 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             // bridge the 7 saved tensors (out + q/k/v/beta/g + entry_state)
             // kt->candle here (~7 DtoD copies per GDN layer per step, ×24 GDN
             // layers). `recurrent_result.0`'s id is the production recurrence
-            // output that flows downstream (the post-transpose's
-            // `kt_logits_to_candle` retains it for chaining), so recording it
+            // output that flows downstream (the post-transpose's kt id is
+            // retained by the tape for chaining), so recording it
             // as the node output keeps the recurrence→transpose seam connected.
             #[cfg(any(
                 feature = "cuda",
@@ -1953,7 +1953,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         } else {
             // Phase 6a/CP-4 (#1082) chaining-gap fix: when the recurrence
             // output is head-FIRST (the chunkwise fallback), this transpose to
-            // head-LAST mints a fresh candle id. Route it through the kt Tape so
+            // head-LAST mints a fresh kt tensor id. Route it through the kt Tape so
             // the downstream gated-RMSNorm adapter's `tape_kt_input` chains back
             // to the recurrence node (else the tape fragments here and the GDN
             // LoRA grads never flow). Outside a tape scope it falls through to
@@ -2036,7 +2036,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
         };
         // Reshape to [B, T, v_dim] and cast back to input dtype.
         //
-        // CP-4 Increment 3 (#1082): both ops mint fresh candle ids that sit
+        // CP-4 Increment 3 (#1082): both ops mint fresh kt tensor ids that sit
         // between the wired gated-RMSNorm node and the out_proj keystone. Wrap
         // them on the kt Tape (reshape adjoint = inverse reshape; cast adjoint =
         // dtype round-trip) so the out_proj LoRA grad's `dL/dx` flows back into

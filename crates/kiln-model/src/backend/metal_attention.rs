@@ -23,10 +23,10 @@ pub(super) fn metal_flash_attn_prefill(
     if !metal_sdpa_prefill_available() {
         return Ok(None);
     }
-    // Decline (caller falls back to the portable path) when candle's SDPA
-    // can't handle the shape/dtype. Cheaper than surfacing a kernel error
-    // from inside the fused path. Guards read the kt arg directly and run
-    // BEFORE the candle bridges (#1082 forward-flip).
+    // Decline (caller falls back to the portable path) when the fused Metal
+    // SDPA can't handle the shape/dtype. Cheaper than surfacing a kernel
+    // error from inside the fused path. Guards read the kt arg directly
+    // (#1082 forward-flip).
     if !matches!(
         q.dtype(),
         kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
@@ -93,7 +93,7 @@ pub(super) fn metal_flash_attn_prefill_head_major(
 }
 
 /// Gather K/V from the paged pool via `index_select` on the block table, then
-/// call candle's vectorized SDPA (single-query path). The gather replaces the
+/// call the vectorized Metal SDPA (single-query path). The gather replaces the
 /// slow materializing `paged_cache.read` + naive-softmax+matmul fallback.
 pub(super) fn metal_flash_attn_paged_decode(
     q: &kiln_tensor::Tensor,
@@ -107,8 +107,7 @@ pub(super) fn metal_flash_attn_paged_decode(
 ) -> Result<Option<kiln_tensor::Tensor>> {
     // Gate on everything SDPA can handle. Pool dtype matches q dtype by
     // construction (both come from the same forward config), so only q needs
-    // checking. Guards read the kt arg directly, BEFORE the candle bridges
-    // (#1082 forward-flip).
+    // checking. Guards read the kt arg directly (#1082 forward-flip).
     if !matches!(
         q.dtype(),
         kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32

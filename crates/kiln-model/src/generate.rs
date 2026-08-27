@@ -2855,7 +2855,7 @@ impl ModelRunner {
         // backend's resident activation registry so the inference
         // path's `add_lora_delta_to_base` dispatches through
         // `lora_delta_resident` (on-device LoRA matmul) instead of
-        // candle CPU `compute_lora_delta`. No-op on backends without
+        // the kt CPU `compute_lora_delta`. No-op on backends without
         // registry support.
         if let Err(e) = lora.register_with_backend(&*self.backend) {
             tracing::warn!(error = %e, "failed to register LoRA adapter with backend; \

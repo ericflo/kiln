@@ -500,8 +500,8 @@ pub(super) fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Res
 }
 
 /// `lhs.broadcast_matmul(rhs)` for the `[B, T, K] @ [K, N] -> [B, T, N]` case
-/// that drives every projection in the decoder, without paying for candle's
-/// `broadcast_matmul` of materializing the broadcasted RHS via
+/// that drives every projection in the decoder, without paying for the kt
+/// `broadcast_matmul`'s materialized broadcasted RHS via
 /// `rhs.broadcast_as(...).contiguous()`. nsys (NVTX `kiln/gdn/in_proj` range)
 /// showed that contiguous copy as 78 % of total GPU time at bs=4 on the
 /// CUDA + GDN path — the 168 MB weight tensor was being copied across the
@@ -616,9 +616,9 @@ pub(super) fn runtime_matmul_or_broadcast(
 /// `kiln_tensor::ops::matmul`, whose `MatmulOp` owns native backend dispatch.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to candle's `Tensor::matmul`. NVTX range `kiln/matmul_kt`
+/// through to the kt `Tensor::matmul` op. NVTX range `kiln/matmul_kt`
 /// brackets the migrated call so nsys traces separate the path from
-/// the candle baseline.
+/// the kt composite baseline.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/matmul_kt");
@@ -628,7 +628,7 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // recorded onto the tape. The forward output is the same kt
     // matmul kernel; the difference is that the backward node lives
     // on `Tape` instead of leaving the result as a no-autograd
-    // candle Tensor. Without a scope this returns `Ok(None)` and decode falls
+    // kt Tensor. Without a scope this returns `Ok(None)` and decode falls
     // straight through to the kt-native matmul below.
     // #1082 seam flip: kt-native MatmulBackward recorder — no kt->candle->kt.
     // The recorder is device-dispatched. A scope cannot fall through to the
@@ -1000,21 +1000,17 @@ impl GpuWeights {
 
     /// kt-typed device accessor for the weight tensors (#1082 Tier 3).
     ///
-    /// Returns the `kiln_tensor::Device` corresponding to the candle
-    /// device that backs the `embed_tokens` tensor. Callers (in
-    /// `kiln-server`) that currently do `weights.embed_tokens.device()`
-    /// and feed the resulting candle `&Device` into downstream
-    /// candle APIs can use this accessor to surface a kt Device at the
-    /// public boundary while the internal storage stays candle-typed.
+    /// Returns the `kiln_tensor::Device` backing the `embed_tokens`
+    /// tensor. Callers (in `kiln-server`) that do
+    /// `weights.embed_tokens.device()` get a kt `Device` directly — the
+    /// internal storage is kt-typed, so this accessor is the canonical
+    /// kt-typed device surface on the struct.
     ///
-    /// Until `GpuWeights` migrates off candle Tensors (the Tier 3
-    /// `KtWeights` rewrite this commit is downstream of), this is the
-    /// only canonical kt-typed accessor on the struct's surface.
-    ///
-    /// Always-on (no cuda feature gate): only uses
-    /// `kiln_kt_bridge::kt_device_from_candle`, which is a pure
-    /// `candle <-> kt` Device enum mapping with no CUDA toolchain
-    /// dependency. (#1082)
+    /// Always-on (no cuda feature gate): a pure `kiln_tensor::Device`
+    /// passthrough with no CUDA toolchain dependency. (Historically this
+    /// mapped a candle `Device` across the seam via
+    /// `kiln_kt_bridge::kt_device_from_candle`; the seam is kt-typed
+    /// now.) (#1082)
     pub fn device_kt(&self) -> kiln_tensor::Device {
         // #1082 forward-flip: `embed_tokens` is now a kt tensor, so its
         // `device()` already returns a `kiln_tensor::Device` — identity.
@@ -1042,7 +1038,7 @@ impl GpuWeights {
         kt_contiguous(&self.embed_tokens_t, "embed_tokens_t_kt")
     }
 
-    /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
+    /// Convert `ModelWeights` (CPU bytes) into kt tensors on the given device.
     ///
     /// `config` is used to precompute the rotary `inv_freq` tensor once so the RoPE
     /// hot path does not re-upload it on every call.
@@ -1603,29 +1599,23 @@ impl GpuWeights {
 
     /// kt-typed parallel entry to [`Self::from_model_weights`] (#1082 Tier 3).
     ///
-    /// Takes a `kiln_tensor::Device` instead of candle's `Device`,
-    /// bridges at the boundary, and delegates to the existing
-    /// candle-typed constructor. The returned `GpuWeights` still holds
-    /// candle Tensors internally — the kt typing applies only to the
-    /// public surface so kiln-server can call this without importing
-    /// candle at the call site.
+    /// Takes a `kiln_tensor::Device` and delegates to the same
+    /// constructor. The returned `GpuWeights` holds kt Tensors
+    /// end-to-end, so kiln-server calls this without importing any other
+    /// tensor crate at the call site.
     ///
-    /// Errors when the kt Device has no candle equivalent on this build
-    /// (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU candle
-    /// device by convention — pass `kiln_tensor::Device::Cpu` instead).
-    ///
-    /// Always-on (no cuda feature gate): only uses
-    /// `kiln_kt_bridge::candle_device_from_kt`, which is a pure
-    /// `candle <-> kt` Device enum mapping with no CUDA toolchain
-    /// dependency. (#1082)
+    /// (Historically this bridged a candle `Device` across the seam via
+    /// `kiln_kt_bridge::candle_device_from_kt` — a pure `candle <-> kt`
+    /// Device enum mapping with no CUDA toolchain dependency; the seam is
+    /// kt-typed now.) (#1082)
     pub fn from_model_weights_kt(
         weights: &ModelWeights,
         config: &kiln_core::config::ModelConfig,
         device: &kiln_tensor::Device,
     ) -> Result<Self> {
         // #1082: post-flip `from_model_weights` already takes a kt `Device`
-        // and bridges to candle internally where needed, so this kt entry is
-        // now a straight passthrough (kept for the kiln-server call site).
+        // and is kt-native end-to-end, so this kt entry is now a straight
+        // passthrough (kept for the kiln-server call site).
         Self::from_model_weights(weights, config, device)
     }
 

@@ -1,6 +1,6 @@
-// `Var` is hoisted to the file-level candle import block above with
+// `Var` is hoisted to the file-level kt import block above with
 // `#[allow(unused_imports)]`, so it reaches this `mod tests` via
-// `use super::*;` without an extra inner candle Var import (#1082).
+// `use super::*;` without an extra inner kt Var import (#1082).
 use super::*;
 use crate::backend::cpu::CpuBackend;
 
@@ -5096,8 +5096,8 @@ fn test_model_forward_kv_cache_equivalence() -> Result<()> {
     // With KV cache: prefill first 4 tokens, then decode the 5th
     //
     // Migrated to `_kt` constructor so this site no longer names
-    // candle `DType` or `Device` — the bridge
-    // happens inside `KvCache::new_kt`. (#1082)
+    // candle `DType` or `Device` — `KvCache::new_kt` is an identity
+    // alias now, no bridge. (#1082)
     let mut kv_cache = KvCache::new_kt(
         num_layers,
         num_kv_heads,
@@ -5502,7 +5502,7 @@ struct ParityScenario {
 /// models and asserts the logits agree within `scenario.max_abs_diff`.
 /// Drives both parity tests below; the scenario controls whether the
 /// `MetalBackend` SDPA path activates (head_dim ∈ whitelist) or whether
-/// the portable candle fallback runs.
+/// the portable kt fallback runs.
 ///
 /// Returns `Ok(())` without running if Metal isn't available so the
 /// suite stays portable on Linux + CUDA hosts.
@@ -5643,7 +5643,7 @@ fn run_cpu_metal_parity(scenario: ParityScenario) -> Result<()> {
 }
 
 /// Qwen-shaped: GQA ratio 4, head_dim 128, full attention only. Exercises
-/// `MetalBackend::flash_attn_prefill` (candle SDPA) directly — head_dim
+/// `MetalBackend::flash_attn_prefill` (the fused Metal SDPA) directly — head_dim
 /// 128 is in the SDPA whitelist, seq_len 12 > 8 for the full SDPA kernel
 /// (not the vector path).
 #[cfg(feature = "metal")]
@@ -5669,7 +5669,7 @@ fn test_model_forward_parity_sdpa_path() -> Result<()> {
 
 /// Hybrid full + GDN layers with head_dim 4, below the SDPA whitelist.
 /// `MetalBackend` declines into the portable fallback, so this validates
-/// that the whole candle composition (embed, RMSNorm, RoPE, SwiGLU, naive
+/// that the whole kt composition (embed, RMSNorm, RoPE, SwiGLU, naive
 /// softmax+matmul, GDN recurrent loop) runs correctly on Apple Silicon.
 #[cfg(feature = "metal")]
 #[test]
@@ -6201,8 +6201,8 @@ fn gdn_sequential_reference(
 }
 
 /// Deterministic tensor of the given shape filled with values from a
-/// simple hash of the index. Avoids depending on candle's RNG (which
-/// uses process-global state) and keeps the test reproducible.
+/// simple hash of the index. Avoids depending on the tensor library's RNG
+/// (which uses process-global state) and keeps the test reproducible.
 fn det_tensor(shape: &[usize], scale: f32, bias: f32, device: &Device) -> Result<Tensor> {
     let n: usize = shape.iter().product();
     let data: Vec<f32> = (0..n)
@@ -6420,7 +6420,7 @@ fn test_gdn_single_token_matches_sequential() -> Result<()> {
 /// Correctness test for the vendored kiln-gdn-kernel CUDA fused
 /// forward-substitution kernel.
 ///
-/// Compares the fused kernel output against the per-token candle
+/// Compares the fused kernel output against the per-token kt
 /// fallback on the same random bf16 inputs at kiln's exact GDN config
 /// (B=1, nv=32, C=64, dv=128). Asserts max abs diff < 1e-2 and mean
 /// abs diff < 1e-3 — the fused path uses F32 accumulators and
@@ -7490,9 +7490,9 @@ fn streaming_test_config() -> kiln_core::config::ModelConfig {
 /// boundaries coincide with the smallest legal tile boundary).
 ///
 /// Migrated to `PagedKvCache::new_kt` so this helper no longer names
-/// candle's `DType` at the constructor call; the candle `device`
-/// param is still taken to keep call-site signatures stable (callers
-/// pass `&device` in scope) — bridge to kt happens at the boundary. (#1082)
+/// candle's `DType` at the constructor call; the `device` param is still
+/// taken to keep call-site signatures stable (callers pass `&device` in
+/// scope) — it's already kt, no bridge needed. (#1082)
 fn make_paged_setup(
     config: &kiln_core::config::ModelConfig,
     seq_len: usize,
@@ -8484,7 +8484,7 @@ fn test_model_forward_segment_streaming_matches_monolithic_cpu() -> Result<()> {
 /// Tolerance: 1e-4. The design doc (PROFILING.md §c "CUDA parity")
 /// argues bit-exactness is achievable because GDN recurrent state stays
 /// in F32 and the conv1d F32 promotion makes the conv path
-/// deterministic. In practice, candle CUDA matmul reduction order can
+/// deterministic. In practice, kt CUDA matmul reduction order can
 /// vary with shape, so we use a small FP32 tolerance rather than
 /// strict equality.
 #[test]

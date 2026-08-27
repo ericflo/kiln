@@ -1683,12 +1683,11 @@ impl CudaGraphRunner {
         // #1082: the graph-stable buffers are kt-native and allocated
         // directly on the kt device (`weights.embed_tokens.device()`),
         // so NO candle alloc + per-buffer candle->kt bridge any more.
-        // We still need a candle `CudaStream` for the capture-control
-        // FFI (`begin_capture` / `end_capture` / `capture_status` /
-        // `synchronize`), which only exists on the candle device handle
-        // — so bridge the kt device to candle ONCE for that, and pass
-        // the resulting `stream` into `with_active_cuda_stream` so every
-        // kt op (alloc + the captured forward) lands on it.
+        // The capture-control FFI (`begin_capture` / `end_capture` /
+        // `capture_status` / `synchronize`) used to live on a candle
+        // `CudaStream` handle — capture now runs on the kt context's
+        // default stream directly, so every kt op (alloc + the captured
+        // forward) lands on it.
         let device = weights.embed_tokens.device();
         let dtype = weights.embed_tokens.dtype();
         // (#1082) kt-native capture stream: the model + captured forward run kt

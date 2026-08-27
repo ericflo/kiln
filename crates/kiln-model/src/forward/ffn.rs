@@ -94,7 +94,7 @@ pub fn swiglu_ffn_gated_hidden(
             {
                 if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
                     // Phase 7 (#1082): kt-only. Same FFI symbol as the
-                    // candle path. Result is kt — return it directly.
+                    // kt composite path. Result is kt — return it directly.
                     let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
                         .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
                     synchronize_tensor_ready_for_model_handoff(
@@ -352,10 +352,10 @@ pub(super) fn swiglu_ffn_split_gate_up(
 /// kt-native SwiGLU FFN core (#1082, MLP/FFN region migration —
 /// region 2). Computes `down @ (silu(gate @ x) * (up @ x))` entirely
 /// over `KtTensor` storage so the gate/up matmul outputs and the
-/// silu*mul result never round-trip through candle. This is the
+/// silu*mul result never leave kt storage. This is the
 /// consolidated kt-internal computation for the MLP region; the
-/// candle↔kt bridging (and all the dispatch-eligibility preconditions)
-/// live in the [`try_kt_swiglu_ffn`] wrapper.
+/// dispatch-eligibility preconditions live in the [`try_kt_swiglu_ffn`]
+/// wrapper.
 ///
 /// Inputs are all kt 2D views: `x2d` is `[lead, hidden]`, `gate_t` /
 /// `up_t` are `[hidden, intermediate]`, `down_t` is
@@ -412,8 +412,8 @@ pub(super) fn kt_swiglu_ffn_native(
         } else {
             // Non-BF16 (F16/F32) operands: the substrate composite
             // (silu via cuda_activation_unary(0), then mul via
-            // cuda_elementwise_binary(2)) — identical to the candle
-            // fallback's per-op kt route.
+            // cuda_elementwise_binary(2)) — identical to the kt
+            // fallback's per-op route.
             kiln_tensor::ops::mul_sigmoid_gate(&gate, &up)
                 .map_err(|e| anyhow::anyhow!("kt_swiglu_ffn_native: mul_sigmoid_gate: {e}"))?
         }
@@ -431,27 +431,27 @@ pub(super) fn kt_swiglu_ffn_native(
 /// migration wrapper (region 2). Routes the whole
 /// `down @ (silu(gate @ x) * (up @ x))` MLP region through the
 /// kt-native [`kt_swiglu_ffn_native`] core, keeping intermediates as
-/// `KtTensor` storage (one candle→kt borrow at the input, one kt→candle
-/// copy at the output) instead of bridging at every individual op.
+/// `KtTensor` storage end-to-end (the input seam is an identity alias now)
+/// instead of bridging at every individual op.
 ///
 /// Flattens the leading dims of `x` to a 2D `[lead, hidden]` view
 /// before dispatch (mirroring [`matmul_no_broadcast_copy`] /
 /// [`try_kt_lm_head`]) and reshapes the result back to the input rank.
 ///
 /// Returns `Ok(None)` — falling through to the existing
-/// projection-by-projection candle path — on any of:
+/// projection-by-projection kt path — on any of:
 /// - `accelerator.kt_api_mode = "disabled"`;
 /// - non-CUDA device, or a non-{BF16,F16,F32} / mixed dtype;
 /// - non-contiguous `x` or weights, or weight rank ≠ 2, or a K-dim
 ///   mismatch between `x` and the projections;
 /// - autograd-tracked `x` or an active tape recording scope (those must
-///   keep flowing through the candle / tape-wired silu+mul + LoRA path
+///   keep flowing through the kt / tape-wired silu+mul + LoRA path
 ///   so adapter grads are not severed);
-/// - any kt borrow / matmul failure (the candle path then runs).
+/// - any kt borrow / matmul failure (the kt composite path then runs).
 ///
 /// LoRA and Marlin eligibility is checked by the *caller* (the
 /// `!has_mlp_lora && !has_marlin` guard in [`swiglu_ffn_impl_no_chunk`])
-/// before this is invoked, because those need the standalone candle
+/// before this is invoked, because those need the standalone kt
 /// projections + delta application.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(super) fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> {

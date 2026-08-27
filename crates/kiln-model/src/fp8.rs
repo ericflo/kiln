@@ -17,8 +17,8 @@
 //! kernels (the buffer stays on-device for the whole quant / dequant). CPU
 //! inputs (and any CUDA fast-path precondition failure) fall back to the
 //! host-side implementation below. The only consumer of this module is the
-//! contiguous `KvCache` in `kv_cache.rs`, which bridges its (still candle-
-//! typed) tensors to/from kt at the call boundary.
+//! contiguous `KvCache` in `kv_cache.rs` (kt-typed end-to-end; the call
+//! boundary is an identity alias).
 
 use anyhow::{Context, Result};
 

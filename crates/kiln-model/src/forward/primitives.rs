@@ -13,8 +13,8 @@ use super::*;
 ///
 /// Phase 7 (#1082): when stable KT routes are enabled and inputs are contiguous CUDA
 /// tensors of a supported dtype, route the dim-0 `index_select`
-/// through `kiln_tensor::cuda_index_select_dim0`. Falls through to
-/// candle's `index_select` when any precondition fails.
+/// through `kiln_tensor::cuda_index_select_dim0`. Falls through to the
+/// kt `index_select` op when any precondition fails.
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
     // #1082: kt 1-D index tensor on the weights' device (no candle `Tensor::new`).
     let index = Tensor::from_vec_on(
@@ -86,12 +86,13 @@ pub(super) fn embedding_lookup_with_index(
 /// dim-0 gather via `kiln_tensor::cuda_index_select_dim0` and returns
 /// the gathered rows as a `KtTensor` (no candle in the signature). This
 /// is the consolidated kt-internal computation for the embedding region;
-/// the candle↔kt bridging lives in the thin
-/// [`try_kt_embedding_lookup`] wrapper (hidden-state side) and the
-/// [`GpuWeights::embed_tokens_kt`] accessor (weight side).
+/// the hidden-state and weight-side seams
+/// ([`try_kt_embedding_lookup`] and the
+/// [`GpuWeights::embed_tokens_kt`] accessor) are thin identity shims now
+/// that both sides are kt.
 ///
-/// Bit-exact memcpy gather — identical byte output to candle's
-/// `index_select` (no arithmetic, no reordering). The `kiln/embedding_kt`
+/// Bit-exact memcpy gather (no arithmetic, no reordering) — identical
+/// byte output to the `index_select` op. The `kiln/embedding_kt`
 /// NVTX range is opened by the calling wrappers
 /// ([`try_kt_embedding_lookup`] and [`try_kt_embedding_lookup_from_weights`])
 /// so it brackets the full migrated computation (borrow-in + gather +
@@ -106,17 +107,17 @@ pub(super) fn kt_embedding_lookup_native(
         .map_err(|e| anyhow::anyhow!("kt_embedding_lookup_native: index_select failed: {e}"))
 }
 
-/// Phase 7 (#1082) — kt-API embedding-lookup candle-boundary wrapper.
-/// Borrows the candle `embed_weights` + `index` as kt tensors, runs the
-/// kt-native gather ([`kt_embedding_lookup_native`]), and bridges the kt
-/// output back to a candle `Tensor` so the public
+/// Phase 7 (#1082) — kt-API embedding-lookup seam wrapper.
+/// Takes the kt `embed_weights` + `index` (identity alias — both sides kt),
+/// runs the kt-native gather ([`kt_embedding_lookup_native`]), and returns
+/// the kt `Tensor` output so the public
 /// [`embedding_lookup`] / [`embedding_lookup_with_index`] signatures stay
-/// candle-typed. The candle↔kt boundaries are: borrow-in (weight +
-/// index) and dtod-copy-out (gathered rows).
+/// kt-typed. The seams are: borrow-in (weight +
+/// index) and the identity copy-out (gathered rows).
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// non-contiguous, unsupported dtype, indices not U32) so the
-/// caller falls through to candle's `index_select`.
+/// caller falls through to the kt `index_select` op.
 #[cfg(feature = "cuda")]
 pub(super) fn try_kt_embedding_lookup(
     embed_weights: &Tensor,
@@ -139,31 +140,31 @@ pub(super) fn try_kt_embedding_lookup(
 
     kiln_nvtx::range!(c"kiln/embedding_kt");
 
-    // candle→kt boundary (weight + index borrow-in).
+    // kt seam (weight + index borrow-in; identity alias now).
     // kt-internal computation.
     let out_kt = match kt_embedding_lookup_native(embed_weights, index) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    // kt→candle boundary (gathered rows copy-out).
+    // kt seam (gathered rows, identity copy-out).
     let out = out_kt;
     Ok(Some(out))
 }
 
 /// Phase 7 (#1082) — weight-aware kt-native embedding lookup at the
 /// embedding→layer0 seam. Borrows the token-embedding table through
-/// [`GpuWeights::embed_tokens_kt`] (the weight-side candle→kt boundary)
-/// and the U32 index through the kt-bridge, runs the kt-native gather
-/// ([`kt_embedding_lookup_native`]), and bridges the gathered rows back
-/// to candle so the still-candle transformer layers consume an
-/// unchanged candle `Tensor`.
+/// [`GpuWeights::embed_tokens_kt`] (the weight-side accessor)
+/// and the U32 index (identity alias, both sides kt), runs the kt-native gather
+/// ([`kt_embedding_lookup_native`]), and returns the gathered rows as kt so
+/// the kt transformer layers consume an
+/// unchanged kt `Tensor`.
 ///
 /// This is the consolidated kt-internal embedding path used by the
 /// production `embedding_lookup_from_weights*` callers (the non-stub
 /// `[vocab, hidden]` layout). Returns `Ok(None)` on any
 /// incompatibility (gate off, tape scope active, non-CUDA,
 /// non-contiguous, unsupported dtype, indices not U32) so the caller
-/// falls through to the candle `embedding_lookup*` path. The tape path
+/// falls through to the kt `embedding_lookup*` path. The tape path
 /// is intentionally NOT handled here — when a tape scope is active the
 /// caller's `embedding_lookup*` entry establishes the gathered activation as
 /// an intentional frozen tape leaf; we defer to it by returning `Ok(None)` so
@@ -224,7 +225,7 @@ pub(super) fn raw_embedding_lookup_from_weights(
     }
     // Non-stub `[vocab, hidden]` layout: route the gather through the
     // weight-aware kt-native path (using `embed_tokens_kt()`) when
-    // eligible; fall through to the candle `embedding_lookup` otherwise.
+    // eligible; fall through to the kt `embedding_lookup` otherwise.
     #[cfg(feature = "cuda")]
     {
         let index = Tensor::from_vec_on(
@@ -284,7 +285,7 @@ pub(super) fn raw_embedding_lookup_from_weights_with_index(
 
     // Non-stub `[vocab, hidden]` layout: route the gather through the
     // weight-aware kt-native path (using `embed_tokens_kt()`) when
-    // eligible; fall through to the candle `embedding_lookup_with_index`.
+    // eligible; fall through to the kt `embedding_lookup_with_index`.
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_embedding_lookup_from_weights(index, weights)? {
         return Ok(out);
@@ -611,8 +612,8 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // Phase 7 (#1082): when stable KT routes are enabled and `x` is a contiguous CUDA
     // tensor in the {F32, BF16, F16} triangle, route the BF16→F32
     // promotion at the RMSNorm fallback entry through
-    // `kiln_tensor::cuda_cast`. Falls through to candle's
-    // `.to_dtype()` when any precondition fails so behavior is
+    // `kiln_tensor::cuda_cast`. Falls through to the kt
+    // `.to_dtype()` op when any precondition fails so behavior is
     // identical with the gate off.
     let x_f32 = {
         #[cfg(feature = "cuda")]
@@ -631,7 +632,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // a contiguous CUDA tensor, route the `mean_keepdim(-1)` step
     // through `kiln_tensor::cuda_mean_last_axis` plus a zero-cost
     // `unsqueeze(-1)` to restore the trailing-dim shape. Falls
-    // through to the candle composite when any precondition fails
+    // through to the kt composite when any precondition fails
     // so behavior is identical with the gate off.
     let sq = x_f32.sqr()?;
     let variance = {
@@ -651,9 +652,9 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // Phase 7 (#1082): when stable KT routes are enabled and `variance` is a
     // contiguous CUDA tensor, route the `+ eps` step through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar) — a
-    // single-kernel dispatch instead of the candle composite.
+    // single-kernel dispatch instead of the kt composite.
     // Mirrors the l2_normalize and softplus add-scalar wirings.
-    // Falls through to the candle `+ f64` composite when any
+    // Falls through to the kt `+ f64` composite when any
     // precondition fails so behavior is identical with the gate
     // off.
     let variance_plus_eps = {
@@ -674,8 +675,8 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // contiguous CUDA F32 tensor, route the
     // `.sqrt()?.recip()?` composite (the RMSNorm tail) through
     // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
-    // single fused kernel that replaces the two candle calls + the
-    // intermediate sqrt buffer. Falls through to the candle
+    // single fused kernel that replaces the two kt calls + the
+    // intermediate sqrt buffer. Falls through to the kt
     // composite when any precondition fails so behavior is
     // identical with the gate off.
     let rms_inv = {
@@ -720,13 +721,13 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
 }
 
 /// Phase 7 (#1082) — kt-API `mean_keepdim(-1)` migration helper.
-/// Routes a contiguous CUDA candle tensor through
+/// Routes a contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_mean_last_axis` (which reduces the trailing
 /// axis) and re-applies `unsqueeze(-1)` so the output shape
 /// matches `mean_keepdim(-1)`.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/mean_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -958,7 +959,7 @@ pub(super) fn rotary_embedding_from_tables(
                     &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
                 ) {
                     // Phase 7 (#1082): kt-only. Same FFI symbol as the
-                    // candle path.
+                    // kt composite path.
                     // #1082 forward-flip: kt-native — return the kt outputs
                     // directly (no candle round-trip).
                     let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
@@ -1004,7 +1005,7 @@ pub(super) fn rotary_embedding_from_tables(
 /// `kiln/residual`. Under an active tape scope
 /// this routes through `kiln_tensor::ops::add` and records an
 /// `AddBackward` node (CP-4 shadow-tape adapter #7); otherwise it is the
-/// plain candle add, bit-identical to the prior `(a + b)?` expression.
+/// plain kt add, bit-identical to the prior `(a + b)?` expression.
 pub(super) fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     // (#1082) Vulkan added: device-agnostic pure-kt AddBackward recorder. The
     // residual add is on the critical path between every attn/MLP subblock and
@@ -1152,7 +1153,7 @@ pub(super) fn apply_rope(
     //
     // Phase 7 (#1082): when stable KT routes are enabled and the inputs satisfy
     // the kt-bridge borrow preconditions, route through
-    // `kiln_tensor::cuda_concat`. Falls through to the candle
+    // `kiln_tensor::cuda_concat`. Falls through to the kt
     // `Tensor::cat` composite when any precondition fails.
     let out = match x_pass {
         Some(pass) => {
@@ -1190,12 +1191,12 @@ pub(super) fn apply_rope(
 }
 
 /// Phase 7 (#1082) — kt-API last-dim concat migration helper.
-/// Routes contiguous CUDA candle tensors of a supported dtype
+/// Routes contiguous CUDA kt tensors of a supported dtype
 /// through `kiln_tensor::cuda_concat` along the trailing axis.
 ///
 /// Returns `Ok(None)` on any incompatibility (empty input, mixed
 /// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
-/// rank-0) so the caller falls through to the candle composite.
+/// rank-0) so the caller falls through to the kt composite.
 /// NVTX range `kiln/concat_last_dim_kt` brackets the migrated call
 /// so nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1240,13 +1241,13 @@ pub(crate) fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor
 }
 
 /// Phase 7 (#1082) — kt-API axis-0 concat migration helper. Routes
-/// contiguous CUDA candle tensors of a supported dtype through
+/// contiguous CUDA kt tensors of a supported dtype through
 /// `kiln_tensor::cuda_concat(_, 0)`.
 ///
 /// Returns `Ok(None)` on any incompatibility (empty input, mixed
 /// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
 /// rank-0, or mismatched non-axis-0 dim) so the caller falls
-/// through to the candle composite. NVTX range
+/// through to the kt composite. NVTX range
 /// `kiln/cat_dim0_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1290,12 +1291,12 @@ pub(super) fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API axis-1 concat migration helper. Routes
-/// contiguous CUDA candle tensors of a supported dtype through
+/// contiguous CUDA kt tensors of a supported dtype through
 /// `kiln_tensor::cuda_concat(_, 1)`.
 ///
 /// Returns `Ok(None)` on any incompatibility (empty input, mixed
 /// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
-/// rank < 2) so the caller falls through to the candle composite.
+/// rank < 2) so the caller falls through to the kt composite.
 /// NVTX range `kiln/cat_dim1_kt` brackets the migrated call so
 /// nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1339,12 +1340,12 @@ pub(super) fn try_kt_cat_dim1(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API axis-2 concat migration helper. Routes
-/// contiguous CUDA candle tensors of a supported dtype through
+/// contiguous CUDA kt tensors of a supported dtype through
 /// `kiln_tensor::cuda_concat(_, 2)`.
 ///
 /// Returns `Ok(None)` on any incompatibility (empty input, mixed
 /// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
-/// rank < 3) so the caller falls through to the candle composite.
+/// rank < 3) so the caller falls through to the kt composite.
 /// NVTX range `kiln/cat_dim2_kt` brackets the migrated call so
 /// nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1388,13 +1389,13 @@ pub(super) fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API add-scalar migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_scalar_op` with kind tag 0 (AddScalar) for
-/// the candle `Tensor + scalar` (`Add<f64>`) shape.
+/// the kt `Tensor + scalar` (`Add<f64>`) shape.
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0, or non-finite scalar) so the
-/// caller falls through to the candle composite. NVTX range
+/// caller falls through to the kt composite. NVTX range
 /// `kiln/add_scalar_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
@@ -1427,12 +1428,12 @@ pub(crate) fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API neg migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 12 (Neg).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.neg()`. NVTX range `kiln/neg_kt` brackets the
+/// the kt `.neg()` op. NVTX range `kiln/neg_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 #[cfg(feature = "cuda")]
@@ -1461,12 +1462,12 @@ pub(crate) fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API sqrt migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 14 (Sqrt).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.sqrt()`. NVTX range `kiln/sqrt_kt` brackets the
+/// the kt `.sqrt()` op. NVTX range `kiln/sqrt_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 #[cfg(feature = "cuda")]
@@ -1495,15 +1496,15 @@ pub(super) fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API rsqrt migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 28 (Rsqrt).
 /// Computes `1 / sqrt(x)` in a single kernel pass, replacing the
-/// candle `sqrt().recip()` composite which makes two passes through
+/// `sqrt().recip()` composite which makes two passes through
 /// device memory and allocates a transient sqrt-output buffer.
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle composite. NVTX range `kiln/rsqrt_kt` brackets the
+/// the kt composite. NVTX range `kiln/rsqrt_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 ///
@@ -1511,7 +1512,7 @@ pub(super) fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 /// API calls in `forward.rs` (candle 0.9 has no rsqrt method). The
 /// production RMSNorm-tail `(variance + eps).sqrt().recip()` sites
 /// (5+ of them) can be ported to call this helper directly in
-/// follow-up commits — each port replaces two candle calls + one
+/// follow-up commits — each port replaces two kt calls + one
 /// allocation with a single fused kernel.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
@@ -1539,16 +1540,16 @@ pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API binary `maximum(a, b)` migration helper.
-/// Routes a pair of same-shape, same-dtype contiguous CUDA candle
+/// Routes a pair of same-shape, same-dtype contiguous CUDA kt
 /// tensors through `kiln_tensor::cuda_binary_minmax` with kind
 /// tag 1 (Max). NaN propagation matches `f32::max` semantics —
 /// the non-NaN operand wins when one side is NaN, which matches
-/// the candle `Tensor::maximum` contract.
+/// the kt `Tensor::maximum` contract.
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// unsupported dtype, non-contiguous, dtype mismatch, shape
-/// mismatch, rank-0) so the caller falls through to the candle
-/// `.maximum(other)`. NVTX range `kiln/max_binary_kt` brackets the
+/// mismatch, rank-0) so the caller falls through to the kt
+/// `.maximum(other)` op. NVTX range `kiln/max_binary_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 #[cfg(feature = "cuda")]
@@ -1581,12 +1582,12 @@ pub(super) fn try_kt_max_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>
 }
 
 /// Phase 7 (#1082) — kt-API abs migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 13 (Abs).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.abs()`. NVTX range `kiln/abs_kt` brackets the
+/// the kt `.abs()` op. NVTX range `kiln/abs_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 ///
@@ -1629,12 +1630,12 @@ pub(super) fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API sin migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 7 (Sin).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.sin()`. NVTX range `kiln/sin_kt` brackets the
+/// the kt `.sin()` op. NVTX range `kiln/sin_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 #[cfg(feature = "cuda")]
@@ -1662,12 +1663,12 @@ pub(super) fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API cos migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 8 (Cos).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.cos()`. NVTX range `kiln/cos_kt` brackets the
+/// the kt `.cos()` op. NVTX range `kiln/cos_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite. Mirrors `try_kt_sin` (commit 728b3917).
 #[cfg(feature = "cuda")]
@@ -1695,12 +1696,12 @@ pub(super) fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API exp migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 6 (Exp).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.exp()`. NVTX range `kiln/exp_kt` brackets the
+/// the kt `.exp()` op. NVTX range `kiln/exp_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite. Mirrors `try_kt_sin` / `try_kt_cos`
 /// (commits 728b3917 / 6c22330f).
@@ -1730,17 +1731,17 @@ pub(crate) fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API recip migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.recip()`. NVTX range `kiln/recip_kt` brackets the
+/// the kt `.recip()` op. NVTX range `kiln/recip_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite. Mirrors `try_kt_sqrt` / `try_kt_neg` /
 /// `try_kt_abs`.
 ///
-/// IEEE semantics match the candle CPU reference: `1.0 / 0 = ±inf`
+/// IEEE semantics match the kt CPU reference: `1.0 / 0 = ±inf`
 /// and `1.0 / NaN = NaN`. See `csrc/activation.cu` `KIND_RECIP`
 /// case (added in commit 7a3e1e77 for the same #1082 series).
 ///
@@ -1773,18 +1774,18 @@ pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API log migration helper. Routes a
-/// contiguous CUDA candle tensor through
+/// contiguous CUDA kt tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 5 (Log =
 /// natural log, `ln(x)`).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0) so the caller falls through to
-/// the candle `.log()`. NVTX range `kiln/log_kt` brackets the
+/// the kt `.log()` op. NVTX range `kiln/log_kt` brackets the
 /// migrated call so nsys traces separate the path from the
 /// baseline composite. Mirrors `try_kt_exp` (212d5b83) and the
 /// other Phase 7 elementwise helpers.
 ///
-/// IEEE semantics match the candle CPU reference: `ln(0) = -inf`,
+/// IEEE semantics match the kt CPU reference: `ln(0) = -inf`,
 /// `ln(<0) = NaN`. See `csrc/activation.cu` `KIND_LOG` case.
 ///
 /// First call-site migration: the `softplus` helper's
@@ -1815,12 +1816,12 @@ pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
 }
 
 /// Phase 7 (#1082) — kt-API dtype-cast migration helper. Routes a
-/// contiguous CUDA candle tensor through `kiln_tensor::cuda_cast`
+/// contiguous CUDA kt tensor through `kiln_tensor::cuda_cast`
 /// for the {F32 ↔ BF16 ↔ F16} triangle.
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
 /// dtype, non-contiguous, rank-0, target == source) so the caller
-/// falls through to candle's `.to_dtype(target)`. NVTX range
+/// falls through to the kt `.to_dtype(target)` op. NVTX range
 /// `kiln/to_dtype_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite. Mirrors the
 /// other Phase 7 elementwise helpers.
@@ -1837,7 +1838,7 @@ pub(super) fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor
         return Ok(None);
     }
     // Restrict to the {F32, BF16, F16} cast triangle that `cuda_cast`
-    // supports; everything else falls through to candle.
+    // supports; everything else falls through to the kt composite.
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         || !matches!(target, DType::F32 | DType::BF16 | DType::F16)
     {

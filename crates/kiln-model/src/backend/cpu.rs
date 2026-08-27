@@ -1,5 +1,5 @@
 //! Portable fallback backend: every kernel method returns `Ok(None)` so
-//! the caller falls back to the candle-op composition that runs on any
+//! the caller falls back to the kt-op composition that runs on any
 //! device. Used on CPU, on Metal until Phase 2 adds a real backend, and
 //! as a safe default for any future device.
 

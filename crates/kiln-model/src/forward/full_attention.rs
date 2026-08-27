@@ -710,28 +710,29 @@ pub fn gqa_attention_prepare_prefill(
 /// (`kiln_tensor::ops::{matmul_rhs_transposed, matmul}`) with the active
 /// backend's matmul contract owning native dispatch. The scale,
 /// causal mask, and softmax between the two matmuls are computed by the
-/// EXISTING candle / kt-softmax-gated ops (`affine` div, the additive `-inf`
+/// EXISTING kt composite ops (the `affine` div, the additive `-inf`
 /// `broadcast_add` mask via [`apply_causal_mask_with_offset`], and
-/// [`cuda_softmax_last_dim`]) — left candle on purpose so the path stays
-/// bit-exact with the candle parity oracle (reproducing the affine div and
-/// the broadcast `-inf` mask in a different kt kernel risks rounding drift).
+/// [`cuda_softmax_last_dim`]) — left as the kt composite on purpose so the
+/// path stays bit-exact with the kt parity oracle (reproducing the affine
+/// div and the broadcast `-inf` mask in a different kt kernel risks
+/// rounding drift).
 ///
 /// Returns the head-FIRST `attn_output` `[B, nq, T, hd]` (BEFORE the caller's
 /// transpose+reshape-back and BEFORE the `try_tape_sdpa_fallback_cuda`
 /// adapter) so the caller's tape/decline/reshape logic is byte-for-byte
 /// unchanged. Returns `Ok(None)` — falling through to the caller's existing
-/// candle `broadcast_matmul` pair — on any of:
+/// kt `broadcast_matmul` pair — on any of:
 /// - `accelerator.kt_api_mode = "disabled"`;
 /// - non-CUDA device, non-{BF16,F16,F32} / mixed dtype, or a non-contiguous
 ///   operand;
-/// - autograd-tracked `q` (the candle `loss.backward()` parity oracle keeps
+/// - autograd-tracked `q` (the kt `loss.backward()` parity oracle keeps
 ///   the differentiable composite) OR an active tape recording scope (so the
 ///   caller's `try_tape_sdpa_fallback_cuda` records the analytic backward on
-///   the candle-computed `attn_output`, exactly as today);
-/// - any kt borrow / matmul / copy-back failure (the candle path then runs).
+///   the kt-computed `attn_output`, exactly as today);
+/// - any kt borrow / matmul / copy-back failure (the kt composite then runs).
 ///
-/// Bit-exact to the candle fallback by construction: on CUDA the request ops
-/// bottom out in the same cublasLt GEMM family the candle `broadcast_matmul`
+/// Bit-exact to the kt fallback by construction: on CUDA the request ops
+/// bottom out in the same cublasLt GEMM family the kt `broadcast_matmul`
 /// lowers to, and the score matmul uses the RHS-transposed entry to avoid
 /// materialising `k^T`. The intervening scale/mask/softmax ops are physically
 /// unchanged. NVTX range `kiln/gqa_sdpa_kt` brackets the migrated region.
@@ -746,11 +747,11 @@ pub(super) fn try_kt_gqa_sdpa_matmuls(
     if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
-    // The autograd / tape paths must run the candle composite: an
-    // autograd-tracked `q` drives the candle `loss.backward()` parity gate
-    // (a kt copy-out would sever it), and an active tape scope means the
+    // The autograd / tape paths must run the kt composite: an
+    // autograd-tracked `q` drives the kt `loss.backward()` parity gate
+    // (a copy-out would sever it), and an active tape scope means the
     // caller's `try_tape_sdpa_fallback_cuda` will record the analytic
-    // backward on the candle `attn_output` — so the candle ops must run.
+    // backward on the kt-computed `attn_output` — so the kt ops must run.
     if q.track_op() || crate::tape_forward::tape_scope_active() {
         return Ok(None);
     }
@@ -1067,11 +1068,10 @@ pub fn gqa_attention_core_prefill(
         // tape-authoritative backward reaches the q/k/v (LoRA) projections.
         // No-ops (returns None) in every other configuration — default
         // training/inference is unchanged and falls through below.
-        // #1082: tape flash-attn + the training CustomOp are candle islands.
-        // Bridge q/k/v kt->candle only when the tape is active / training.
-        // #1082 seam flip: kt-native flash-attn + reshape recorders — no kt->candle->kt
-        // at the attention seam (q/k/v + the attn output stay kt; the downstream
-        // reshape chains kt-native to o_proj).
+        // #1082: the tape flash-attn + training CustomOp islands were
+        // candle-typed; both flipped kt-native (no kt->candle->kt bridge
+        // needed) — q/k/v + the attn output stay kt, the downstream reshape
+        // chains kt-native to o_proj.
         #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
         if crate::tape_forward::tape_scope_active() {
             if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_kt(
@@ -1172,9 +1172,9 @@ pub fn gqa_attention_core_prefill(
     let scale = (head_dim as f64).sqrt();
     // #1082 region 3: consolidate the fallback's two cublasLt matmuls
     // (`q @ kᵀ` and `softmax @ v`) into the kt substrate, keeping the
-    // intervening scale / causal-mask / softmax on candle for bit-exactness.
+    // intervening scale / causal-mask / softmax on the kt composite for bit-exactness.
     // Fires ONLY on the plain inference path (gate on, !track_op, no tape
-    // scope); declines to `None` otherwise so the candle composite below runs
+    // scope); declines to `None` otherwise so the kt composite below runs
     // unchanged — including for the tape/decline paths the adapter relies on.
     // The helper returns the SAME head-FIRST `[B, nq, T, hd]` `attn_output`,
     // so the `try_tape_sdpa_fallback_cuda` adapter + transpose/reshape-back
@@ -1203,7 +1203,7 @@ pub fn gqa_attention_core_prefill(
     // tape-authoritative backward reaches the q/k/v (LoRA) projections on the
     // NON-flash path (head_dim ∉ {128,256}). No-ops (returns None) in every
     // other configuration — default training/inference is unchanged and falls
-    // through to the plain candle transpose+reshape below. Records on the
+    // through to the plain kt transpose+reshape below. Records on the
     // head-FIRST `attn_output` (BEFORE the reshape-back), with the pre-expand
     // head-first q/k_he/v_he as inputs; then chains the transpose+reshape so
     // the tape stays connected to o_proj (else it fragments at the reshape).
@@ -1444,14 +1444,14 @@ pub fn gqa_attention_pre_o_chunked_prefill(
     Ok(output)
 }
 
-/// CP-4 (#1082) Increment 7 helper: reshape a candle tensor, routing through
+/// CP-4 (#1082) Increment 7 helper: reshape a kt tensor, routing through
 /// the kt `Tape` (`try_tape_reshape_cuda`) when a tape scope is active so the
 /// reshape stays connected to the upstream producer (chains its input) and
 /// becomes a retained output the downstream consumer can pick up. Falls through
-/// to a plain candle `.reshape()` when the tape adapter declines (no scope,
+/// to a plain kt `.reshape()` when the tape adapter declines (no scope,
 /// non-CUDA, or envelope miss).
 ///
-/// `dims` is the candle reshape spec (may contain one inferred `()` axis); the
+/// `dims` is the kt reshape spec (may contain one inferred `()` axis); the
 /// kt reshape needs concrete dims, so the inferred axis is resolved from the
 /// input's element count before recording.
 pub(super) fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
@@ -1561,7 +1561,7 @@ pub(super) fn fresh_contig_full_attn(x: &Tensor, context: &str) -> Result<Tensor
 /// routing through the kt `Tape` (`try_tape_transpose_cuda`, which materialises
 /// a contiguous output) when a tape scope is active so the chain stays
 /// connected across the naive-SDPA layout transpose. Falls through to the plain
-/// candle `transpose().contiguous()` otherwise.
+/// kt `transpose().contiguous()` otherwise.
 pub(super) fn tape_transpose_contig_full_attn(
     x: &Tensor,
     axis_a: usize,
@@ -1586,7 +1586,7 @@ pub(super) fn tape_transpose_contig_full_attn(
 }
 
 /// A single axis spec for [`tape_reshape_full_attn`]: either a fixed size or the
-/// single inferred axis (`Infer`, the candle `()` placeholder).
+/// single inferred axis (`Infer`, the kt `()` placeholder).
 #[derive(Clone, Copy)]
 pub(super) enum ReshapeArg {
     Size(usize),
@@ -1647,8 +1647,8 @@ pub(super) fn resolve_reshape_dims(elem_count: usize, dims: &[ReshapeArg]) -> Op
     Some(out)
 }
 
-/// Candle reshape honouring the [`ReshapeArg`] spec (resolves the inferred axis
-/// the same way candle's tuple-with-`()` reshape does).
+/// Reshape honouring the [`ReshapeArg`] spec (resolves the inferred axis
+/// the same way the tuple-with-`()` reshape does).
 pub(super) fn candle_reshape_with_spec(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     match resolve_reshape_dims(x.elem_count(), dims) {
         Some(concrete) => Ok(x.reshape(concrete)?),
@@ -1786,9 +1786,9 @@ pub fn gqa_attention_pre_o(
         // ([B, S, H*hd] -> [B, S, H, hd]) through the kt `Tape` so the chain
         // from q_proj (the LoRA keystone) stays connected into q_norm/rope/SDPA
         // on the naive SDPA-fallback path (tiny-model head_dim<128). Plain
-        // candle `.reshape()` mints a fresh id that severs the tape, leaving
-        // q_norm's input a fresh-borrow island. Falls through to candle when
-        // the gate is off / no tape scope / non-CUDA.
+        // kt `.reshape()` mints a fresh id that severs the tape, leaving
+        // q_norm's input a fresh-borrow island. Falls through to the kt
+        // composite when the gate is off / no tape scope / non-CUDA.
         let q = tape_reshape_full_attn(
             q_raw,
             &[
@@ -1923,8 +1923,9 @@ pub fn gqa_attention_pre_o(
     // CP-4 (#1082) Increment 7: route the layout transpose through the kt
     // `Tape` (`tape_transpose_contig_full_attn`) so the chain from rope (Q/K)
     // and the V reshape stays connected to the SDPA-fallback inputs. A plain
-    // candle `transpose().contiguous()` would mint a fresh id and sever the
-    // tape between rope/reshape and SDPA. Falls through to candle otherwise.
+    // kt `transpose().contiguous()` would mint a fresh id and sever the
+    // tape between rope/reshape and SDPA. Falls through to the kt composite
+    // otherwise.
     let (q, k, v) = {
         (
             tape_transpose_contig_full_attn(&q, 1, 2)?,
@@ -2559,7 +2560,7 @@ pub(super) fn try_flash_attn_paged_decode(
                 // Phase 7 (#1082): route through the new kt-typed
                 // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
                 // outputs` entry (`aab07fa7`). Bit-exact: bottoms out
-                // in the same FFI symbol as the candle wrapper. The
+                // in the same FFI symbol as the former candle wrapper. The
                 // kt entry writes through the caller-owned `(attn_out,
                 // softmax_lse)` pinned by the captured-graph runner,
                 // preserving the dangling-pointer-fix contract from

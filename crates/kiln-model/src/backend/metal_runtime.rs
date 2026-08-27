@@ -437,9 +437,9 @@ impl AttentionBackend for MetalBackend {
         total_seqlen_k: usize,
         softmax_scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082 forward-flip: trait surface is kt; bridge each kt arg to a
-        // candle CPU local (host round-trip, matching this backend's
-        // CPU-resident model), then delegate to the unchanged candle helper.
+        // #1082 forward-flip: trait surface is kt; the args are read
+        // host-side (round-trip, matching this backend's CPU-resident
+        // model), then delegated to the unchanged kt Metal helper.
         if !metal_paged_attn_decode_contiguous_supports(
             q,
             k_pool,
@@ -553,7 +553,7 @@ impl AttentionBackend for MetalBackend {
     }
 
     /// Gather K/V from the paged pool via `index_select` on the block table,
-    /// then call candle's vectorized SDPA (single-query path). The gather
+    /// then call the vectorized Metal SDPA (single-query path). The gather
     /// replaces the slow materializing `paged_cache.read` +
     /// naive-softmax+matmul fallback — same result, one fused kernel.
     fn runtime_flash_attn_paged_decode(
