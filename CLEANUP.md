@@ -6210,3 +6210,59 @@ headline net **−40** lines.
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 106 —
 headline net **−37** lines.
+
+## Cleanup Agent (round 107 — bench-results orphan audit; 2 dead GGUF-era bench JSONs deleted)
+
+**Date:** 2026-08-27
+
+**Scope:** `bench-results/` (35 tracked files) orphan sweep — every file
+basename probed for references across scripts/, .github/, docs/, crates/,
+README.md; plus partial-name probing for the basename-orphans.
+
+**Findings (7 basename-orphans adjudicated):**
+- **DELETED (2):** `bench-results/llama-bench.json` (120 lines) and
+  `bench-results/llama-bench-a6000-post536.json` (175 lines) — raw
+  llama-bench-format outputs of the removed GGUF model path
+  (`model_filename: ...qwen3.5-4b-bf16.gguf`); zero references
+  basename- and partial-name-; no script writes them
+  (repo-wide `llama` audit: all remaining refs are unrelated provider
+  lists / tokenizer fixtures / schema comments). Round-63 orphan-deletion
+  precedent applies.
+- **KEPT (1):** `concurrent-batched-decode-2026-05-26.md` — orphan by
+  reference, but it is the canonical DoD measurement record for issue
+  #1082 (shipped feature); deleting DoD evidence of landed work is
+  evidence destruction, not cleanup.
+- **LIVE (4):** `candle-api-surface.*` (5 refs — candle-removal
+  evidence), `multi-gpu-seam.*` (4), `substrate-validate-2026-05-23.md`
+  (13), `customop-audit.*` (6), `dtype-usage.*` (11), `kiln-bench.json`
+  (578 `kiln-bench` refs) — all live by partial-name references.
+
+**Net:** −295 lines (2 files), 0 insertions.
+
+**Verification (orchestrator, own runs):**
+- `git status` clean (committed); tree still tracks 33 bench-results files.
+- Both Python gates unaffected (data files, not code).
+- CI green on the prior HEAD (0377b5d36); this push adds one
+  repository-checks pass.
+
+**Also this round (verification-only, 0 deletions):**
+`docs/CONFIGURATION.md` — the 17 dead env-var names found by the
+systematic live-contract sweep (KILN_ROCM_W8A16/W8A8/W8A8_SAMPLED_LM_HEAD,
+KILN_DISABLE_RMSNORM_BACKWARD, KILN_DISABLE_FUSED_PAGED_DECODE,
+KILN_DISABLE_FUSED_L2_QK_NORM, KILN_DISABLE_PARALLEL_PACK,
+KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER,
+KILN_DISABLE_CUDA_BF16_INFERENCE_STATE,
+KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE,
+KILN_DISABLE_CUDA_GDN_AB_IN_PROJ, KILN_DROP_PROJECTION_ORIGINALS,
+KILN_KEEP_PROJECTION_ORIGINALS, KILN_VK_NATIVE_TRAINING,
+KILN_FLASH_ATTN_BWD_DETERMINISTIC, KILN_MTP_DEBUG,
+KILN_W4A16_GDN_OUT_PROJ) were verified dead in code (zero refs in
+crates/ + scripts/ + .github/, plus fragment/alias checks) — but every
+mention in CONFIGURATION.md is an explicit true retirement notice
+("removed", "no longer controls", "former ... switches are removed",
+retired-names table) — i.e. the doc is CORRECT and these are
+documentation of removal, not stale live claims. Kept: nothing to
+delete. This confirms rounds 99–102 were complete.
+
+**Signature:** kiln cleanup agent (orchestrator inline), round 107 —
+headline net **−295** lines.
