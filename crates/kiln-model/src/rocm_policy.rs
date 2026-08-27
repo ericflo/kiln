@@ -47,6 +47,9 @@ pub struct RocmKernelPolicy {
     pub(crate) split_q_gate_row_tile_tokens: usize,
 }
 
+// Live under `feature = "rocm"`: kiln-server `model_rocm_kernel_policy` maps
+// the startup profile to `native_default`/`portable_fallback`; `native_default`
+// has no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 impl RocmKernelPolicy {
     /// Historical Strix Halo qualification fixture.
@@ -321,11 +324,15 @@ impl Default for RocmKernelPolicy {
     }
 }
 
+// Kiln-server rocm-lane tests pin this constant to `portable_fallback()`;
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub const PORTABLE_ROCM_KERNEL_POLICY: RocmKernelPolicy = RocmKernelPolicy::portable_fallback();
 
 /// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
 /// idempotent; conflicting values fail instead of changing live dispatch.
+// Called by kiln-server `install_pre_device_startup_policy` (rocm lane);
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
     match ROCM_KERNEL_POLICY.set(policy) {
