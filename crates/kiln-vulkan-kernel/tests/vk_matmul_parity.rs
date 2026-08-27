@@ -410,8 +410,8 @@ fn vk_matmul_backward_parity() -> Result<()> {
 }
 
 /// LoRA-style composition: delta = (x @ A.T) @ B.T, scaled by `scale`.
-/// All three (x, A, B) are parameters; verify all three grads via
-/// candle reference.
+/// All three (x, A, B) are parameters; verify all three grads via the
+/// finite-difference reference.
 ///
 /// Shapes: x: [batch, in_features], A: [rank, in_features], B: [out, rank]
 /// delta: [batch, out]
