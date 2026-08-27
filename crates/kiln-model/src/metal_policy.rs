@@ -58,6 +58,9 @@ pub struct MetalKernelPolicy {
     pub(crate) transposed_coop_gemv_row_triple_tile8: bool,
 }
 
+// Live under `feature = "metal"`: kiln-server `model_metal_kernel_policy`
+// maps the startup profile to `native_default`/`portable_fallback`; the lib.rs
+// re-export is metal-gated, so no default-build caller — allow required.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 impl MetalKernelPolicy {
     /// Metal routes that were active with no legacy environment overrides.
@@ -226,6 +229,9 @@ impl Default for MetalKernelPolicy {
 
 /// Install process-lifetime Metal kernel policy. Reinstalling the same value
 /// is idempotent; conflicting installation fails instead of changing routes.
+// Called by kiln-server `install_pre_device_startup_policy` (metal lane);
+// the lib.rs re-export is metal-gated, so no default-build caller — allow
+// required.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub fn install_metal_kernel_policy(policy: MetalKernelPolicy) -> Result<()> {
     match METAL_KERNEL_POLICY.set(policy) {
@@ -235,6 +241,8 @@ pub fn install_metal_kernel_policy(policy: MetalKernelPolicy) -> Result<()> {
     }
 }
 
+// Called only by the metal-gated `metal_config`/`metal_attention` dispatch
+// helpers; no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub(crate) fn current_metal_kernel_policy() -> MetalKernelPolicy {
     *METAL_KERNEL_POLICY.get_or_init(MetalKernelPolicy::default)
