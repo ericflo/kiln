@@ -412,23 +412,19 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             && lora.is_none()
             && gdn_forward_only_fastpaths
             && vulkan_resident_decode_enabled()
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(out) =
-                    crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1_kt(
-                        vk_backend,
-                        x,
-                        weights,
-                        config,
-                        recurrent_state,
-                        conv_state,
-                    )?
-                {
-                    return Ok(out);
-                }
-            }
+            && let Some(out) =
+                crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1_kt(
+                    vk_backend,
+                    x,
+                    weights,
+                    config,
+                    recurrent_state,
+                    conv_state,
+                )?
+        {
+            return Ok(out);
         }
     }
     // --- Step 1: Input projections ---

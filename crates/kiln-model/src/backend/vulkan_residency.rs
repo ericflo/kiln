@@ -253,13 +253,12 @@ pub(super) fn insert_recurrent_state_resident_buffer(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     remove_recurrent_state_entry(&mut entries, id);
     let prefill_key = active_prefill_recurrent_state_key();
-    if let Some(key) = prefill_key {
-        if let Some(previous_id) = entries.by_prefill.insert(key, id)
-            && previous_id != id
-        {
-            remove_recurrent_state_entry(&mut entries, previous_id);
-            entries.by_prefill.insert(key, id);
-        }
+    if let Some(key) = prefill_key
+        && let Some(previous_id) = entries.by_prefill.insert(key, id)
+        && previous_id != id
+    {
+        remove_recurrent_state_entry(&mut entries, previous_id);
+        entries.by_prefill.insert(key, id);
     }
     entries.by_tensor.insert(
         id,

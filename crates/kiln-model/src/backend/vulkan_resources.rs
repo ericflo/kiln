@@ -118,10 +118,10 @@ impl VulkanBackend {
             .resident_scratch
             .lock()
             .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
-        if let Some(buf) = g.get(role) {
-            if buf.size() >= min_bytes {
-                return Ok(Arc::clone(buf));
-            }
+        if let Some(buf) = g.get(role)
+            && buf.size() >= min_bytes
+        {
+            return Ok(Arc::clone(buf));
         }
         let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
             dev.device(),
@@ -153,10 +153,10 @@ impl VulkanBackend {
             .resident_scratch
             .lock()
             .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
-        if let Some(buf) = g.get(role) {
-            if buf.size() >= min_bytes {
-                return Ok(Arc::clone(buf));
-            }
+        if let Some(buf) = g.get(role)
+            && buf.size() >= min_bytes
+        {
+            return Ok(Arc::clone(buf));
         }
         let buf = kiln_vulkan_kernel::VulkanBuffer::create_host_visible(
             dev.device(),

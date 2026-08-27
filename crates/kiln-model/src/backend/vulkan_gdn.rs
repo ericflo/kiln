@@ -766,10 +766,8 @@ pub(super) fn gdn_decode_gates_recurrent_rmsnorm(
         )
         .context("gdn_decode_gates_recurrent_rmsnorm kernel failed")?;
     let out = kt_tensor_from_f32_bytes(&out_data, &[batch, 1, nv, dv], q_dtype)?;
-    if !skip_state_readback {
-        if let Some(sd) = new_state_data {
-            *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
-        }
+    if !skip_state_readback && let Some(sd) = new_state_data {
+        *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
     }
     Ok(Some(out))
 }

@@ -412,14 +412,12 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         && matches!(weight.device(), Device::Cpu)
         && weight.is_contiguous()
         && !weight.track_op()
+        && !x.track_op()
+        && let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)?
     {
-        if !x.track_op() {
-            if let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)? {
-                return Ok(out);
-            }
-        }
-        // Training returned through the authoritative tape recorder above.
+        return Ok(out);
     }
+    // Training returned through the authoritative tape recorder above.
     // Resident Vulkan RMSNorm. The raw `qwen_rmsnorm_forward`
     // shader passes its narrow kernel parity test, but the kt wrapper path has
     // produced non-finite rows on real model tensors under lavapipe/RADV soak

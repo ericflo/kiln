@@ -129,10 +129,10 @@ impl VulkanBackend {
             .linear_attn_recurrent_state_kt
             .lock()
             .map_err(|_| anyhow::anyhow!("kt recurrent state mutex poisoned"))?;
-        if let Some(buf) = g.get(&key) {
-            if buf.size() >= bytes {
-                return Ok(Arc::clone(buf));
-            }
+        if let Some(buf) = g.get(&key)
+            && buf.size() >= bytes
+        {
+            return Ok(Arc::clone(buf));
         }
         let arc = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(dev, bytes)
             .context("acquire kt linear-attn recurrent state buffer")?;
@@ -153,10 +153,10 @@ impl VulkanBackend {
             .linear_attn_conv_state_kt
             .lock()
             .map_err(|_| anyhow::anyhow!("kt conv state mutex poisoned"))?;
-        if let Some(buf) = g.get(&key) {
-            if buf.size() >= bytes {
-                return Ok(Arc::clone(buf));
-            }
+        if let Some(buf) = g.get(&key)
+            && buf.size() >= bytes
+        {
+            return Ok(Arc::clone(buf));
         }
         let arc = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(dev, bytes)
             .context("acquire kt linear-attn conv state buffer")?;

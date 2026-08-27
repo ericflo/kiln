@@ -1897,23 +1897,20 @@ pub fn model_forward_paged(
             && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
-                    vk_backend,
-                    token_ids,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    start_pos,
-                    linear_state.as_deref(),
-                )? {
-                    return Ok(logits);
-                }
-            }
+            && let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                vk_backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                start_pos,
+                linear_state.as_deref(),
+            )?
+        {
+            return Ok(logits);
         }
 
         if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora) {
@@ -2145,23 +2142,20 @@ pub fn model_forward_paged_last_token(
             && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
-                    vk_backend,
-                    token_ids,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    start_pos,
-                    linear_state.as_deref(),
-                )? {
-                    return Ok(logits);
-                }
-            }
+            && let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                vk_backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                start_pos,
+                linear_state.as_deref(),
+            )?
+        {
+            return Ok(logits);
         }
 
         if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora) {
@@ -2333,23 +2327,20 @@ pub fn model_forward_paged_last_token_resident(
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && vulkan_resident_decode_enabled()
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
-                    vk_backend,
-                    token_ids,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    start_pos,
-                    linear_state.as_deref(),
-                )? {
-                    return Ok(logits);
-                }
-            }
+            && let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                vk_backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                start_pos,
+                linear_state.as_deref(),
+            )?
+        {
+            return Ok(logits);
         }
     }
 
@@ -2794,10 +2785,9 @@ pub fn model_forward_paged_last_token_greedy(
             None,
             linear_state.as_deref(),
             lora,
-        )? {
-            if let Some(&token) = next_tokens.first() {
-                return Ok(token);
-            }
+        )? && let Some(&token) = next_tokens.first()
+        {
+            return Ok(token);
         }
 
         if token_ids.len() == 1
@@ -2808,34 +2798,31 @@ pub fn model_forward_paged_last_token_greedy(
             && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
-                    vk_backend,
-                    token_ids,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    start_pos,
-                    linear_state.as_deref(),
-                )? {
-                    // Materialize argmax on the returned logits.
-                    let logits_flat = logits.flatten_all()?;
-                    let logits_vec: Vec<f32> = logits_flat.to_vec1()?;
-                    let mut best_idx = 0u32;
-                    let mut best_val = f32::NEG_INFINITY;
-                    for (i, &v) in logits_vec.iter().enumerate() {
-                        if v > best_val {
-                            best_val = v;
-                            best_idx = i as u32;
-                        }
-                    }
-                    return Ok(best_idx);
+            && let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                vk_backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                start_pos,
+                linear_state.as_deref(),
+            )?
+        {
+            // Materialize argmax on the returned logits.
+            let logits_flat = logits.flatten_all()?;
+            let logits_vec: Vec<f32> = logits_flat.to_vec1()?;
+            let mut best_idx = 0u32;
+            let mut best_val = f32::NEG_INFINITY;
+            for (i, &v) in logits_vec.iter().enumerate() {
+                if v > best_val {
+                    best_val = v;
+                    best_idx = i as u32;
                 }
             }
+            return Ok(best_idx);
         }
 
         if native_resident_decode_required(backend, token_ids, &start_positions, config, lora) {
@@ -4093,26 +4080,25 @@ pub(super) fn model_forward_paged_inner_bounded(
                         && lora.is_none()
                         && !crate::mtp_runtime::single_token_self_attention_active()
                         && vulkan_resident_decode_enabled()
-                    {
-                        if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+                        && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                             .downcast_ref::<crate::backend::vulkan::VulkanBackend>(
-                        ) {
-                            let recurrent_t = &state.recurrent_states[linear_attn_idx];
-                            let conv_t = &state.conv_states[linear_attn_idx];
-                            if let Some(out) =
-                                crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1_kt(
-                                    vk_backend,
-                                    &hidden,
-                                    layer,
-                                    config,
-                                    recurrent_t,
-                                    conv_t,
-                                )?
-                            {
-                                hidden = out;
-                                linear_attn_idx += 1;
-                                continue;
-                            }
+                        )
+                    {
+                        let recurrent_t = &state.recurrent_states[linear_attn_idx];
+                        let conv_t = &state.conv_states[linear_attn_idx];
+                        if let Some(out) =
+                            crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1_kt(
+                                vk_backend,
+                                &hidden,
+                                layer,
+                                config,
+                                recurrent_t,
+                                conv_t,
+                            )?
+                        {
+                            hidden = out;
+                            linear_attn_idx += 1;
+                            continue;
                         }
                     }
                 }

@@ -974,26 +974,23 @@ pub(super) fn transformer_block_paged_with_rope_tables(
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && vulkan_resident_decode_enabled()
-        {
-            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
+            && let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-            {
-                if let Some(out) = try_resident_block_full_attn_b1(
-                    vk_backend,
-                    x,
-                    layer,
-                    config,
-                    positions,
-                    start_pos,
-                    paged_cache,
-                    block_table,
-                    full_attn_layer_idx,
-                    inv_freq,
-                    rope_tables,
-                )? {
-                    return Ok(out);
-                }
-            }
+            && let Some(out) = try_resident_block_full_attn_b1(
+                vk_backend,
+                x,
+                layer,
+                config,
+                positions,
+                start_pos,
+                paged_cache,
+                block_table,
+                full_attn_layer_idx,
+                inv_freq,
+                rope_tables,
+            )?
+        {
+            return Ok(out);
         }
     }
     let use_metal_decode_ffn =

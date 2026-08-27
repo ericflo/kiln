@@ -415,12 +415,11 @@ pub(super) fn lm_head_forward_backend_decode_if(
         if let Some(backend) = backend {
             // For autograd-tracked input, prefer the autograd-safe Vulkan
             // CustomOp; otherwise the leaf from linear_decode drops the grad.
-            if x.track_op() {
-                if let Some(logits) =
+            if x.track_op()
+                && let Some(logits) =
                     LinearBackend::runtime_linear_prefill_apply(backend, x, embed_tokens_t)?
-                {
-                    return Ok(logits);
-                }
+            {
+                return Ok(logits);
             }
             if let Some(logits) = LinearBackend::runtime_linear_decode(backend, x, embed_tokens_t)?
             {
