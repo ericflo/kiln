@@ -6,37 +6,31 @@
 //! Silicon) → CPU. Each branch logs which backend was chosen so the
 //! startup banner and crash dumps make it obvious.
 //!
-//! The public API surface is fully kt-typed (`select_device_kt`,
-//! `select_device_with_options_kt`). Internally we still materialise a
-//! candle device — `kiln_model`'s downstream call paths and a few
-//! kiln-server seams still take `&candle_core::Device` while the rest
-//! of #1082 lands — but the candle value is constructed via the
-//! always-on `kiln_kt_bridge` helpers so this file no longer names
-//! `candle_core::*` paths directly in source. (issue #1082, candle
-//! removal)
+//! The selection is kt-native end-to-end (issue #1082, candle removal):
+//! every branch returns a plain `kiln_tensor::Device`, no candle device
+//! is constructed, and no `candle_core::*` path is named in this file.
+//! The CUDA-graph path needs no special device-open — the capture stream
+//! is the kt one (`CudaGraphRunner` + `with_active_cuda_stream`, derived
+//! from the kt `primary_cuda_context`).
 
 use anyhow::Result;
 
 /// Select the best available device for the loaded backends.
 ///
-/// Returns a `kiln_tensor::Device` so callers don't have to thread a
-/// candle device around. Internally constructs the candle device
-/// through the `kiln_kt_bridge` helpers and then translates back to kt.
+/// Returns a `kiln_tensor::Device` directly — the selection is
+/// kt-native end-to-end and constructs no candle device (issue #1082).
 pub fn select_device_kt() -> Result<kiln_tensor::Device> {
     select_device_with_options_kt(false)
 }
 
-/// Same as [`select_device_kt`] but lets callers opt into a
-/// graph-capturable CUDA stream (event tracking disabled on the inner
-/// candle CUDA device).
+/// Same as [`select_device_kt`] but lets callers opt into the
+/// graph-capturable CUDA path.
 ///
-/// Behaves identically to [`select_device_kt`] except that under
-/// `--features cuda` the CUDA device is opened with
-/// `candle_core::Device::new_cuda_with_stream` + `disable_event_tracking`
-/// so the resident `cudaStream_t` can be captured into a CUDA graph (the
-/// hot decode path). The two-step setup lives behind the
-/// `kiln_kt_bridge::candle_cuda_device_with_stream_no_event_tracking`
-/// helper so this file does not name `candle_core::*` paths directly.
+/// Both modes return the plain kt CUDA device. The graph-capturable
+/// stream is the kt capture stream (`CudaGraphRunner` +
+/// `with_active_cuda_stream`, derived from the kt `primary_cuda_context`),
+/// so no special device-open is needed (issue #1082). The `cuda_graphs`
+/// flag only selects the startup log line.
 pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::Device> {
     #[cfg(not(feature = "cuda"))]
     let _ = cuda_graphs;
@@ -71,18 +65,21 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
 
     #[cfg(feature = "vulkan")]
     {
-        // Vulkan: candle-core has no native Vulkan device, so we detect
-        // availability ourselves. The Vulkan backend manages its own vk::Device.
+        // Vulkan: the kt `Device` is index-only (no native handle), so we
+        // detect availability ourselves. The Vulkan backend manages its own vk::Device.
         if let Some(device_index) = kiln_model::backend::vulkan::vulkan_selected_device_index()? {
             tracing::info!(
                 device_index,
                 "Vulkan available — using selected Vulkan physical device"
             );
-            // Tell the rest of the process (forward.rs, trainer.rs) that
-            // Vulkan is active even though the candle device reports as
-            // Device::Cpu. Lets `projection_original_drop_enabled_for_device`
-            // and similar guards fire without having to thread a backend
-            // handle through every call site.
+            // Tell the rest of the process (forward pass, trainer) that
+            // Vulkan is the active runtime: CPU-host tensors report as
+            // `Device::Cpu` and `Device::Vulkan(idx)` is index-only. Lets
+            // `vulkan_active()`-gated guards (e.g.
+            // `ProjectionLoadPolicy::for_model_loader_device`, the
+            // CPU-arm of `training_precision_policy_for_device_kt`) fire
+            // without having to thread a backend handle through every
+            // call site.
             kiln_model::backend::mark_vulkan_active();
             return Ok(kiln_tensor::Device::Vulkan(device_index));
         }
