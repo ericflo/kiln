@@ -3229,3 +3229,112 @@ helper crate-wide.
 **Signature:** kiln cleanup agent, round 79 of the CLEANUP.md campaign —
 the queued kiln-train dedup, one focused cleanup, zero public API
 changes, all gates green.
+
+## Cleanup Agent (round 80) — 2026-08-26 — kiln-train checkpoint digest-shape check routed through the shared `is_lower_sha256` helper (queued since round 79): net −1 line in checkpoint.rs, consolidation regression-locked with 2 new unit tests
+
+**Steering:** the round-79 ledger left `crates/kiln-train/src/checkpoint.rs:~904`
+queued: a third lowercase-hex SHA-256 shape check, written differently (inline
+`.is_ascii_hexdigit() && !.is_ascii_uppercase()`) but claimed functionally
+equivalent to the now-shared `is_lower_sha256`. Instruction: verify equivalence
+character by character before touching it; a wrong merge is a regression
+(rounds 63/78 lesson).
+
+**Finding (re-verification, not trust):** the two implementations at HEAD,
+side by side:
+
+```rust
+// teacher_identity.rs:502 (shared, pub(crate))
+pub(crate) fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+// checkpoint.rs:903-905 (inline, inside validate_sha256's ensure!)
+value.len() == 64
+    && value
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+```
+
+**Equivalence proof (byte-class set theory):** the shared helper's per-byte
+acceptance set is `is_ascii_digit()` ∪ [a..=f] = **0x30-0x39 ∪ 0x61-0x66**.
+The checkpoint predicate's set is `is_ascii_hexdigit()` ∩ ¬`is_ascii_uppercase()`
+= (0x30-0x39 ∪ 0x61-0x66 ∪ 0x41-0x46) minus 0x41-0x5A =
+**0x30-0x39 ∪ 0x61-0x66**. Identical sets. Both gate on the identical first
+condition `value.len() == 64` (byte length, so a 64-*char* non-ASCII string is
+rejected by both the length check and the byte-class check; e.g. 62×`a` + `é`
+is 64 bytes → length passes, byte class 0xC3/0xA9 fails in both). Consequence:
+for every `&str` input both predicates return the same `bool` — provably
+behavior-identical, so merging is safe. (The classic divergence — accepting
+`A-F` — does not occur: `!is_ascii_uppercase()` strips exactly the 0x41-0x5A
+that `is_ascii_hexdigit()` adds over [0-9a-f].)
+
+**Change (2 files, +65/−4; code net −1 line, the rest is the regression lock):**
+- `checkpoint.rs` — `validate_sha256` now delegates:
+  `ensure!(is_lower_sha256(value), "{field} must be 64 lowercase hexadecimal
+  characters")`. Error message and the two call sites (lines 409, 452)
+  unchanged. Added `use crate::teacher_identity::is_lower_sha256;` (round-79
+  import placement, after external crates). `validate_sha256` itself stays
+  private; no visibility change; kiln-train's public API unchanged —
+  kiln-server and kiln-eval see nothing new.
+- `teacher_identity.rs` — two new unit tests in the existing `mod tests`,
+  regression-locking the consolidation (steering requirement):
+  1. `is_lower_sha256_enforces_exactly_64_lowercase_hex_bytes` — accepts a
+     valid 64-char digest; rejects 63 bytes, 65 bytes, fully-uppercase and
+     mixed-case, non-hex letters `g`/`z`/`G`, and non-ASCII (`é`) in the two
+     sharp cases where the byte length is EXACTLY 64 (62×`a`+`é` and
+     32×`é`), proving the byte-class check does the work, not just length.
+  2. `is_lower_sha256_matches_the_legacy_checkpoint_predicate` — re-implements
+     the removed inline expression verbatim and asserts identity with the
+     helper across all 128 ASCII byte classes (one at position 0 of a 64-char
+     string) plus the 63/65 length boundary — a permanent behavioral-identity
+     lock against future drift.
+
+**Verification (before → after, all green):**
+- BEFORE (pre-edit tree): `cargo test -p kiln-train` — **532 passed / 0 failed
+  / 2 pre-existing ignored** (exactly the steering baseline).
+- AFTER: `cargo test -p kiln-train` — **534 passed / 0 failed / 2 pre-existing
+  ignored** = the untouched 532 baseline + the 2 new helper tests
+  (both new tests pass; the 2 `#[ignore]`d tests untouched).
+- `cargo clippy -p kiln-train --all-targets` — **0 kiln-train warnings**
+  (rounds 69-71/79 zero state preserved; the only remaining build warnings are
+  the protected kiln-tensor (14) + kiln-core (3) judgment sets, unchanged).
+- `cargo check -p kiln-server -p kiln-eval` — clean (rc=0; both consumers of
+  kiln-train unaffected by the `pub(crate)` item).
+- `cargo fmt --check` — clean repo-wide.
+- `python3 scripts/check_repository_artifacts.py` — "repository artifact
+  policy passed: 6697 tracked paths" (exit 0).
+- `python3 scripts/check_production_file_budget.py` — "production file budget
+  passed: 647 files, 5000-line default, 14 reviewed exceptions" (exit 0;
+  checkpoint.rs 1730→1729 and teacher_identity.rs 1149→1211, both far under
+  the 5000-line default; opd.rs's exact 8496 ceiling untouched).
+- `git status` clean after the commit.
+
+**Code commit:** `277e3faab` (this entry is its ledger record).
+
+**Considered and rejected (evidence):**
+- `validate_sha256` private wrappers in kiln-train's other modules —
+  `trajectory.rs:600`, `openenv_provenance.rs:581`, `hf_interop.rs:1191`,
+  `sft_ingestion.rs:440` — all validate the **`sha256:<64 hex>` prefixed
+  form** (a required `sha256:` prefix, different contract and different error
+  types `Result<(), String>` vs `Result<()>` vs `TeacherIdentityError`); the
+  inner hex check is already written in the shared helper's form. Merging
+  would require inventing a cross-contract shared API — design-level, not
+  mechanical dedup; kept.
+- kiln-server's two copies of the legacy inline form —
+  `src/api/hf_trl.rs:172`, `src/hf_train_cli.rs:184` — different crate; the
+  kiln-train helper is `pub(crate)`, and sharing would require a public API
+  change (hard rule: no public API changes; kiln-train is consumed).
+  Future candidate ONLY if the owner wants a public digest-shape helper.
+- `is_ascii_hexdigit()`-only (case-insensitive) checks in
+  `crates/kiln-server/tests/real_model_integration.rs:1927,1962` and
+  `tests/adapter_compose.rs:304` — tests that deliberately assert
+  case-insensitive hex-ness of runtime values; different intent, kept.
+- TODO/FIXME/XXX in kiln-train sources — zero occurrences (repo-wide grep);
+  nothing to adjudicate.
+
+**Signature:** kiln cleanup agent, round 80 of the CLEANUP.md campaign — the
+queued round-79 consolidation, verified character-by-character before merging,
+regression-locked, zero public API changes, all gates green.
