@@ -5366,3 +5366,181 @@ clean.
 394/0/0 exact, zero code lines, commits `e106b8978` + `4999252e5` +
 `37577e674` + `c601de3e2` + `c04c2bd73` + `365126140` + `037b56a59` +
 this ledger commit.
+
+## Cleanup Agent (round 96c — kiln-model campaign, slice 3 of 4)
+
+**Date:** 2026-08-27
+
+**Scope:** kiln-model campaign slice 3 — the `backend/` family, the
+full 18-file census (159 ref lines / 164 occurrences at round start;
+per-file post-sweep ref counts, all remaining refs adjudicated KEEP):
+- `cuda.rs` (35 remain)
+- `rocm.rs` (32)
+- `mod.rs` (24)
+- `metal_runtime.rs` (13)
+- `vulkan.rs` (10)
+- `metal_paged.rs` (8)
+- `vulkan_linear.rs` (7)
+- `vulkan_training.rs` (6)
+- `metal.rs` (3)
+- `vulkan_tensor_bridge.rs` (2)
+- `metal_norm.rs` (2)
+- `metal_precompile.rs` (1)
+- `metal_config.rs` (1)
+- `metal_attention.rs` (1)
+- `vulkan_weights.rs` (1)
+- `vulkan_gdn.rs` (1)
+- `cpu.rs` (1)
+- `metal_gdn.rs` (0 — its single ref was reworded)
+
+**Work (comment-only, zero code lines):**
+- `cac04abf8` cuda.rs — 10 ins / 13 del (net **−3**): three stale
+  present-tense claims reworded against the verified live tree
+  (the `with_graph_outputs` site writes through the caller's kt
+  tensors — verified `out`/`lse` are `&kiln_tensor::Tensor`; the
+  `graph_outputs.is_none()` guard is gone — the 4th site branches
+  on `graph_outputs` between the two kt entries, verified at the
+  live if-let; the "candle wrapper discards softmax_lse" comparison
+  removed, true half kept)
+- `d62d75de0` rocm.rs — 4 ins / 4 del (net **0**): two stale
+  claims reworded (the legacy wrapper's softmax_lse discard is now
+  described as history; the live ROCm decode uses
+  `flash_attn_fwd_no_lse_kt`; the "must stay on the candle path"
+  claim reworded to the verified live `with_graph_outputs` kt path)
+- `76e24fa2b` + `b3095c93e` mod.rs — net **−2** (0 ins / 2 del):
+  the FALSE "metal/vulkan arms … still bridge to candle for those
+  backends' candle-typed constructors" sentence deleted (verified
+  false: the Metal arm constructs `MetalBackend::new(kt device)`
+  and the Vulkan arm `VulkanBackend::new(Device::Cpu)` straight
+  from kt devices; zero candle packages in the workspace). **Note:
+  self-correction** — `76e24fa2b` had also reworded the
+  `VulkanBackend::{linear_prefill_apply, lora_delta_resident}`
+  decline claim, believing `linear_prefill_apply` still dispatched
+  on-device. That was wrong (conflated with
+  `linear_prefill_apply_offset`, which does dispatch): the live
+  `vulkan_linear::linear_prefill_apply` body is unconditionally
+  `Ok(None)` ("#1082 Decline"), so the ORIGINAL claim (both hooks
+  decline; the kt-recorded forward path owns the matmuls;
+  `Tape::backward()` produces the gradients) was fully true.
+  `b3095c93e` restored it.
+- `9a10ca270` vulkan.rs — 4 ins / 4 del (net **0**): one stale
+  seed-source claim reworded — "seeded … from the legacy candle
+  pool" is false against the live path: verified
+  `seed_vk_kv_cache_layer_blocks_from_kt` reads
+  `PagedKvCacheKt::pool_tensors` (and the call site's own comment
+  says "from the kt paged cache"); reworded to name the kt paged
+  cache
+- `43a73815b` metal_precompile.rs — 2 ins / 2 del (net **0**):
+  "Candle kernels still compile lazily inside Candle" deleted
+  (no candle package exists in the workspace; the sentence was a
+  leftover from the candle-dependency era); true half kept
+- `ff4213ded` metal_config.rs — 3 ins / 2 del (net **+1**):
+  "Candle's materialized last-row projection plus argmax is
+  faster" reworded to name the live actor (the portable
+  materialized last-row projection); gate rationale unchanged
+- `f6794a2fe` metal_attention.rs — 1 ins / 1 del (net **0**):
+  "BEFORE the candle bridges" trimmed (no candle bridges follow
+  anywhere in the live dispatch — verified the function calls
+  `kiln_tensor::metal_sdpa_last_axis` directly); true half (guards
+  read the kt arg directly) kept
+- `85a202580` metal_gdn.rs — 2 ins / 1 del (net **+1**):
+  "the already-stable Candle path" reworded to "the already-
+  stable portable (kt) path" (verified: the guard decline routes
+  to `Ok(None)` → the portable kt GDN chunkwise path, the
+  "raw kt matmuls on CPU-host tensors" fallback named in
+  vulkan_gdn.rs)
+- `40abd1504` docs/backend-capability-report.json — **line-
+  numbers-only** regeneration (28 line-number fields shifted by the
+  comment-line deletions; the freshness contract test
+  `generated_capability_report_check_mode_is_non_mutating_and_
+  enforced` was the detector — same byproduct pattern as round
+  96a; diff verified to contain zero capability-value changes;
+  the report's capability strings, including the frozen "portable
+  candle autograd" strings, are unchanged)
+- HEADLINE NET LINES **−3** (26 ins / 29 del across 8 edited files,
+  zero code lines)
+
+**Adjudicated KEEP (no edit needed) — 10 files fully (44 refs):**
+- `metal_runtime.rs` (13/13): every "#1082 kt-native — helpers
+  take kt directly, no candle bridge" line verified true against
+  the kiln-owned Metal helper signatures (`metal_gdn_*`,
+  `metal_causal_conv1d_*`, etc., all taking
+  `&kiln_tensor::Tensor`)
+- `metal_paged.rs` (8/8): same verified pattern (buffers + layout
+  + dtype straight off the kt MetalStorage / kt Tensor — verified
+  live at the `buffer_o_kt(x_metal.buffer().as_ref(), x.layout(),
+  x.dtype())` call sites; `MetalStorage` live at
+  kiln-tensor/src/metal_storage.rs:79)
+- `vulkan_linear.rs` (7/7): all #1082 history (the
+  `candle_core::CustomOp1` wrapper removal — the live
+  `linear_prefill_apply` body IS the verified "Decline" state it
+  describes; the `kt_logits_to_candle` postmortem — symbol
+  verified absent from live code; the "the [.,1,.] reshape the
+  candle path did" past-tense note) + true present-tense
+  "fully kt-native" claims (verified against the
+  `kt_tensor_to_f32_bytes_with_shape` / stable-kt-id weight-cache
+  call sites)
+- `vulkan_training.rs` (6/6): the registry-kt-native claims
+  (verified: keyed on the kt `TensorId`), the "formerly provided
+  by candle `Var::set`" history (the live test uses kt
+  `slice_set`), the verified "rewritten … to an unconditional
+  decline" lora contract (live hook returns `Ok(None)`), and the
+  legitimate "kt analog of candle `Var::set`" comparison
+- `metal.rs` (3/3): the "formerly-retained candle `device` field
+  is gone" claim verified (the only device field is
+  `device_kt: kiln_tensor::Device`) + the legitimate "substrate
+  swaps (e.g. candle → objc2-metal)" provenance example
+- `vulkan_tensor_bridge.rs` (2/2): "no candle bridge" verified
+  (the module downcasts to `kiln_tensor::CpuStorage` and uploads
+  straight to the owned `VulkanDevice`)
+- `metal_norm.rs` (2/2): same verified MetalStorage pattern as
+  metal_paged.rs
+- `vulkan_weights.rs` (1/1): "extracts f32 bytes straight from kt
+  storage on a miss - no candle bridge" verified against the
+  stable-kt-`TensorId`-keyed cache
+- `vulkan_gdn.rs` (1/1): "kt-native: extract f32 straight from kt
+  storage, no candle bridge" verified (the function takes kt
+  tensors and dispatches `vk_gdn_chunkwise_forward_no_grad`)
+- `cpu.rs` (1/1): "formerly-cached candle `device` field was
+  dropped — `new` now takes a kt device" verified (the
+  `for_device_kt` CPU arm calls `CpuBackend::new(kt device)`)
+
+**Frozen code / test-protected strings preserved:**
+- `mod.rs` `TrainingCapabilities::portable()` capability strings
+  ("portable candle autograd", …) — FROZEN: asserted by
+  `portable_training_capabilities_are_conservative` (assert_eq /
+  `contains("candle")` on the exact strings) and surfaced in
+  `docs/backend-capability-report.json`; left untouched
+- `cuda.rs` frozen log string ("using Candle fallback") untouched
+- `metal_config.rs` `metal_sdpa_supports_head_dim` provenance note
+  ("Mirrors the head-dim whitelist in candle-nn 0.10.2's
+  `Sdpa::custom_op3`") — legitimate provenance, kept
+
+**Verification (own runs, final state):** `cargo test -p
+kiln-model` **394/0/0 EXACT** (371 lib + 22
+backend_capability_contract + 1 — first run had 1 failure: the
+capability-report freshness contract, resolved by the line-
+numbers-only regeneration `40abd1504`, diff-verified to contain
+no capability-value changes); `cargo clippy -p kiln-model
+--all-targets` **0 own-code warnings** (all observed warnings are
+kiln-tensor's, unchanged); `cargo fmt --check` clean (repo-wide);
+both Python gates pass (`check_repository_artifacts.py`: 6697
+tracked paths; `check_production_file_budget.py`: 647 files);
+`git status` clean.
+
+**Campaign plan status:** 96a DONE, 96b DONE, **96c DONE**.
+Remaining: **96d** — the root tail (~78 refs / 14 files):
+`generate.rs`, `cuda_graph.rs`, `marlin_proj.rs`, `sampling.rs`,
+`kv_cache.rs`, + the remaining root files (per the round-95
+census: 100+83+42+169+146+78 = 618 ✓). Same protocol as
+96a/96b/96c: comment-only, deletion-first, per-file commits,
+verify-then-keep, 394/0/0 exact + clippy 0 own + both Python
+gates, ledger entry appended.
+
+**Signature:** kiln cleanup agent, round 96c of the CLEANUP.md
+campaign — 8 files edited / 10 files verified-clean (18/18
+adjudicated), HEADLINE NET LINES **−3** (11 ref lines removed:
+159 → 148 remaining, all adjudicated KEEP), 394/0/0 exact, zero
+code lines, commits `cac04abf8` + `d62d75de0` + `76e24fa2b` +
+`b3095c93e` + `9a10ca270` + `43a73815b` + `ff4213ded` +
+`f6794a2fe` + `85a202580` + `40abd1504` + this ledger commit.
