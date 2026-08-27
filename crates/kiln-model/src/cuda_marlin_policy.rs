@@ -14,6 +14,9 @@ pub struct CudaMarlinPolicy {
     pub(crate) gdn_out_proj: bool,
 }
 
+// Live under `feature = "cuda"`: kiln-server `model_cuda_marlin_policy` maps
+// the startup profile to these constructors; `attention_mlp`/
+// `attention_mlp_gdn` have no default-build callers, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 impl CudaMarlinPolicy {
     /// Preserve the historical unset behavior: do not create Marlin weights.
@@ -49,6 +52,8 @@ impl Default for CudaMarlinPolicy {
 
 /// Install immutable CUDA Marlin policy. Same-value installation is
 /// idempotent; a conflicting value fails instead of changing weight layout.
+// Called by kiln-server `install_pre_device_startup_policy` (cuda lane);
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub fn install_cuda_marlin_policy(policy: CudaMarlinPolicy) -> Result<()> {
     match CUDA_MARLIN_POLICY.set(policy) {
@@ -58,7 +63,6 @@ pub fn install_cuda_marlin_policy(policy: CudaMarlinPolicy) -> Result<()> {
     }
 }
 
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn current_cuda_marlin_policy() -> CudaMarlinPolicy {
     *CUDA_MARLIN_POLICY.get_or_init(CudaMarlinPolicy::default)
 }
