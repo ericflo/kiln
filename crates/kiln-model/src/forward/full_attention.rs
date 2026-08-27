@@ -2206,8 +2206,10 @@ pub(crate) fn is_rocm_graph_shape_dependent_attention(error: &anyhow::Error) -> 
 /// captured kernels read from the same device pointers on every replay.
 /// Consumed by [`model_forward_paged_batched_hidden_with_graph_inputs`]
 /// (the HiddenOnly batched capture forward — #1082 boxes 432/433).
+// Live under `cuda`/`rocm`: constructed by the `decode_step_paged_batched*`
+// production paths (cuda_graph.rs / rocm_graph.rs) and every field is read
+// by `model_forward_paged_batched_hidden_with_graph_inputs`.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-#[allow(dead_code)]
 pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
     /// `[batch]` u32 token-id buffer.
     pub token_ids: &'a Tensor,
@@ -4680,6 +4682,8 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
 
 /// Apply a causal (lower-triangular) mask to attention scores.
 /// Sets future positions to -inf so softmax zeroes them out.
+// Called only by the `test_causal_mask` unit test; dead in the non-test
+// build — allow required (verified by default-lane probe).
 #[allow(dead_code)]
 pub(super) fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
     apply_causal_mask_with_offset(scores, seq_len, seq_len, 0)
