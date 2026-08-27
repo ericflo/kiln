@@ -73,14 +73,10 @@ fn map_tensor_err(context: &str, e: kiln_tensor::Error) -> FlashAttnError {
 // bridge or extracts pointers through `cuda_input_device_ptr` /
 // `cuda_output_device_ptr`. Removed to silence dead-code warning.
 
-/// `flash_attn_fwd` over `kiln_tensor::Tensor` operands.
-///
-/// Mirrors [`crate::flash_attn_fwd`] one-for-one: same FFI, same
-/// shape contract `[batch, seqlen, num_heads, head_dim]`, same
-/// (output, softmax_lse) return tuple. Differences:
-/// - Operand type is `kiln_tensor::Tensor` instead of `candle_core::Tensor`.
-/// - Output + softmax_lse are allocated through `kiln_tensor`'s
-///   `cuda_zeros` rather than `candle_core::Tensor::zeros`.
+/// `flash_attn_fwd` over `kiln_tensor::Tensor` operands — the one-for-one
+/// replacement of the candle-typed `flash_attn_fwd` (deleted in #1082):
+/// same FFI, same shape contract `[batch, seqlen, num_heads, head_dim]`,
+/// same (output, softmax_lse) return tuple.
 // Some validation locals are only consumed by the CUDA FFI tail; on a rocm-only
 // build the ROCm composite dispatch returns first, so they are unused there.
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
@@ -608,9 +604,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
 /// in place; pointer addresses are baked into a captured CUDA graph
 /// and survive replays as long as the caller's tensors do.
 ///
-/// Companion to the candle-typed
-/// [`crate::flash_attn_paged_decode_dyn_seqlen`] when `graph_outputs
-/// = Some((out, lse))`. Same shape contract:
+/// Same shape contract:
 /// - `out` must be BF16 `[b, 1, num_heads, head_dim]`
 /// - `lse` must be F32 `[b, num_heads, 1]`
 ///
@@ -621,7 +615,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
 /// in `kiln-model::backend::cuda::flash_attn_paged_decode_contiguous_
 /// batch_dyn_seqlen_with_graph_outputs`. Bit-exact by construction —
 /// bottoms out in the same `kiln_flash_attn_fwd_paged_decode_dyn_
-/// seqlen` FFI symbol as the candle path.
+/// seqlen` FFI symbol as the sibling kt entry above.
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
     q: &KtTensor,
