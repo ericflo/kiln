@@ -422,6 +422,10 @@ pub(super) fn gdn_chunkwise_forward(
     Ok(Some(out_kt))
 }
 
+// `type_complexity`: the 6-tuple is the fixed `gdn_chunk_prep` kernel output
+// contract (reordered q/k/v, scaled q, and the two entry tensors) shared by the
+// `runtime_gdn_chunk_prep` trait seam; a named struct would add indirection.
+#[allow(clippy::type_complexity)]
 pub(super) fn gdn_chunk_prep(
     backend: &VulkanBackend,
     g: &kiln_tensor::Tensor,

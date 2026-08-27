@@ -4899,7 +4899,11 @@ impl ModelRunner {
         } else {
             None
         };
+        // `type_complexity`: (per-row seeds, per-row histories) is the compact
+        // sampling-context pair passed to the batched sampler; a dedicated
+        // struct would add indirection for a 2-element pair.
         #[cfg(feature = "vulkan")]
+        #[allow(clippy::type_complexity)]
         let vk_batch_sampling_contexts: Option<(Vec<Option<u64>>, Vec<Vec<TokenId>>)> =
             if row_count > 1 && !all_greedy {
                 Some((
