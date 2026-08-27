@@ -27,9 +27,9 @@ pub enum DeviceBuffer {
     #[cfg(feature = "vulkan")]
     Vulkan(Arc<kiln_vulkan_kernel::VulkanBuffer>),
     /// CUDA-native storage. Available with `--features cuda`. Wraps
-    /// `kiln-tensor`'s `CudaStorage`, which owns a `CudaSlice<u8>`
-    /// allocated on a candle CUDA device — the same primitive the
-    /// kt-API kernel crates pull device pointers from.
+    /// `kiln-tensor`'s `CudaStorage`, which owns a `CudaSlice<u8>` —
+    /// the same primitive the kt-API kernel crates pull device
+    /// pointers from.
     #[cfg(feature = "cuda")]
     Cuda(Arc<kiln_tensor::CudaStorage>),
     /// Metal-native storage. Available with `--features metal`. Wraps
