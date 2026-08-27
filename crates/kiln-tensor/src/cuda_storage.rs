@@ -1,7 +1,7 @@
 //! CUDA storage impl behind the `cuda` feature flag.
 //!
 //! Wraps `cudarc::driver::CudaSlice<u8>` (the actual buffer) + dtype +
-//! `Arc<candle_core::cuda_backend::CudaDevice>` for stream affinity.
+//! `Arc<cudarc::driver::CudaContext>` for stream affinity.
 //!
 //! # Anti-pattern 1 compliance
 //!
@@ -12,12 +12,9 @@
 //! > `kiln_tensor::Tensor`.
 //!
 //! `CudaStorage` does **not** hold a `candle_core::Tensor`. The buffer
-//! is a `CudaSlice<u8>` we own. The candle `CudaDevice` is held only
-//! for its `cuda_stream()` accessor + its `alloc_zeros::<T>` helper;
-//! that's the same pattern in use across `kiln-rmsnorm-kernel`,
-//! `kiln-gdn-kernel`, `kiln-marlin-gemm`, `kiln-flash-attn`, etc.
-//! Phase 7 of #1082 (candle removal) replaces `Arc<CudaDevice>` with a
-//! direct `Arc<cudarc::driver::CudaContext>` + `Arc<CudaStream>`.
+//! is a `CudaSlice<u8>` we own. Phase 7 of #1082 (candle removal)
+//! replaced `Arc<CudaDevice>` with a direct
+//! `Arc<cudarc::driver::CudaContext>` + `Arc<CudaStream>`.
 //!
 //! # Phase 1.6 scope (storage layer only)
 //!
@@ -43,13 +40,13 @@ use crate::{DType, Device, Error, Result, StorageBackend};
 
 /// Owner of a CUDA byte buffer. Either kt owns the allocation
 /// outright (`Owned`) or kt is sharing a buffer that some other type
-/// owns (`Borrowed` — e.g. a candle `CudaStorage` held alive via the
+/// owns (`Borrowed` — an external owner's buffer held alive via the
 /// `_keep_alive` Arc).
 ///
-/// The Borrowed variant is the foundation for the Phase 7 zero-copy
-/// candle→kt adapter: it lets a kt-Tensor wrap a candle Tensor's
-/// device buffer without copying, while the Arc keeps the candle side
-/// alive for as long as the kt side needs the bytes. Drop semantics:
+/// The Borrowed variant supports zero-copy sharing of an
+/// externally-owned device buffer: a kt-Tensor wraps the buffer
+/// without copying, while the Arc keeps the external owner alive for
+/// as long as the kt side needs the bytes. Drop semantics:
 /// dropping a Borrowed `CudaStorage` just decrements the keep-alive
 /// Arc — it never frees the device memory directly.
 pub(crate) enum SliceOwner {
@@ -57,9 +54,8 @@ pub(crate) enum SliceOwner {
     /// Borrowed view over an externally-owned CUDA buffer.
     ///
     /// `_keep_alive` is an opaque Arc that must outlive every read
-    /// from `ptr`. Typically holds an Arc-wrapped `candle::Storage` so
-    /// the candle side's CudaSlice<T> Drop runs only after kt drops
-    /// its references.
+    /// from `ptr`. Typically holds an owner token whose Drop runs only
+    /// after kt drops its references.
     Borrowed {
         ptr: CUdeviceptr,
         byte_len: usize,
@@ -84,10 +80,9 @@ impl std::fmt::Debug for SliceOwner {
 ///
 /// The handed-down `CudaSlice<u8>` is allocated via cudarc directly
 /// (`CudaContext::default_stream().alloc_zeros::<u8>`); the storage no
-/// longer holds an `Arc<CudaDevice>` field — the candle wrapper, when
-/// needed by legacy FFI sites, is derived on-demand from `device_index`
-/// via [`primary_cuda_device`]. This was the #1082 CP-1 final lift:
-/// dropping the candle device field in favor of the cudarc context.
+/// longer holds an `Arc<CudaDevice>` field. This was the #1082 CP-1
+/// final lift: dropping the candle device field in favor of the
+/// cudarc context.
 ///
 /// Storage can be either owned (allocated by kt) or borrowed (sharing
 /// an external CUDA buffer with a keep-alive Arc) — see [`SliceOwner`].
@@ -104,10 +99,7 @@ pub struct CudaStorage {
     /// stream affinity — every kernel-launch path reads
     /// `self.ctx.default_stream()` to get the primary stream handle.
     /// Replaces the previous `candle_device: Arc<CudaDevice>` field
-    /// (#1082 CP-1 final lift). With the `.candle_device()` accessor
-    /// removed (#1082 aggressive cleanup), callers that need a candle
-    /// `Arc<CudaDevice>` must derive one externally via
-    /// [`primary_cuda_device`] from `self.device()`.
+    /// (#1082 CP-1 final lift).
     ctx: Arc<CudaContext>,
 }
 
@@ -126,9 +118,7 @@ impl CudaStorage {
     ///
     /// #1082: this is now the **sole** zeros constructor on `CudaStorage`.
     /// The candle-typed `Self::zeros(candle_device, ...)` back-compat
-    /// wrapper has been deleted; the free function [`cuda_zeros`] still
-    /// accepts a candle device for external callers (kiln-model) and
-    /// internally derives the ctx and routes here.
+    /// wrapper has been deleted.
     pub fn zeros_ctx(
         ctx: &Arc<CudaContext>,
         device_index: usize,
@@ -256,19 +246,19 @@ impl CudaStorage {
     /// without copying — **candle-free** entry point.
     ///
     /// `keep_alive` is an opaque Arc that must outlive every read
-    /// from `device_ptr`. Typical pattern: pass an Arc-wrapped candle
-    /// `Storage::Cuda(...)` so the candle Tensor's underlying
-    /// `CudaSlice<T>` drop runs after this storage's last reference.
+    /// from `device_ptr`. The in-tree caller is the CUDA capture
+    /// arena, which passes an arena token so the arena's buffer Drop
+    /// runs only after this storage's last reference.
     ///
     /// `device_ptr` + `byte_len` describe the borrowed region. The
     /// caller is responsible for the byte_len matching dtype × element
     /// count (this constructor does the same alignment check as
     /// [`Self::from_slice_ctx`]).
     ///
-    /// The Phase 7 zero-copy candle→kt adapter is the canonical
-    /// caller. Kernel-crate kt-API sites that reach `.slice()` will
-    /// panic on a borrowed storage — they must migrate to the
-    /// dtype/owner-aware accessor that lands alongside the adapter.
+    /// The CUDA capture arena is the canonical caller. Kernel-crate
+    /// kt-API sites that reach `.slice()` will panic on a borrowed
+    /// storage — they must use `device_ptr_raw` (which handles both
+    /// owners) instead.
     ///
     /// #1082: this is now the **sole** from-borrowed constructor on
     /// `CudaStorage`. The candle-typed `Self::from_borrowed(candle_device, ...)`
@@ -309,7 +299,7 @@ impl CudaStorage {
     }
 
     /// Whether this storage borrows its underlying CUDA buffer from
-    /// an external owner (Phase 7 candle adapter), as opposed to
+    /// an external owner (e.g. the CUDA capture arena), as opposed to
     /// owning its own allocation.
     pub fn is_borrowed(&self) -> bool {
         matches!(self.slice, SliceOwner::Borrowed { .. })
@@ -320,9 +310,8 @@ impl CudaStorage {
     /// call `.device_ptr(&stream)` per the cudarc 0.19 pattern.
     ///
     /// **Panics** if this is a `Borrowed` storage (there is no
-    /// `CudaSlice<u8>` to return — call sites must use the dtype/
-    /// owner-aware raw-pointer accessor that lands alongside the
-    /// Phase 7 zero-copy adapter migration).
+    /// `CudaSlice<u8>` to return — call sites must use
+    /// `device_ptr_raw`, which handles both owners).
     pub fn slice(&self) -> &CudaSlice<u8> {
         match &self.slice {
             SliceOwner::Owned(s) => s,
@@ -449,10 +438,6 @@ impl CudaStorage {
 ///   `primary_cuda_device(0).is_ok()`.
 /// - Any candle-free call site that needs a `CudaContext` to drive
 ///   `default_stream().alloc_*` or `memcpy_*` directly.
-///
-/// `primary_cuda_device` stays around only as long as
-/// `kiln-kt-bridge::to_candle` needs a candle `CudaDevice` for its
-/// `candle_core::Tensor::zeros` allocation.
 #[cfg(feature = "cuda")]
 pub fn primary_cuda_context(device_index: usize) -> Result<Arc<CudaContext>> {
     CudaContext::new(device_index)
@@ -2180,8 +2165,8 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
 
 // ----------------------------------------------------------------------
 // Tests are GPU-only — gated by KILN_TENSOR_CUDA_TEST=1 so a host with
-// cudarc + candle's cuda feature compiled in but no actual GPU doesn't
-// spuriously fail.
+// cudarc compiled in (the crate's `cuda` feature) but no actual GPU
+// doesn't spuriously fail.
 // ----------------------------------------------------------------------
 
 /// CUDA-side `scatter_add(updates, axis=0, indices, target_dim)` — inverse
@@ -2763,7 +2748,7 @@ pub fn cuda_log_softmax_last_axis_f32(x: &crate::Tensor) -> Result<crate::Tensor
 /// `kt_tensor_to_candle_cuda_copy(&t).to_dtype(...).to_vec1::<f32>()`
 /// chain. `cuda_to_host_copy` returns a kt-Tensor directly.
 ///
-/// The candle-side `CudaStream::memcpy_dtoh` synchronizes against
+/// The cudarc `CudaStream::memcpy_dtoh` synchronizes against
 /// any pending writes on the device's default stream before
 /// returning. The returned CPU tensor is guaranteed to see the
 /// latest results of any kernel previously launched on that stream.
@@ -5373,7 +5358,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
     let inner: usize = out_shape[axis + 1..].iter().product::<usize>().max(1);
     let inner_bytes = (inner * bpe) as i64;
 
-    // Pull candle_device + device index from first input.
+    // Pull context + device index from first input.
     let first_storage = inputs[0]
         .storage()
         .as_any()

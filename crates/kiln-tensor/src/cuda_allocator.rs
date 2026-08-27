@@ -1,8 +1,7 @@
 //! `CudaAllocator` — the CUDA [`Allocator`] impl.
 //!
-//! Wraps an `Arc<candle_core::cuda_backend::CudaDevice>` (the same
-//! handle every CUDA kernel crate uses) and produces [`CudaStorage`]
-//! allocations through it.
+//! Wraps `Arc<cudarc::driver::CudaContext>` (the allocation handle)
+//! and produces [`CudaStorage`] allocations through it.
 //!
 //! Phase 2.1.1 of #1082 ships:
 //!
@@ -12,8 +11,7 @@
 //! - `reserved_bytes` / `peak_reserved_bytes` accounting
 //!
 //! GPU-only tests live behind `KILN_TENSOR_CUDA_TEST=1` so the CI
-//! compile path (which links `cuda` against `candle-core` but has no
-//! GPU) doesn't spuriously fail.
+//! compile path (which has no GPU) doesn't spuriously fail.
 //!
 //! # Phase 7 candle-removal — partial UNBLOCK (allocation path candle-free)
 //!
@@ -48,15 +46,9 @@
 //!   in-source `#[cfg(test)]` tests, which now construct an
 //!   `Arc<CudaContext>` directly via `CudaContext::new(0)` and call
 //!   `new_ctx` / `with_mode_ctx`. The `candle_device()` getter is
-//!   gone — call sites that need a candle device wrapper derive one
-//!   via `kiln_tensor::primary_cuda_device(allocator.device_index())`
-//!   or read it from the produced `CudaStorage.candle_device()`.
+//!   gone.
 //!
-//! **CP-1 on the allocator side is now structurally complete.** The
-//! produced `CudaStorage` still carries a candle device for kernel-
-//! crate FFI sites that read `cuda_stream()` — the storage-side field
-//! flip (the next CP-1 lift step) is independent of this allocator
-//! and unblocked by the `zeros_ctx` constructor that already exists.
+//! **CP-1 on the allocator side is now structurally complete.**
 //!
 //! # Original audit (call-graph dependencies)
 //!
@@ -154,13 +146,6 @@ pub struct CudaAllocator {
     /// this context handle (post-e2bddd72), and the field had zero
     /// external callers in the workspace (confirmed via
     /// `grep -rn 'CudaAllocator::candle_device' crates/`).
-    ///
-    /// Callers that need the candle wrapper can derive it on demand
-    /// via `kiln_tensor::primary_cuda_device(allocator.device_index())`
-    /// — or, more typically, read it directly from the produced
-    /// `CudaStorage.candle_device()` (which is still load-bearing for
-    /// kernel-crate FFI sites until they migrate to
-    /// `cuda_stream_raw()`).
     ctx: Arc<CudaContext>,
     /// CUDA device ordinal — matches the ordinal of `ctx`'s owning
     /// device.
@@ -211,13 +196,11 @@ impl CudaAllocator {
     ///
     /// Internally routes through [`CudaStorage::zeros_ctx`] (the
     /// candle-free `Arc<CudaContext>` allocation entry, landed in
-    /// d3caf46b) instead of [`CudaStorage::zeros`]. The actual CUDA
-    /// allocation goes straight through cudarc's
+    /// d3caf46b) instead of the deleted candle-typed
+    /// `CudaStorage::zeros` entry. The actual CUDA allocation goes
+    /// straight through cudarc's
     /// `ctx.default_stream().alloc_zeros::<u8>` with no candle device
-    /// involvement; the produced `CudaStorage` still carries a
-    /// back-compat `candle_device` field for downstream FFI sites
-    /// that read `cuda_stream()` (those sites migrate to
-    /// `cuda_stream_raw()` in a follow-up sweep).
+    /// involvement.
     pub fn warm(&mut self, dtype: DType, n_elements: usize, count: usize) -> Result<()> {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
@@ -249,9 +232,7 @@ impl CudaAllocator {
         &self.ctx
     }
 
-    /// The CUDA device ordinal this allocator is bound to. Useful for
-    /// callers that need to derive a candle `CudaDevice` on demand via
-    /// [`crate::primary_cuda_device`].
+    /// The CUDA device ordinal this allocator is bound to.
     pub fn device_index(&self) -> usize {
         self.device_index
     }
