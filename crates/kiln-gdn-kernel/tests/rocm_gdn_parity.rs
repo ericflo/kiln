@@ -394,14 +394,14 @@ fn gated_rms_frozen_bwd_ref(
         let rms_inv = (sum_sq / hidden as f32 + eps).sqrt().recip();
 
         let mut s = 0.0f32;
-        for h in 0..hidden {
+        for (h, &w) in weight.iter().enumerate().take(hidden) {
             let idx = row + h;
             let d_normed = grad_out[idx].to_f32() * silu(z[idx].to_f32());
-            s += d_normed * x[idx].to_f32() * weight[h];
+            s += d_normed * x[idx].to_f32() * w;
         }
 
         let rms_inv3 = rms_inv * rms_inv * rms_inv;
-        for h in 0..hidden {
+        for (h, &w) in weight.iter().enumerate().take(hidden) {
             let idx = row + h;
             let x_val = x[idx].to_f32();
             let z_val = z[idx].to_f32();
@@ -409,9 +409,9 @@ fn gated_rms_frozen_bwd_ref(
             let sig = sigmoid(z_val);
             let gate = z_val * sig;
             let d_normed = dout * gate;
-            let normed = x_val * weight[h] * rms_inv;
+            let normed = x_val * w * rms_inv;
             let silu_grad = sig * (1.0 + z_val * (1.0 - sig));
-            let dx_f32 = d_normed * weight[h] * rms_inv - x_val * s * (rms_inv3 / hidden as f32);
+            let dx_f32 = d_normed * w * rms_inv - x_val * s * (rms_inv3 / hidden as f32);
             let dz_f32 = dout * normed * silu_grad;
             dx[idx] = bf16::from_f32(dx_f32).to_f32();
             dz[idx] = bf16::from_f32(dz_f32).to_f32();
