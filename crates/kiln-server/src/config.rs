@@ -5764,6 +5764,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_deterministic_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
@@ -5783,6 +5784,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_stream_stall_grace_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
@@ -5791,6 +5793,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_max_batch_tokens_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
@@ -5799,6 +5802,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_max_prefill_tokens_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
@@ -5808,6 +5812,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_max_prefill_layers_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
@@ -5817,6 +5822,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    // Test-only: `mod tests` below pins this field's whitespace-tolerant env-override (the live path is `apply_env_overrides`).
     #[allow(dead_code)]
     fn apply_max_decode_batch_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {

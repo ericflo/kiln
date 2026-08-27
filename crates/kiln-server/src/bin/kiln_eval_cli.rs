@@ -300,6 +300,8 @@ struct EvalRunResponse {
     state: String,
     #[serde(with = "kiln_eval::result::u64_decimal")]
     effective_seed: u64,
+    // Wire-model field: pins the eval run response shape (its presence is
+    // required by deserialization); never read client-side.
     #[allow(dead_code)]
     message: String,
 }
