@@ -31,7 +31,7 @@ use kiln_model::backend::{
     TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
-    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState,
+    GpuAttentionWeights, GpuWeights, LinearAttentionState,
     StreamingPrefillExecutionPolicy, model_forward_kt_with_policy,
     model_forward_no_head_with_policy, model_forward_paged_normed_hidden,
     model_forward_segment_with_policy, rms_norm,

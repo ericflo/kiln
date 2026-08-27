@@ -532,30 +532,6 @@ pub(crate) fn compute_segment_boundaries(
     boundaries
 }
 
-/// Returns true when every transformer layer in `weights` uses linear (GDN)
-/// attention — i.e., the model has **no** full-attention layers anywhere.
-///
-/// The training-time time-axis tile path
-/// ([`tiled_segment_recompute_and_backward`]) thread `LinearAttentionState`
-/// across tiles to keep GDN forward bit-exact, but full-attention layers have
-/// no analogous KV-cache thread at training time (training does not allocate
-/// a paged KV cache). Within a tile a full-attention layer would attend only
-/// inside the tile and produce different logits, breaking both per-tile loss
-/// and any LoRA gradient that flows through it.
-///
-/// Per-segment iteration also runs **later** segments detached on the tile's
-/// output, so even a segment that is itself GDN-only would dispatch into
-/// later full-attention layers under tiling — which would also break parity.
-/// The cleanest correctness invariant is therefore "no full-attention layers
-/// anywhere in the model".
-#[allow(dead_code)]
-pub(super) fn model_is_gdn_only(weights: &GpuWeights) -> bool {
-    weights
-        .layers
-        .iter()
-        .all(|l| matches!(l.attention, GpuAttentionWeights::Linear(_)))
-}
-
 /// Build a [`LoraWeights`] view whose `a` / `b` projections are **detached**
 /// from the LoRA Vars' autograd graph.
 ///
@@ -657,39 +633,6 @@ pub(super) fn partition_segment_layers_by_attn_type(
     }
     blocks.push((current_kind, block_start..seg_end));
     blocks
-}
-
-/// Determine whether a time-axis tile path applies for this training step.
-///
-/// Returns `Some(tile_size)` when:
-/// 1. The injected streaming-prefill policy is enabled at this `seq_len`.
-/// 2. The tile size is a positive multiple of `GDN_CHUNK_SIZE` (enforced by
-///    typed startup validation) and strictly less than `seq_len`.
-///
-/// Caller routes between two implementations based on
-/// [`model_is_gdn_only`]:
-/// * GDN-only models use [`tiled_segment_recompute_and_backward`], which is
-///   bit-exact against monolithic and skips gradient injection (cheaper).
-/// * Hybrid GDN + full-attn models use
-///   [`layer_pair_tiled_segment_recompute_and_backward`], which partitions
-///   each segment into contiguous-attention-type blocks and processes them
-///   with gradient injection so the tiled path can fire on production
-///   models like Qwen3.5-4B (24 GDN + 8 full-attn).
-#[allow(dead_code)]
-pub(super) fn tiled_training_tile_size(
-    weights: &GpuWeights,
-    seq_len: usize,
-    streaming_prefill: StreamingPrefillExecutionPolicy,
-) -> Option<usize> {
-    let _ = weights; // signature retained for callers; gating moved to the dispatcher.
-    if !streaming_prefill.enabled_for(seq_len) {
-        return None;
-    }
-    let tile = streaming_prefill.base_tile_tokens();
-    if tile == 0 || !tile.is_multiple_of(GDN_CHUNK_SIZE) || tile >= seq_len {
-        return None;
-    }
-    Some(tile)
 }
 
 // (#1082) Deleted five orphaned residues of the removed exact_gdn tiled-reverse
