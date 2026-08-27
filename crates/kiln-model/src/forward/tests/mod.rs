@@ -4,6 +4,9 @@
 use super::*;
 use crate::backend::cpu::CpuBackend;
 
+// Called only by the `#[cfg(feature = "metal")]` / `#[cfg(feature = "cuda")]`
+// graph tests below; dead in default-lane test builds — cfg_attr required
+// (verified by default-lane probe).
 #[cfg_attr(not(any(feature = "metal", feature = "cuda")), allow(dead_code))]
 fn explicit_hardware_qualification() -> bool {
     std::env::var("KILN_QUALIFICATION").as_deref() == Ok("1")
