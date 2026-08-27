@@ -3004,8 +3004,8 @@ const TINY_WEIGHTS_DEFAULT_SEED: u64 = 0xC0FFEE_u64;
 // #1082: `GpuWeights`/`GpuFfnWeights`/`GpuAttentionWeights` fields are all
 // kt tensors, so the tiny-fixture builders below must produce kt. These
 // test-only kt helpers sit alongside the production helpers
-// (`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`, which now return
-// `cd_types::Tensor` = kt) at the kt-field assignment sites. They build
+// (`zeros_f32_on`, which now returns `cd_types::Tensor` = kt) at the
+// kt-field assignment sites. They build
 // on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to the
 // kt `Device` param.
 fn kt_zeros_f32_on(shape: &[usize], device: &Device) -> Result<kiln_tensor::Tensor> {
