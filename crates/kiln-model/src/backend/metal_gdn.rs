@@ -193,7 +193,8 @@ pub(super) fn metal_gdn_chunk_prep_supports(
         return false;
     };
     // Full chunks only: this keeps speculative multi-token verification on
-    // the already-stable Candle path while accelerating long prompt prefill.
+    // the already-stable portable (kt) path while accelerating long prompt
+    // prefill.
     if chunk != 64 {
         return false;
     }
