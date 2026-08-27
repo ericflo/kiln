@@ -103,6 +103,12 @@ pub(super) fn cat_tensors(refs: &[&Tensor], dim: usize) -> Result<Tensor> {
 /// Allocate a zero-filled tensor with caller-supplied dtype + device.
 /// Consolidates the Tensor::zeros constructor (~8 sites in segment / tile /
 /// boundary-state init paths where the dtype is not statically F32).
+// keep: reserved — the dtype-parameterized siblings of the live
+// `zeros_f32_on`; last used by the pre-#1082 candle paths. The in-tree
+// replacement record at tests/mod.rs:3007 names them as the production
+// helpers the test-only kt helpers (`kt_zeros_f32_on` / `kt_ones_f32_on`)
+// superseded at the kt-field sites.
+#[allow(dead_code)]
 #[inline]
 pub(super) fn zeros_dtype_on<S: Into<Shape>>(
     shape: S,
@@ -115,6 +121,9 @@ pub(super) fn zeros_dtype_on<S: Into<Shape>>(
 /// Allocate a ones-filled tensor with caller-supplied dtype + device.
 /// Consolidates the Tensor::ones constructor (~5 sites in q_norm/k_norm
 /// init + gradient-test fixtures).
+// keep: reserved — see `zeros_dtype_on` above (same #1082 replacement
+// record at tests/mod.rs:3007).
+#[allow(dead_code)]
 #[inline]
 pub(super) fn ones_dtype_on<S: Into<Shape>>(
     shape: S,
