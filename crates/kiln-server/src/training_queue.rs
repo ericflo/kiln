@@ -195,6 +195,11 @@ pub enum QueuedJob {
 /// selectors and materialized JSONL sources must never be resolved for the
 /// first time after the worker has already reserved/reclaimed accelerator
 /// memory.
+///
+/// Judgment keep (round 74): variants own admission-time snapshots (receipts,
+/// prompt vectors) by design — materialized once at admission so the worker
+/// never reopens caller-controlled sources; boxing would defeat that contract.
+#[allow(clippy::large_enum_variant)]
 #[derive(Default)]
 pub enum PreparedTrainingData {
     #[default]

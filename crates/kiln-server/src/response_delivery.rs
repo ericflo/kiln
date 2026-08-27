@@ -101,6 +101,9 @@ impl DeliveryTerminal {
     }
 }
 
+// Judgment keep (round 74): Deliver/DeliverMany own token-batch payloads;
+// boxing would add a per-batch allocation on the hot delivery path.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum DeliveryCommand {
     Register {
         key: DeliveryKey,
@@ -879,6 +882,9 @@ fn acknowledge_delivery_barriers(
     }
 }
 
+// Judgment keep (round 74): Command wraps DeliveryCommand's owned batch
+// payload; boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 enum WorkerReceive {
     Command(DeliveryCommand),
     Timeout,

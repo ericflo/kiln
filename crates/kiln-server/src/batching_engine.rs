@@ -2300,6 +2300,10 @@ impl BatchingEngineHandle {
 /// ignorant of LoRA specifics.
 pub type AdapterSwapClosure = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
 
+// Judgment keep (round 74): Enqueue/SwapAdapter own per-request payloads
+// (EngineRequest, AdapterSwapClosure); boxing them would add an allocation
+// and indirection per engine command for no size win.
+#[allow(clippy::large_enum_variant)]
 enum EngineCommand {
     Enqueue {
         req: EngineRequest,

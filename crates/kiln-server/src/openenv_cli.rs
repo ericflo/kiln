@@ -77,6 +77,11 @@ pub const OPENENV_TRAINING_CONTRACT_SCHEMA_V1: &str = "kiln.openenv-training-con
 /// The CLI uses `Http`; the server control plane uses `InProcess` so a
 /// server-owned run traverses the exact chat handler, admission, metrics, and
 /// adapter-selection path without depending on a loopback listener.
+///
+/// Judgment keep (round 74): the Http variant holds a reqwest::Client, which
+/// is a large struct that shares its pool internally; boxing a cheap shared
+/// client behind a heap pointer buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub(crate) enum OpenEnvPolicyTransport {
     Http {
