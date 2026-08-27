@@ -363,7 +363,8 @@ pub(super) fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Opti
 
 pub(super) fn lm_head_forward_backend_decode_if(
     // Consumed only by the cuda/metal/vulkan/rocm tape + backend-decode block;
-    // on feature-less builds the allow silences the unused parameter.
+    // on feature-less builds the allow silences the unused parameter (verified by
+    // default-lane probe).
     #[cfg_attr(
         not(any(
             feature = "cuda",
