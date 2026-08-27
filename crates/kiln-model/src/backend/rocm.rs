@@ -317,8 +317,8 @@ impl AttentionBackend for RocmBackend {
         // Phase 7 (#1082): kt-typed surface is now the only path. Args
         // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
         // are gone — the kernel runs directly on the caller's kt
-        // tensors. The legacy candle wrapper discarded softmax_lse; the
-        // kt path does the same here.
+        // tensors. The kt path uses the `no_lse` entry here (discards
+        // softmax_lse).
         kiln_nvtx::range!(c"kiln/flash_attn_kt");
         let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
         let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
@@ -1805,8 +1805,8 @@ impl ReplayBackend for RocmBackend {
         // through to. The kt-typed
         // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
         // accept a caller-owned (out, lse) pair — it allocates them
-        // internally through the bridge — so the `graph_outputs ==
-        // Some` case must stay on the candle path. That path
+        // internally — so the `graph_outputs ==
+        // Some` case must stay on the with-graph-outputs kt path. That path
         // specifically exists to fix the dangling-pointer hazard
         // documented in
         // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
