@@ -105,6 +105,8 @@ fn alloc_cuda_tensor(
 }
 
 /// Typed GPU stream submission for `t`'s next external FFI call.
+// rocm-lane only: all 25 call sites are `#[cfg(feature = "cuda")]`; the rocm branch uses `rocm_launch_stream` -> `output_stream_submission`, which inlines `kiln_kt_bridge::device_stream_submission_of` — so this helper is dead in the pure-rocm lane and live in every cuda lane.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn device_stream_submission(
     t: &KtTensor,
