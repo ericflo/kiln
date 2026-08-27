@@ -487,7 +487,7 @@ pub fn build_validation_suite(
     let holdout = &all[split..];
     let examples: Vec<kiln_eval::EvalExample> = holdout
         .iter()
-        .map(|row| {
+        .filter_map(|row| {
             // Orientation-balance the suite: roughly half the holdout is
             // presented swapped (stable per row id), so a judge that
             // always answers the same side scores ~50%, not its bias rate.
@@ -527,7 +527,6 @@ pub fn build_validation_suite(
                 ..Default::default()
             })
         })
-        .flatten()
         .collect();
     if examples.is_empty() {
         return Err(JudgmentError::NotFound(format!(
