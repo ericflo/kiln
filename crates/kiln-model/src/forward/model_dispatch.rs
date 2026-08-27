@@ -104,6 +104,8 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
     )
 }
 
+// Live only under `feature = "metal"` (callers in `metal_graph.rs`); dead in
+// the default build — cfg_attr required (verified by default-lane probe).
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
@@ -151,6 +153,8 @@ pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buf
     )
 }
 
+// Live only under `feature = "metal"` (callers in `metal_graph.rs`); dead in
+// the default build — cfg_attr required (verified by default-lane probe).
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub(crate) fn model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers(
