@@ -1037,7 +1037,7 @@ impl PagedKvCacheKt {
         anyhow::ensure!(
             start_slot
                 .checked_add(len)
-                .map_or(false, |e| e <= total_slots),
+                .is_some_and(|e| e <= total_slots),
             "kt PagedKvCacheKt: slot range [{start_slot}..{}] exceeds total_slots {total_slots}",
             start_slot + len
         );
