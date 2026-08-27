@@ -490,7 +490,7 @@ fn try_kt_apply_penalties_on_device(
     // scatter into (a bare `contiguous()`/`clone()` would alias `flat`'s
     // storage since it is already contiguous, corrupting the caller).
     let device = flat.device();
-    let indices_kt = Tensor::new(unique.as_slice(), &device)?;
+    let indices_kt = Tensor::new(unique.as_slice(), device)?;
     let out_kt = match flat.copy() {
         Ok(t) => t,
         Err(_) => return Ok(None),
@@ -504,7 +504,7 @@ fn try_kt_apply_penalties_on_device(
             current_kt.to_vec1()
         })?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
-    let delta_kt = Tensor::new(deltas.as_slice(), &device)?;
+    let delta_kt = Tensor::new(deltas.as_slice(), device)?;
     if kiln_tensor::cuda_scatter_add_dim0(&out_kt, &indices_kt, &delta_kt).is_err() {
         return Ok(None);
     }
@@ -1138,7 +1138,7 @@ mod tests {
             9.0_f32, 1.0, 2.0, 3.0, // ignored non-last position
             0.0, 4.0, 8.0, 7.0, // max index 2
         ];
-        let logits = Tensor::new(&values, &device)?.reshape((2, 4))?;
+        let logits = Tensor::new(&values, device)?.reshape((2, 4))?;
         let flat = last_position_logits(&logits)?;
 
         // #1082: `flat` is already a kt CUDA tensor — pass it straight to the
@@ -1171,7 +1171,7 @@ mod tests {
         // Includes a tie (two 4.0s at idx 6 and 11) to exercise the
         // lowest-index tie-break, matching the host fallback.
         let values: Vec<f32> = vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.0];
-        let logits = Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), device)?;
 
         for k in [1usize, 3, 7, 12] {
             let (vals, idxs) = kiln_tensor::cuda_topk_last_axis(&logits, k)?;
@@ -1255,7 +1255,7 @@ mod tests {
             0.0, 5.0, 4.0, 3.0, // max index 1
         ];
         let expected = vec![2, 0, 3, 1];
-        let logits = Tensor::new(&values, &device)?.reshape((2, 2, 4))?;
+        let logits = Tensor::new(&values, device)?.reshape((2, 2, 4))?;
 
         // #1082: `logits` is already a kt CUDA tensor — pass it straight to
         // the kt helper, no candle->kt bridge.
@@ -1587,8 +1587,8 @@ mod tests {
         let values: Vec<f32> = (0..257)
             .map(|index| ((index as f32 + 0.25) * 0.173).sin() * 3.0 + index as f32 * 0.0001)
             .collect();
-        let cpu_logits = Tensor::new(values.as_slice(), &Device::Cpu)?;
-        let rocm_logits = Tensor::new(values.as_slice(), &Device::Rocm(0))?;
+        let cpu_logits = Tensor::new(values.as_slice(), Device::Cpu)?;
+        let rocm_logits = Tensor::new(values.as_slice(), Device::Rocm(0))?;
         let history = [3_u32, 3, 17, 41, 41, 41];
         let mut params = full_params_with_seed(0);
         params.temperature = 0.8;
@@ -1679,7 +1679,7 @@ mod tests {
         let presence = 0.5;
         let frequency = 0.25;
 
-        let cuda_logits = Tensor::new(&values, &cuda)?.reshape((2, 6))?;
+        let cuda_logits = Tensor::new(&values, cuda)?.reshape((2, 6))?;
         let got =
             apply_penalties_on_device(&cuda_logits, &history, repetition, presence, frequency)?;
 
@@ -1689,7 +1689,7 @@ mod tests {
         )?
         .context("expected CUDA kt penalty path to run")?;
 
-        let cpu_logits = Tensor::new(&values, &cpu)?.reshape((2, 6))?;
+        let cpu_logits = Tensor::new(&values, cpu)?.reshape((2, 6))?;
         let expected =
             apply_penalties_on_device(&cpu_logits, &history, repetition, presence, frequency)?;
 
@@ -1727,7 +1727,7 @@ mod tests {
         }
         let cuda = Device::Cuda(0);
         let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
-        let logits = Tensor::new(&values, &cuda)?;
+        let logits = Tensor::new(&values, cuda)?;
 
         let got = try_kt_full_distribution_probs(&logits)?
             .context("expected CUDA kt sampler softmax path to run")?;
@@ -1759,8 +1759,8 @@ mod tests {
         let cuda = Device::Cuda(0);
         let cpu = Device::Cpu;
         let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
-        let cuda_logits = Tensor::new(&values, &cuda)?;
-        let cpu_logits = Tensor::new(&values, &cpu)?;
+        let cuda_logits = Tensor::new(&values, cuda)?;
+        let cpu_logits = Tensor::new(&values, cpu)?;
 
         for seed in 0..32 {
             let got = sample_full_distribution_unsorted(&cuda_logits, Some(seed))?;

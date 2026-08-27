@@ -1914,7 +1914,7 @@ fn rocm_chunked_swiglu_tape_reaches_every_mlp_lora_leaf() -> Result<()> {
         );
     }
 
-    let seed = Tensor::ones(out.shape().to_vec(), out.dtype(), &device)?;
+    let seed = Tensor::ones(out.shape().to_vec(), out.dtype(), device)?;
     let grads = tape.backward(out.id(), seed, kiln_tensor::ops::add)?;
     for leaf_id in lora_leaf_ids {
         let grad = grads
@@ -8329,7 +8329,7 @@ fn rocm_tape_streaming_gdn_records_single_token_tail() -> Result<()> {
         tape.reachable_from(output.id()).contains(&input.id()),
         "streaming GDN output must remain connected through the one-token tail to its input"
     );
-    let seed = Tensor::ones(output.shape().to_vec(), output.dtype(), &device)?;
+    let seed = Tensor::ones(output.shape().to_vec(), output.dtype(), device)?;
     let gradients = tape.backward(output.id(), seed, kiln_tensor::ops::add)?;
     let input_gradient = gradients
         .get(input.id())

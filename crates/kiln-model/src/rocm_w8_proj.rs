@@ -595,12 +595,12 @@ mod tests {
         for index in 0..8 {
             weight[index * 8 + index] = 1.0;
         }
-        let weight = kiln_tensor::Tensor::new(weight.as_slice(), &device)?
+        let weight = kiln_tensor::Tensor::new(weight.as_slice(), device)?
             .reshape((8, 8))?
             .to_dtype(kiln_tensor::DType::BF16)?;
         let packed = pack_from_bf16_rows(&weight)?.context("pack W8 identity")?;
         let activation =
-            kiln_tensor::Tensor::new(&[0.0_f32, 1.0, 2.0, 7.0, 3.0, 4.0, 5.0, 6.0], &device)?
+            kiln_tensor::Tensor::new(&[0.0_f32, 1.0, 2.0, 7.0, 3.0, 4.0, 5.0, 6.0], device)?
                 .reshape((1, 1, 8))?
                 .to_dtype(kiln_tensor::DType::BF16)?;
 
