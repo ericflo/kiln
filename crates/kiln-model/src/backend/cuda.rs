@@ -148,10 +148,9 @@ pub struct CudaBackend {
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
     // sibling. The `cuda_use_kt_api_flash_attn` gate is gone. The
     // `_with_graph_outputs` site dispatches both branches through
-    // kt: `Some((out, lse))` borrows the caller's candle tensors
-    // into kt and writes through them via the new with_graph_outputs
-    // entry; `None` calls the existing internally-allocating
-    // `flash_attn_paged_decode_dyn_seqlen_kt`.
+    // kt: `Some((out, lse))` writes through the caller's kt tensors
+    // via the with_graph_outputs entry; `None` calls the existing
+    // internally-allocating `flash_attn_paged_decode_dyn_seqlen_kt`.
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
@@ -185,13 +184,11 @@ impl CudaBackend {
         // family and its portable reference paths.
         // #1082: flipped default ON. The kt path is bit-exact by
         // construction — all 4 wired flash_attn dispatch sites bottom
-        // out in the same FFI symbols as the candle shim, with only
-        // the Rust shell types changing. The `with_graph_outputs`
-        // site retains its `graph_outputs.is_none()` guard so the
-        // caller-owned-output path keeps using the candle wrapper.
-        // The per-operation KT disable gate was removed alongside the
-        // 3 sites where the kt-typed path is the only path. The
-        // 4th site checks `graph_outputs.is_none()` directly.
+        // out in the same FFI symbols as the pre-#1082 candle shim,
+        // with only the Rust shell types changing. The per-operation
+        // KT disable gate was removed alongside the 3 sites where the
+        // kt-typed path is the only path; the 4th (`with_graph_outputs`)
+        // site branches on `graph_outputs` between the two kt entries.
         let gdn_decode_fused_enabled =
             gdn_gates_enabled && gdn_gated_rms_norm_enabled && policy.gdn_decode_fused;
         let gdn_decode_unexpanded_qk_enabled =
@@ -343,8 +340,8 @@ impl AttentionBackend for CudaBackend {
         // Phase 7 (#1082): kt-typed surface is now the only path. Args
         // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
         // are gone — the kernel runs directly on the caller's kt
-        // tensors. candle wrapper discards softmax_lse, kt path does
-        // the same here.
+        // tensors. The kt path discards softmax_lse here (returns
+        // only `out`).
         kiln_nvtx::range!(c"kiln/flash_attn_kt");
         let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
         let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
