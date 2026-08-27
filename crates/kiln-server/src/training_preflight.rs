@@ -358,8 +358,7 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
     let by_memory = (FLCE_FALLBACK_SCRATCH_BUDGET_BYTES / bytes_per_vocab_col).max(1) as usize;
     let raw = cfg
         .vocab_size
-        .max(1)
-        .min(FLCE_MAX_AUTO_CHUNK)
+        .clamp(1, FLCE_MAX_AUTO_CHUNK)
         .min(by_memory)
         .max(1);
     let rounded = if raw <= 1 {
@@ -377,7 +376,7 @@ fn sft_loss_workspace_bytes(cfg: &ModelConfig, max_seq_len: usize, sft: SftEstim
     let active = usize_to_u64_saturating(sft.max_active_tokens.max(1));
     let hidden = usize_to_u64_saturating(cfg.hidden_size.max(1));
     let vocab = usize_to_u64_saturating(cfg.vocab_size.max(1));
-    let chunk = usize_to_u64_saturating(cfg.vocab_size.max(1).min(FLCE_MAX_AUTO_CHUNK));
+    let chunk = usize_to_u64_saturating(cfg.vocab_size.clamp(1, FLCE_MAX_AUTO_CHUNK));
 
     match sft.loss_route {
         SftFlceLossRoute::KtTapeFlce => {
@@ -636,11 +635,7 @@ pub fn lora_rank_ceiling_for_budget(
     let model = model_lora_rank_ceiling(cfg);
     let bytes_per_rank = lora_working_set_bytes_per_rank(cfg, optimizer, residency);
     let rank_budget = available_bytes.saturating_sub(estimate.breakdown.fixed_bytes());
-    let resource_u64 = if bytes_per_rank == 0 {
-        0
-    } else {
-        rank_budget / bytes_per_rank
-    };
+    let resource_u64 = rank_budget.checked_div(bytes_per_rank).unwrap_or(0);
     let resource = usize::try_from(resource_u64).unwrap_or(usize::MAX);
     LoraRankCeiling {
         model,
@@ -798,11 +793,10 @@ fn f32_matrix_bytes(rows: usize, cols: usize) -> u64 {
 }
 
 fn ceil_div_u64(n: u64, d: u64) -> u64 {
-    if d == 0 {
-        0
-    } else {
-        (n / d).saturating_add(u64::from(!n.is_multiple_of(d)))
-    }
+    let Some(quotient) = n.checked_div(d) else {
+        return 0;
+    };
+    quotient.saturating_add(u64::from(!n.is_multiple_of(d)))
 }
 
 /// Peak activation estimate for one replayed layer/subblock.
