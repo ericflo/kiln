@@ -238,13 +238,11 @@ pub fn causal_conv1d_prefill_kt(
     Ok(out)
 }
 
-/// kt-typed envelope predicate for [`crate::supports`]-style checks.
+/// kt-typed envelope predicate (replacement of the deleted
+/// candle-typed `supports_update`, #1082).
 ///
 /// Returns `true` only for the exact bf16/f32/K=4 envelope the
-/// vendored kernel was specialised for. Mirrors the deleted
-/// candle-typed [`crate::supports_update`] but takes `&KtTensor` so
-/// callers on the kt-substrate never needed to round-trip through
-/// candle for the pre-dispatch envelope check.
+/// vendored kernel was specialised for.
 ///
 /// Phase 7 (#1082) complete — every caller is on this kt-typed
 /// predicate and the candle dep is gone.
@@ -257,7 +255,8 @@ pub fn supports_kt(
     supports_update_kt(x, weight, conv_state, kernel_size)
 }
 
-/// kt-typed twin of [`crate::supports_update`].
+/// kt replacement of the deleted candle-typed `supports_update`
+/// envelope check (#1082).
 pub fn supports_update_kt(
     x: &KtTensor,
     weight: &KtTensor,

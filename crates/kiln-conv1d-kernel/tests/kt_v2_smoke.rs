@@ -6,9 +6,7 @@
 //! `causal_conv1d_prefill_kt`, `supports_kt`, and `supports_prefill_kt`
 //! entry points on the Qwen3.5-4B decode/prefill envelopes.
 //!
-//! The legacy "BORROW adapter" smoke (zero-copy candle→kt round-trip)
-//! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
-//! lives. This file tests the kt API in isolation.
+//! This file tests the kt API in isolation.
 //!
 //! CUDA-only: `Tensor::cuda_from_slice` / `primary_cuda_context` are the
 //! cuda-storage substrate helpers and don't exist on the ROCm build. The
