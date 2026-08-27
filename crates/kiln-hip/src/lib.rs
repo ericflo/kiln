@@ -478,11 +478,7 @@ fn check(code: sys::hipError_t, api: &'static str) -> Result<()> {
             CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     };
-    Err(HipError {
-        code: code as i32,
-        api,
-        message,
-    })
+    Err(HipError { code, api, message })
 }
 
 /// The HIP runtime version (`hipRuntimeGetVersion`), or an error if no runtime
@@ -880,10 +876,10 @@ impl RocmTensorKernelPolicy {
         if self.concat_safe_row_assembly_min_elements == 0 {
             return Some("concat_safe_row_assembly_min_elements must be positive");
         }
-        if let Some(elements) = self.is_finite_host_scan_min_elements {
-            if elements == 0 {
-                return Some("is_finite_host_scan_min_elements must be positive when present");
-            }
+        if let Some(elements) = self.is_finite_host_scan_min_elements
+            && elements == 0
+        {
+            return Some("is_finite_host_scan_min_elements must be positive when present");
         }
         if self.rmsnorm_row_tile_rows == 0 {
             return Some("rmsnorm_row_tile_rows must be positive");
@@ -1283,14 +1279,12 @@ impl RocmContext {
             });
         }
         let initialization = execution_gate.try_acquire("RocmContext::new")?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &initialization,
             unsafe { sys::hipSetDevice(ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         // Pin the stream-ordered allocator's pool to NEVER release freed memory
         // back to the OS (hipMemPoolAttrReleaseThreshold = u64::MAX). The default
         // threshold (0) makes hipMallocAsync hand freed pages back aggressively;
@@ -1399,14 +1393,12 @@ impl RocmContext {
 
     fn execution_permit(&self, api: &'static str) -> Result<RocmExecutionPermit> {
         let permit = self.execution_gate.try_acquire(api)?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &permit,
             unsafe { sys::hipSetDevice(self.ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         Ok(permit)
     }
 
@@ -1869,14 +1861,12 @@ unsafe impl Sync for RocmEvent {}
 impl RocmEvent {
     fn create(ordinal: c_int, execution_gate: Arc<RocmExecutionGate>) -> Result<Arc<Self>> {
         let permit = execution_gate.try_acquire("RocmEvent::create")?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &permit,
             unsafe { sys::hipSetDevice(ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         let mut handle: sys::hipEvent_t = ptr::null_mut();
         let code =
             unsafe { sys::hipEventCreateWithFlags(&mut handle, sys::HIP_EVENT_DISABLE_TIMING) };
@@ -1919,14 +1909,12 @@ impl RocmStream {
         execution_gate: Arc<RocmExecutionGate>,
     ) -> Result<Arc<Self>> {
         let permit = execution_gate.try_acquire("RocmStream::create")?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &permit,
             unsafe { sys::hipSetDevice(ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         let mut handle: sys::hipStream_t = ptr::null_mut();
         let (code, api) = match priority {
             None => (
@@ -1982,14 +1970,12 @@ impl RocmStream {
     #[inline]
     fn execution_permit(&self, api: &'static str) -> Result<RocmExecutionPermit> {
         let permit = self.execution_gate.try_acquire(api)?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &permit,
             unsafe { sys::hipSetDevice(self.ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         Ok(permit)
     }
 
@@ -2561,14 +2547,12 @@ impl RocmGraph {
     /// free and was rejected with `hipErrorInvalidValue` on gfx1151 / ROCm 7.2.4.
     pub fn instantiate(&self) -> Result<RocmGraphExec> {
         let submission = self.execution_gate.try_acquire("RocmGraph::instantiate")?;
-        if let Err(error) = check_call_status(
+        check_call_status(
             &submission,
             unsafe { sys::hipSetDevice(self.ordinal) },
             "hipSetDevice",
             HipCallFailureClass::ExecutionMutation,
-        ) {
-            return Err(error);
-        }
+        )?;
         let mut exec: sys::hipGraphExec_t = ptr::null_mut();
         let code = unsafe { sys::hipGraphInstantiateWithFlags(&mut exec, self.graph, 0) };
         check_resource_creation(
