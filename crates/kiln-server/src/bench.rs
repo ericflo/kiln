@@ -383,19 +383,19 @@ fn parse_args_from(args: &[String]) -> Result<BenchArgs> {
     while i < args.len() {
         match args[i].as_str() {
             "--config" => {
-                config_path = Some(value(&args, &mut i, "--config")?.to_string());
+                config_path = Some(value(args, &mut i, "--config")?.to_string());
             }
             "--model-path" => {
-                model_path = value(&args, &mut i, "--model-path")?.to_string();
+                model_path = value(args, &mut i, "--model-path")?.to_string();
             }
             "--max-output-tokens" => {
-                max_output_tokens = number(&args, &mut i, "--max-output-tokens")?;
+                max_output_tokens = number(args, &mut i, "--max-output-tokens")?;
             }
             "--prompt-tokens" => {
-                prompt_tokens = number(&args, &mut i, "--prompt-tokens")?;
+                prompt_tokens = number(args, &mut i, "--prompt-tokens")?;
             }
             "--training-steps" => {
-                training_steps = number(&args, &mut i, "--training-steps")?;
+                training_steps = number(args, &mut i, "--training-steps")?;
             }
             "--skip-training" => {
                 skip_training = true;
@@ -407,27 +407,27 @@ fn parse_args_from(args: &[String]) -> Result<BenchArgs> {
                 latency_only = true;
             }
             "--latency-warmup-runs" => {
-                latency_warmup_runs = number(&args, &mut i, "--latency-warmup-runs")?;
+                latency_warmup_runs = number(args, &mut i, "--latency-warmup-runs")?;
             }
             "--seed" => {
-                seed = number(&args, &mut i, "--seed")?;
+                seed = number(args, &mut i, "--seed")?;
             }
             "--chat-template" => {
                 chat_template = true;
             }
             "--prompt-subset" => {
-                let s = value(&args, &mut i, "--prompt-subset")?;
-                prompt_subset = PromptSubset::parse(&s).ok_or_else(|| {
+                let s = value(args, &mut i, "--prompt-subset")?;
+                prompt_subset = PromptSubset::parse(s).ok_or_else(|| {
                     anyhow::anyhow!(
                         "invalid --prompt-subset value '{s}' (expected all|gsm8k|humaneval|c4)"
                     )
                 })?;
             }
             "--temperature" => {
-                temperature = number(&args, &mut i, "--temperature")?;
+                temperature = number(args, &mut i, "--temperature")?;
             }
             "--spec-method" => {
-                let raw = value(&args, &mut i, "--spec-method")?;
+                let raw = value(args, &mut i, "--spec-method")?;
                 spec_method = Some(SpecMethod::parse_env(raw).ok_or_else(|| {
                     anyhow::anyhow!(
                         "invalid --spec-method value {raw:?} (expected off|skip_layer|mtp)"
@@ -435,10 +435,10 @@ fn parse_args_from(args: &[String]) -> Result<BenchArgs> {
                 })?);
             }
             "--spec-num-tokens" => {
-                spec_num_tokens = Some(number(&args, &mut i, "--spec-num-tokens")?);
+                spec_num_tokens = Some(number(args, &mut i, "--spec-num-tokens")?);
             }
             "--spec-draft-layers" => {
-                spec_draft_layers = Some(number(&args, &mut i, "--spec-draft-layers")?);
+                spec_draft_layers = Some(number(args, &mut i, "--spec-draft-layers")?);
             }
             "--force-mtp" => {
                 force_mtp = true;
