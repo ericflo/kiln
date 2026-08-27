@@ -1,5 +1,5 @@
-//! Vulkan-native chunkwise GDN forward (mirrors candle's
-//! `gdn_chunkwise_recurrence` in forward.rs:4679).
+//! Vulkan-native chunkwise GDN forward (mirrors kiln-model's
+//! `gdn_chunkwise_recurrence`, `forward/linear_attention.rs`).
 //!
 //! Inputs:
 //!   q: [B, nv, T, dk]   F32
