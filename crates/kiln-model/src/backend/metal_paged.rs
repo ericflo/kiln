@@ -34,7 +34,7 @@ use kiln_tensor::metal_types::{
 
 use crate::execution_phase::{GraphPhase, GraphPhaseTimer};
 
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_record_paged_decode_icb_graph(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -145,6 +145,8 @@ pub(crate) fn metal_record_paged_decode_icb_graph(
     })
 }
 
+// Test-lane only: the sole caller is the `#[cfg(test)]` single-token ICB
+// replay test; allow required for the metal non-test build.
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn metal_record_single_token_paged_decode_icb_graph(
     q: &kiln_tensor::Tensor,
@@ -489,7 +491,6 @@ pub(super) fn metal_paged_attn_decode_contiguous_bf16_d256(
     Ok(out)
 }
 
-#[allow(dead_code)]
 pub(super) fn metal_paged_attn_decode_contiguous_batch_supports(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -549,7 +550,6 @@ pub(super) fn metal_paged_attn_decode_contiguous_batch_supports(
         && total_slots <= u32::MAX as usize
 }
 
-#[allow(dead_code)]
 pub(super) fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -630,7 +630,6 @@ pub(super) fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
     Ok(out)
 }
 
-#[allow(dead_code)]
 pub(super) fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -703,7 +702,6 @@ pub(super) fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
         && total_slots <= u32::MAX as usize
 }
 
-#[allow(dead_code)]
 pub(super) fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -749,7 +747,6 @@ pub(super) fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
     Ok(out)
 }
 
-#[allow(dead_code)]
 pub(super) fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256_into(
     q: &kiln_tensor::Tensor,
     k_pool: &kiln_tensor::Tensor,
@@ -861,6 +858,9 @@ fn push_write_resource(resources: &mut Vec<MetalGraphResourceRef>, buf: &BufferO
     resources.push(MetalGraphResourceRef::write(buf.buffer));
 }
 
+// Test-lane only: the sole caller is the single-token ICB capture
+// (`metal_record_single_token_paged_decode_icb_graph`), whose only consumer is
+// the `#[cfg(test)]` replay test; allow required for the metal non-test build.
 #[allow(dead_code)]
 pub(crate) fn metal_record_paged_kv_write_token_major_bf16_icb(
     command: &IndirectComputeCommand,
@@ -921,7 +921,6 @@ pub(crate) fn metal_record_paged_kv_write_token_major_bf16_icb(
     Ok(resources)
 }
 
-#[allow(dead_code)]
 pub(crate) fn metal_record_paged_kv_write_token_major_batch_bf16_icb(
     command: &IndirectComputeCommand,
     args: &MetalPagedKvWriteTokenMajorBatchIcbArgs,
@@ -987,7 +986,6 @@ pub(crate) fn metal_record_paged_kv_write_token_major_batch_bf16_icb(
     Ok(resources)
 }
 
-#[allow(dead_code)]
 pub(crate) fn metal_record_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256_icb(
     command: &IndirectComputeCommand,
     args: &MetalPagedAttnDecodeDynSeqlenIcbArgs,
@@ -1361,8 +1359,6 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
     Ok(())
 }
 
-#[allow(dead_code)]
-#[allow(dead_code)]
 pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
     k_pool: &kiln_tensor::Tensor,
     v_pool: &kiln_tensor::Tensor,
@@ -1435,8 +1431,6 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
         && total <= u32::MAX as usize
 }
 
-#[allow(dead_code)]
-#[allow(dead_code)]
 pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
     k_pool: &kiln_tensor::Tensor,
     v_pool: &kiln_tensor::Tensor,
