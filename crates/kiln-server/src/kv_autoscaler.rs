@@ -688,7 +688,7 @@ mod tests {
         // Tiny headroom → shrink, but never below the floor, never beyond step.
         let t = decide_target(1000, 0, BPB, MemoryPressure::Critical, bounds());
         let t = t.expect("should shrink");
-        assert!(t < 1000 && t >= 250, "target {t}");
+        assert!((250..1000).contains(&t), "target {t}");
         assert!(1000 - t <= 350, "step cap (35% of 1000)");
     }
 
