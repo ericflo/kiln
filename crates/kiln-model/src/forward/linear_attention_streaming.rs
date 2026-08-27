@@ -770,7 +770,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                 {
                     // Used only by the tape-recording block below, which is
                     // gated to cuda/metal/vulkan/rocm; on feature-less builds
-                    // the allow silences the unused local.
+                    // the allow silences the unused local (verified by default-lane probe).
                     #[cfg_attr(
                         not(any(
                             feature = "cuda",
