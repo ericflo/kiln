@@ -2929,3 +2929,113 @@ after this entry. `git grep` confirms zero remaining stale references to
 `docs/plans/{echo-integration-plan, grand-plan-for-extraordinarily-great-
 echo, confidence-hardening-goal, mtp-training-plan}` outside the two
 protocol-exempt historical/frozen sites above.
+
+## Cleanup Agent (round 77) — 2026-08-26 — workflows/scripts dead-surface audit: 0 deletions; 13/13 workflows job-coherent; all named suspicious script families kept with evidence
+
+**Steering:** audit `.github/workflows/` (13 files) for obsolete jobs — every
+script/path/feature/binary each job invokes must exist — and `scripts/` for
+obsolete scripts, prioritizing the three named suspicious families (the
+c13/c14/c29 HF reference-dump cluster, the c29 logits-compare v1/v2 pair, and
+the capture-screenshots vs capture-desktop-screenshots pair), then sweeping the
+rest for zero-reference orphans. Rules: ledger/archive/audit citations =
+retained evidence → KEEP (round-63 precedent); deletion only on zero live
+references + ledger evidence + both standing gates green; when in doubt, keep
+and report.
+
+**Workflows (13/13 audited job-by-job): no dead jobs found.**
+
+- Every distinct `scripts/…` invocation in the 13 workflow files resolves to an
+  existing path (32 distinct refs checked: all present).
+- Every `cargo` entry point resolves: features `cuda`/`rocm`/`metal`/`vulkan`
+  all defined in `crates/kiln-server/Cargo.toml [features]`; bins `kiln`,
+  `kiln-bench`, `kiln-eval` all defined; `crates/kiln-vulkan-kernel` present
+  with its 11 test targets; all 5 referenced crates exist.
+- Job inventories verified against the tree: ci.yml (macos-metal,
+  linux-default, linux-vulkan, linux-cuda, linux-rocm); server-release.yml
+  (macos-metal, linux-cuda, linux-vulkan, linux-rocm, windows-cuda, publish);
+  pages.yml (build, deploy); desktop-build.yml (build, publish);
+  perf-regression-nightly.yml (gate-self-test, cuda-bench,
+  backend-latency-fixture); docker-server-release.yml (docker-server);
+  openenv-interop.yml (upstream-edge); runpod-image.yml (build, 2×
+  `deploy/runpod` contexts — both exist); ui-smoke.yml (ui-smoke);
+  repository-hygiene.yml (artifacts); qualification-contract.yml (validate);
+  release-version-drift.yml (check). No two workflows duplicate each other's
+  lanes; no `workflow_call` wiring.
+- perf-regression-nightly.yml's legacy entry points all exist:
+  `bench-results/check_sft_train_regression.py`, both A6000 baseline JSONs
+  (`bench-results/regression/sft_{native,generic}_a6000_baseline.json`),
+  `docs/backend-latency-fixtures.json`, all 5 fixture JSONs under
+  `bench-results/backend-latency/`, and the six `scripts/*backend_latency*`/
+  fixture-dispatch scripts it runs.
+- opd-bench-gate.yml is the single workflow pointing at a removed target
+  (`examples/bench_opd_topk_kl.rs`, gone since #1082) — explicitly
+  OUT-OF-SCOPE for this round: round 64's dated deprecation comment and round
+  68's precedent both say leave the dated deprecation comment as-is. Nothing
+  else points at a missing target.
+
+**scripts/ (all top-level files + subdirectory clusters): no deletion
+candidates.**
+
+Named suspicious families — all KEPT with evidence:
+
+1. `c13_hf_reference_dump.py` — cited by archived verdicts
+   (`docs/archive/phase-c/phase-c13/c13-splice-verdict.md`,
+   `phase-c15/c15-h-main-drift-verdict.md`); `c15_h_main_drift_audit.py`
+   shells out to it. Retained evidence (round 63: retained evidence is not
+dead).
+2. `c14_hf_reference_dump.py` — LIVE-invoked by `c29_hf_reference_dump.py`
+   (its default `--c14-script` path, line 61); cited by c14/c29/c31 archived
+   verdicts and `docs/audits/phase7-h15b-stratified-c29-v2.md`.
+3. `c29_hf_reference_dump.py` — the C29 H9 reference scheduler; cited by
+   `c29-h9-verdict.md` (twice), `c31-head-trio-static-audit.md`, and the
+   phase7-h15b audit; its docstring contract is cited by v1/v2 comparators.
+4. `c29_logits_compare.py` (v1) — cited by `c29-h9-verdict.md` (primary tap
+   + top-K Jaccard/KL comparator); v2's docstring depends on v1's input
+   layout ("same as c29_logits_compare.py, plus accept-labels CSV").
+5. `c29_logits_compare_v2.py` — the stratified comparator of
+   `docs/audits/phase7-h15b-stratified-c29-v2.md` (lines 88, 243).
+6. `capture-desktop-screenshots.mjs` — referenced by `.gitignore` (round 52)
+   and sole generator of `docs/desktop/{dashboard,settings,logs}.png`
+   (cited by `desktop/README.md`).
+7. `capture-screenshots.mjs` — zero text references, BUT the sole generator
+   of the 13 checked-in `docs/site/assets/server-ui-*.{png,webp}` files,
+   which are consumed by live `docs/site/{index,quickstart,demo}` HTML,
+   `README.md`, `QUICKSTART.md`, and asserted by the live consumer check in
+   `scripts/check_docs_site_smoke.mjs`; actively maintained (last touched by
+   the #1603/#1604 docs-site rebuilds). KEPT per the round-25 generator
+   precedent (kept as the generator of checked-in artifacts). Not a duplicate
+   of #6: it captures the server dashboard (crates/kiln-server UI), #6
+   captures the Tauri shell windows (desktop/ui).
+8. `push-build-cache.sh` — zero text references, but round 52 already
+   classified it: intentional manual push-side counterpart of
+   `setup-build-cache.sh`'s live pull path (deploy/runpod usage, round 23).
+
+Rest of scripts/: every remaining top-level script resolves to (a) a workflow
+invocation (all `check_*`/`generate_*`/contract/latency-fixture scripts),
+(b) live doc or contract citation (CONTRIBUTING.md, docs/ci-policy.md,
+docs/qualification.md, docs/TRAJECTORY_TURN_THROUGHPUT.md, bench-results
+receipts), (c) a qualification/test cluster member (serve_*/rocm_*/wsl_*/
+linux_namespace_exec/macros + their test_*.py files; h15c/h17/h18 families
+each cited by the retained phase7-h15c/h16/h17/h17b/h18 audit docs; mtp_*
+cluster whose `mtp_reference_dump.py` is itself cited by live code,
+crates/kiln-model/src/forward/model_dispatch.rs:3719), or (d) the evidence-generation cluster
+(`audit-*.sh/.py` → `bench-results/*-audit.md` retained evidence, per the
+round-25/round-63 precedent). Subdirectory clusters (hf_trl, phase-c36/37/
+40a/40b/40f, c2_artifacts) are all cited by archived verdict/profiling docs
+and the phase-c README; c2_artifacts is additionally explicitly excluded from
+the source-tree hash as historical artifacts (round 7). The qualification
+harness (`scripts/qualification/*`) is the live retained-evidence validator
+(run by repository-hygiene.yml + qualification-contract.yml +
+validate_retained_evidence.sh).
+
+**Deleted: nothing** — zero files qualified under the keep-by-default rule;
+every zero-reference script is a protected artifact generator or an explicit
+round-52 manual counterpart.
+
+**Verification (before AND after this entry, both green):**
+`python3 scripts/check_production_file_budget.py` → "production file budget
+passed: 647 files, 5000-line default, 14 reviewed exceptions" (exit 0);
+`python3 scripts/check_repository_artifacts.py` → "repository artifact policy
+passed: 6697 tracked paths, 124738250 bytes; CSV <= 1048576, each file <=
+10485760" (exit 0). `git status` clean before any edit and after this
+entry's commit.
