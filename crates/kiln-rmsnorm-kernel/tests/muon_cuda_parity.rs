@@ -19,7 +19,7 @@
 use half::bf16;
 
 use kiln_rmsnorm_kernel::{muon_step_bf16_kt, muon_step_f32_kt};
-use kiln_tensor::{DType, Device, Element, Tensor};
+use kiln_tensor::{DType, Element, Tensor};
 
 #[derive(Clone, Copy, Debug)]
 enum TestGpu {
@@ -51,9 +51,8 @@ fn device_tensor_from_slice<E: Element>(gpu: TestGpu, data: &[E], shape: Vec<usi
         #[cfg(feature = "cuda")]
         TestGpu::Cuda => Tensor::cuda_from_slice(data, shape, 0).expect("cuda tensor"),
         #[cfg(feature = "rocm")]
-        TestGpu::Rocm => {
-            Tensor::from_vec_on(Device::Rocm(0), data.to_vec(), shape).expect("rocm tensor")
-        }
+        TestGpu::Rocm => Tensor::from_vec_on(kiln_tensor::Device::Rocm(0), data.to_vec(), shape)
+            .expect("rocm tensor"),
     }
 }
 
