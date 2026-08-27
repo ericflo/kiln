@@ -239,8 +239,8 @@ fn vk_sdpa_backward_runs_through_three_params() -> Result<()> {
     let sq = vk_mul(&s, &s)?;
     let loss = vk_mean_all(&sq)?;
     let grads = vk_backward(&loss)?;
-    // We don't need exact parity here (would require a candle reference),
-    // but we *do* need all three param grads to be present and finite.
+    // We don't need exact parity here; we *do* need all three param grads
+    // to be present and finite.
     assert_eq!(grads.len(), 3, "expected 3 param grads");
     for (_, g) in grads.iter() {
         let v = g.to_vec_f32()?;
