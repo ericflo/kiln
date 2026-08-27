@@ -3297,9 +3297,6 @@ pub(crate) fn tiny_config_bf16() -> ModelConfig {
 /// Vulkan tests: exercises SFT/GRPO/OPD grad delivery through the
 /// q/k/v/o_proj + MLP LoRA modules on a BF16 base independently of the GDN
 /// tape wiring. `pub(crate)` so `opd.rs`'s BF16 OPD test can reuse it.
-// Only the `vulkan`-gated BF16 validation tests consume this today; the
-// CUDA/Metal BF16 coverage uses the GDN-bearing `tiny_config_bf16`.
-#[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
 pub(crate) fn tiny_config_full_attn_bf16() -> ModelConfig {
     ModelConfig {
         dtype: kiln_core::config::DType::BF16,

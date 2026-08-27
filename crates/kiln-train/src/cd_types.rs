@@ -41,13 +41,6 @@
 pub(crate) type Tensor = kiln_tensor::Tensor;
 pub(crate) type Device = kiln_tensor::Device;
 pub(crate) type DType = kiln_tensor::DType;
-// keep: reserved for the Wave E4 kt facade — this module's #1082 E4 doc
-// names `TensorId` as one of the four load-bearing aliases (alongside the
-// live `Tensor`, `Device`, `DType`); deleting only this alias would break
-// the documented facade invariant. The `cd_tensor_id_to_kt` bridge was
-// retired the same wave because `TensorId` is already the kt id.
-#[allow(dead_code)]
-pub(crate) type TensorId = kiln_tensor::TensorId;
 
 /// kt `Shape` / `D` (#1082). Named in the helper signatures in
 /// `trainer.rs` (e.g. `Into<Shape>` bounds on `zeros_*`, `D::Minus1` axis
