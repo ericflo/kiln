@@ -1008,9 +1008,10 @@ impl PagedKvCacheKt {
     /// don't match or if the cache is FP8 (FP8 needs the quantized
     /// write path, not yet wired).
     ///
-    /// **Routes through `cudarc::memcpy_dtod_async`** on the candle
-    /// device's default stream — no kt-API kernel call, no nvcc
-    /// kernel needed. The destination pool's storage is mutated
+    /// **Routes through `cudarc::memcpy_dtod_async`** on the kt
+    /// storage's raw stream (`cuda_stream_raw()`) — no kt-API kernel
+    /// call, no nvcc kernel needed. The destination pool's storage is
+    /// mutated
     /// in place via the raw device pointer (same idiom as the
     /// kt-API kernel crates).
     #[cfg(feature = "cuda")]
@@ -1191,7 +1192,7 @@ impl PagedKvCacheKt {
     /// **Cost:**
     /// - Fast path: one CUDA `Tensor::contiguous()` per pool (k+v).
     /// - Gather path: one H2D upload of `seq_len` u32 indices via
-    ///   candle, plus one `cuda_index_select_dim0` per pool, plus
+    ///   kt, plus one `cuda_index_select_dim0` per pool, plus
     ///   the same transpose+contiguous+unsqueeze tail as the fast
     ///   path.
     // (#1082 DoD-100) Device-agnostic: the contiguous fast path (`narrow`) and
