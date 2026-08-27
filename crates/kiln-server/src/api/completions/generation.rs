@@ -1,5 +1,7 @@
 use super::*;
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_real_batched(
     state: &AppState,
     batching_engine: &crate::batching_engine::BatchingEngineHandle,
@@ -301,6 +303,8 @@ pub(super) fn drain_terminal_event_buffer(
     events
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_real_batched_streaming(
     state: &AppState,
     batching_engine: &crate::batching_engine::BatchingEngineHandle,
@@ -1005,6 +1009,8 @@ pub(super) async fn generate_real_batched_streaming(
         .into_response())
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_mock(
     state: &AppState,
     scheduler: &tokio::sync::Mutex<kiln_scheduler::Scheduler>,

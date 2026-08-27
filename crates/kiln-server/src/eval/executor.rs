@@ -41,6 +41,8 @@ pub struct EvalReplayEnvironment {
 /// `SuiteResult`. The function is cancellation-cooperative — when the
 /// `cancelled` flag flips to true the executor returns early with the
 /// partial result populated.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_suite_against_adapter(
     suite: &EvalSuite,
     adapter: Option<&str>,
@@ -182,6 +184,8 @@ struct DeferredJudgeScore {
     schema_note: Option<String>,
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 async fn run_suite_inner(
     suite: &EvalSuite,
     adapter: Option<&str>,

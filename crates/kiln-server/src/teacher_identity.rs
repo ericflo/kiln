@@ -101,6 +101,8 @@ impl From<StreamingPrefillExecutionPolicy> for StreamingPrefillInferenceContract
 /// parsing and verified again immediately after GPU upload. `streaming_prefill`
 /// must be the exact immutable policy installed on the scoring runner. Prefixed
 /// hashes are normalized only after strict lowercase SHA-256 validation.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub fn build_base_teacher_identity(
     served_model_id: &str,
     base_model_source_sha256: &str,

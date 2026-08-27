@@ -739,6 +739,8 @@ pub fn estimate_step_working_set_with_options(
     }
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub fn auto_fit_checkpoint_segments(
     cfg: &ModelConfig,
     max_seq_len: usize,

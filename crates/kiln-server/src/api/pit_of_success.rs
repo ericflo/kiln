@@ -285,6 +285,8 @@ pub struct CompatibilityRow {
 /// all consult this table.
 pub fn builtin_compatibility_table() -> Vec<CompatibilityRow> {
     // Helper to keep the list readable.
+    // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn row(
         teacher: &str,
         student: &str,

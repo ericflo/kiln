@@ -15,6 +15,8 @@ use kiln_model::backend::TrainingPrecisionPolicy;
 
 use crate::config::KilnConfig;
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub fn build_execution_provenance(
     config: &KilnConfig,
     model_config: &kiln_core::config::ModelConfig,

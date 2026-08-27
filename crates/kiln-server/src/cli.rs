@@ -2225,6 +2225,8 @@ pub fn run_config_check(
 
 /// Run `kiln trajectory inspect`: load a tokenizer, inspect the JSONL file
 /// through kiln-train's canonical mask builder, and print the report.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub fn run_trajectory_inspect(
     config_file: Option<&str>,
     file: &Path,
@@ -2950,6 +2952,8 @@ fn load_adapter_smoke_prompts(path: Option<&str>) -> anyhow::Result<Option<Vec<S
     Ok(Some(prompts))
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_train_sft(
     url: &str,
     file: &str,
@@ -3028,6 +3032,8 @@ pub async fn run_train_sft(
 }
 
 /// Run the `train grpo` CLI subcommand.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_train_grpo(
     url: &str,
     file: &str,
@@ -3083,6 +3089,8 @@ pub async fn run_train_grpo(
 }
 
 /// Run the `train opd` CLI subcommand.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_train_opd(
     url: &str,
     file: &str,
@@ -3191,6 +3199,8 @@ fn is_sft_jsonl_path(file: &str) -> bool {
         .unwrap_or(false)
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn build_sft_jsonl_training_payload(
     file: &str,
     adapter: &str,
@@ -3243,6 +3253,8 @@ fn build_sft_jsonl_training_payload(
     }))
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn build_grpo_jsonl_training_payload(
     file: &str,
     adapter: &str,
@@ -3290,6 +3302,8 @@ fn build_grpo_jsonl_training_payload(
     }))
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn build_sft_training_payload(
     examples: Vec<serde_json::Value>,
     adapter: &str,
@@ -3338,6 +3352,8 @@ fn build_sft_training_payload(
     })
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn build_grpo_training_payload(
     mut body: serde_json::Value,
     adapter: &str,
@@ -3386,6 +3402,8 @@ fn build_grpo_training_payload(
     Ok(body)
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn build_opd_training_payload(
     body: serde_json::Value,
     adapter: &str,

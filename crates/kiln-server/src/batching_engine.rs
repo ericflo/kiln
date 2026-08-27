@@ -1940,6 +1940,8 @@ impl BatchingEngineHandle {
     /// Start an actor from the complete immutable actor policy resolved during
     /// application startup. The compatibility constructor above keeps tests and
     /// embedders on the unpaced default.
+    // The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_actor_runtime_config(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
@@ -1970,6 +1972,8 @@ impl BatchingEngineHandle {
         )
     }
 
+    // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn start_with_policy(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
@@ -1995,6 +1999,8 @@ impl BatchingEngineHandle {
         )
     }
 
+    // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn start_with_policy_and_cycle_idle(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
@@ -2478,6 +2484,8 @@ struct BatchingEngineActor {
 }
 
 impl BatchingEngineActor {
+    // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rx: mpsc::Receiver<EngineCommand>,
         forward: Arc<dyn DecodeForward>,

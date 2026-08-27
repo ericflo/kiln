@@ -3078,6 +3078,8 @@ impl AppState {
     /// The complete gate is installed in the tracked job before the queue
     /// entry becomes visible to the worker, so no scheduling interleaving can
     /// execute a gated comparison as an ordinary eval.
+    // The flat argument list mirrors the eval-submission payload fields 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_gated_eval(
         &self,
         suite_name: String,
@@ -3103,6 +3105,8 @@ impl AppState {
 
     /// Atomically admit an exact replay with its immutable comparison target
     /// installed before queue visibility.
+    // The flat argument list mirrors the eval-submission payload fields 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_replay_eval(
         &self,
         suite_name: String,
@@ -3135,6 +3139,8 @@ impl AppState {
         )
     }
 
+    // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn enqueue_eval_inner(
         &self,
         suite_name: String,
@@ -3545,6 +3551,8 @@ impl AppState {
     /// GPU memory sharing: `memory_cfg.inference_memory_fraction` (default 0.7)
     /// controls what fraction of remaining VRAM (after model weights) is allocated
     /// to KV cache, reserving the rest for training. Set to 1.0 for inference-only.
+    // The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_real(
         model_config: ModelConfig,
         runner: ModelRunner,
@@ -4838,6 +4846,8 @@ fn cap_kv_blocks_to_live_budget(
     (proposed_blocks.min(max_blocks), max_blocks)
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn validate_kv_allocation_against_live_allocator(
     device: &kiln_tensor::Device,
     num_blocks: usize,

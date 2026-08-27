@@ -942,6 +942,8 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     );
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 async fn run_job(
     state: &AppState,
     job: &QueuedEvalJob,

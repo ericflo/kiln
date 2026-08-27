@@ -650,6 +650,8 @@ pub(super) fn run_prompt_logprob_worker_with_panic_fence<T, O>(
     }
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn score_real_prompt_logprob_rows(
     runner: &ModelRunner,
     prompt_tokens: &[TokenId],

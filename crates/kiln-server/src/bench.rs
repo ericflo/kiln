@@ -785,6 +785,8 @@ fn build_prompt_with_subset(
 ///
 /// Runs `num_runs` sequential generations and reports aggregate throughput.
 /// This measures single-request performance (not continuous batching).
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn bench_inference(
     runner: &ModelRunner,
     tokenizer: &KilnTokenizer,
@@ -1026,6 +1028,8 @@ fn bench_latency(
 /// blocks, mapped sequentially. CUDA graph capture is bypassed (we call
 /// `model_forward_paged` directly) for apples-to-apples timing with the
 /// non-paged latency phase.
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn bench_latency_paged(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -1501,6 +1505,8 @@ fn require_speculative_benchmark_opt_in(
 /// This supports offline accelerator qualification and does not describe server
 /// request routing: serving currently rejects every enabled speculative method
 /// at startup.
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn resolve_bench_spec_method(
     configured: SpecMethod,
     requested_prompt_tokens: usize,
@@ -1523,6 +1529,8 @@ fn resolve_bench_spec_method(
     )
 }
 
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn resolve_bench_spec_method_with_force(
     configured: SpecMethod,
     requested_prompt_tokens: usize,
@@ -1842,6 +1850,8 @@ mod tests {
 /// `speculative_decode_step` directly per iteration so each step's wall time
 /// is divided across the tokens emitted by that step.
 ///
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn bench_latency_skiplayer(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -2055,6 +2065,8 @@ fn bench_latency_skiplayer(
 ///
 /// Enable with `--spec-method skip_layer --paged`. Without `--paged`, the
 /// legacy flat-KV skip-layer benchmark remains available for comparisons.
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn bench_latency_paged_skiplayer(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -2301,6 +2313,8 @@ fn bench_latency_paged_skiplayer(
 /// Reports α = `draft_accepted / total_draft_attempts`.
 ///
 /// Greedy-only (k=1 native MTP for Qwen3.5-4B).
+// The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
+#[allow(clippy::too_many_arguments)]
 fn bench_latency_paged_mtp(
     weights: &GpuWeights,
     config: &ModelConfig,

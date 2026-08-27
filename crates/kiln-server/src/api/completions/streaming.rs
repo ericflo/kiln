@@ -134,6 +134,8 @@ impl ReasoningSplitter {
 /// content-aware UIs that switch panels on each delta key). Returns `false`
 /// when the SSE receiver was dropped mid-send so the caller can record the
 /// disconnect and stop.
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn emit_reasoning_chunk(
     tx: &tokio::sync::mpsc::Sender<Event>,
     id: &str,
@@ -445,6 +447,8 @@ pub(super) fn streaming_token_timing_enabled(req: &ChatCompletionRequest) -> boo
     req.include_performance == Some(true)
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn streaming_token_timing_json(
     enabled: bool,
     token_index: u32,
@@ -478,6 +482,8 @@ pub(super) fn streaming_token_timing_json(
     })
 }
 
+// The flat argument list mirrors the CLI-flag/API field set 1:1; a parameter struct would obscure that correspondence, and changing the signature would be a breaking API change.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn emit_or_buffer_reasoning_chunk(
     tx: &tokio::sync::mpsc::Sender<Event>,
     id: &str,
