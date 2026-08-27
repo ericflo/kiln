@@ -2295,7 +2295,7 @@ pub(super) fn try_flash_attn_paged_decode(
     // re-routed through `try_kt_paged_kv_*` helpers. CUDA-gated
     // since `PagedKvCacheKt` is CUDA-only. `None` on the default
     // path (caller not migrated yet or gate off) keeps every
-    // accessor on the candle path unchanged.
+    // accessor on the primary path unchanged.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Option<Tensor>> {
     // #1082: the real FA2 tile width for hdim256 (was a conservative 128).
@@ -2388,7 +2388,7 @@ pub(super) fn try_flash_attn_paged_decode(
             if AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
                 // Q is already head-major at the call site. Keep K/V grouped
                 // instead of routing through `flash_attention_forward`, which
-                // expands GQA K/V before Metal SDPA and defeats Candle's
+                // expands GQA K/V before Metal SDPA and defeats the
                 // native vector-attention GQA path.
                 let (k_head, v_head) = match fast_head_major {
                     Some(kv) => kv,
@@ -2681,7 +2681,7 @@ impl CachedPagedDecodeMeta {
     ///
     /// `kt_paged_cache`: Phase 7 #1082 — kt twin of `paged_cache` for the
     /// parity-checked `paged_cache.block_size()` read. `None` (default
-    /// path) keeps the accessor on the candle path unchanged.
+    /// path) keeps the accessor on the primary path unchanged.
     pub fn build(
         device: &Device,
         paged_cache: &PagedKvCache,
@@ -2831,7 +2831,7 @@ impl CachedPagedDecodeMeta {
         stable_seqused_k_gpu: &Tensor,
         // Phase 7 #1082: kt twin of `paged_cache` for the parity-checked
         // `paged_cache.block_size()` read inside this fn. `None` (default
-        // path) keeps the accessor on the candle path unchanged. CUDA-only
+        // path) keeps the accessor on the primary path unchanged. CUDA-only
         // since `PagedKvCacheKt` is `cfg(feature = "cuda")`.
         #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     ) -> Result<Self> {
@@ -3054,7 +3054,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // accessor reads. When `Some` AND the env gate is on, accessor
     // calls (`is_fp8`, `num_layers`) are mirrored through
     // `try_kt_paged_kv_*` helpers. `None` keeps every accessor on
-    // the candle path unchanged.
+    // the primary path unchanged.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
@@ -3739,7 +3739,7 @@ pub fn gqa_attention_paged(
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet
         // — the cache-owning struct migration that allocates one via
         // `try_kt_paged_kv_cache_new` is a follow-up commit. Default
-        // `None` keeps this path on the candle writer only.
+        // `None` keeps this path on the primary writer only.
         #[cfg(feature = "cuda")]
         None,
     )
@@ -3771,7 +3771,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     // CUDA-graph paged-KV write to the kt cache when
     // `accelerator.kt_api_mode = "all"`. `None` means "policy disabled,
     // non-CUDA device, or caller hasn't been migrated yet" — the
-    // candle writer below runs unchanged in that case. CUDA-gated
+    // primary writer below runs unchanged in that case. CUDA-gated
     // since `PagedKvCacheKt` itself is CUDA-only.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
@@ -4100,7 +4100,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                         inputs.kv_slot,
                     )?;
                     #[cfg(feature = "cuda")]
-                    // Phase 7 #1082: when the legacy PagedKvCache writer
+                    // Phase 7 #1082: when the primary paged-cache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
                     // `accelerator.kt_api_mode = "all"` gate is on and the
                     // owning struct allocated a kt cache via
@@ -4113,7 +4113,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                     // immediately in downstream reads. When `kt_paged_cache`
                     // is `None` (default), the helper short-circuits to
                     // `Ok(false)` and this branch is zero overhead — the
-                    // legacy cache write above is the only thing that ran.
+                    // primary cache write above is the only thing that ran.
                     if done && kt_paged_cache.is_some() {
                         let _kt_done = try_kt_paged_kv_write_token_major_native_graph_slot(
                             kt_paged_cache,
@@ -4133,10 +4133,6 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                 false
             }
         };
-        // #1082: bridge kt K/V to candle for the candle-island write (see the
-        // initial-prefill write above). kt twin cache write happens separately.
-        // Bridge lazily so the graph-slot fast path (`graph_write_done`) skips
-        // the candle copy entirely.
         if !graph_write_done {
             // #1082: `PagedKvCacheKt` write methods take kt tensors;
             // `k_cache_token_major`/`v_cache_token_major` are already kt, so
