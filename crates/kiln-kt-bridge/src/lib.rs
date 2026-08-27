@@ -141,8 +141,9 @@ pub fn alloc_cuda_tensor(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, BridgeError> {
-    // cuda_zeros_ctx (#1082) derives the candle device internally from
-    // device_index, so we don't read .candle_device() off source.
+    // cuda_zeros_ctx (#1082) derives the cudarc CudaContext internally
+    // from device_index (primary_cuda_context), so we only read the
+    // device index off source.
     let device_index = source.device().index().unwrap_or(0);
     let n: usize = shape.iter().product();
     let storage = kiln_tensor::cuda_zeros_ctx(device_index, dtype, n)
@@ -183,7 +184,7 @@ pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
 /// `CudaSlice`'s read event on drop, ensuring cross-stream readers of
 /// the same allocation wait for prior writes. The single-stream
 /// kt-API call pattern doesn't depend on this (every op uses the
-/// candle device's default stream), so dropping the guard is safe in
+/// device's default stream), so dropping the guard is safe in
 /// the current call shapes. Future multi-stream kt-API additions
 /// must re-introduce explicit synchronization at the StreamPlanner
 /// layer.
