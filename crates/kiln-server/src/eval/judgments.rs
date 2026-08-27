@@ -639,7 +639,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let datasets = DatasetRegistry::new(d.path().join("datasets"));
         // Per-row unique responses so leakage is detectable by content.
-        let mut unique = |id: &str, win: JudgmentWinner| {
+        let unique = |id: &str, win: JudgmentWinner| {
             let mut r = row(id, win);
             r.response_a = format!("resp-a-{id}");
             r.response_b = format!("resp-b-{id}");

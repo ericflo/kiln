@@ -712,11 +712,13 @@ fn effective_grpo_config_is_owned_by_the_live_rollout_contract() {
             min_mean_improvement: 0.0,
         }),
     });
-    let mut supplied = GrpoConfig::default();
-    supplied.output_name = Some("ignored".into());
-    supplied.auto_load = true;
-    supplied.base_adapter = Some("ignored".into());
-    supplied.behavior_policy = BehaviorPolicy::Recorded;
+    let supplied = GrpoConfig {
+        output_name: Some("ignored".into()),
+        auto_load: true,
+        base_adapter: Some("ignored".into()),
+        behavior_policy: BehaviorPolicy::Recorded,
+        ..Default::default()
+    };
     train.training_config = Some(supplied);
 
     let effective = effective_openenv_grpo_config(&train, "trained-agent");
@@ -735,8 +737,10 @@ fn train_preflight_rejects_static_failures_before_mock_backend_admission() {
     let mut state = test_state(&temp, OpenEnvConfig::default());
 
     let mut invalid_config = request(OpenEnvRunKind::Train);
-    let mut config = GrpoConfig::default();
-    config.checkpoint_interval = Some(0);
+    let config = GrpoConfig {
+        checkpoint_interval: Some(0),
+        ..Default::default()
+    };
     invalid_config.training_config = Some(config);
     let error = validate_openenv_training_preflight(&state, &invalid_config).unwrap_err();
     assert_eq!(error.code, "training_invalid_request");

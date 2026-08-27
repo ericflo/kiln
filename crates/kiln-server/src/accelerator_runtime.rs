@@ -497,8 +497,10 @@ mod tests {
             (KtApiMode::All, kiln_model::KtApiMode::All),
             (KtApiMode::Disabled, kiln_model::KtApiMode::Disabled),
         ] {
-            let mut config = AcceleratorRuntimeConfig::default();
-            config.kt_api_mode = KtApiModeSetting::new(configured, ConfigValueSource::ConfigFile);
+            let config = AcceleratorRuntimeConfig {
+                kt_api_mode: KtApiModeSetting::new(configured, ConfigValueSource::ConfigFile),
+                ..Default::default()
+            };
             let policy = config.resolved_policy(ServingProfileSetting::new(
                 ServingProfile::Experimental,
                 ConfigValueSource::ConfigFile,

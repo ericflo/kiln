@@ -44,12 +44,12 @@
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11275,
+      "max_lines": 11278,
       "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8397,
+      "max_lines": 8399,
       "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {

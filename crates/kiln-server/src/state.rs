@@ -7873,8 +7873,10 @@ mod tests {
             source: VramSource::LinuxDrmSysfs,
             unified: false,
         };
-        let mut memory = crate::config::MemoryConfig::default();
-        memory.floor_gb = 8.0;
+        let mut memory = crate::config::MemoryConfig {
+            floor_gb: 8.0,
+            ..Default::default()
+        };
         let error =
             ensure_accelerator_memory_floor(kiln_tensor::Device::Vulkan(0), capacity, &memory)
                 .unwrap_err()

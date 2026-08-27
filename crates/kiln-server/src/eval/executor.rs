@@ -1247,8 +1247,10 @@ mod tests {
     }
 
     fn multi_sample_suite(aggregation: kiln_eval::EvalAggregation) -> EvalSuite {
-        let mut generation = EvalGenerationParams::default();
-        generation.n = aggregation.k();
+        let generation = EvalGenerationParams {
+            n: aggregation.k(),
+            ..Default::default()
+        };
         EvalSuite {
             name: "multi-sample".into(),
             description: None,
@@ -1312,8 +1314,10 @@ mod tests {
             pass_indices: [0].into_iter().collect(),
             run_calls: AtomicUsize::new(0),
         });
-        let mut generation_override = EvalGenerationParams::default();
-        generation_override.n = 2;
+        let generation_override = EvalGenerationParams {
+            n: 2,
+            ..Default::default()
+        };
         let error = run_suite_against_adapter(
             &multi_sample_suite(kiln_eval::EvalAggregation::PassAtK { k: 3 }),
             None,

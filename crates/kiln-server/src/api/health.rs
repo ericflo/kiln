@@ -2346,11 +2346,12 @@ mod tests {
             restart_required: false,
             external_yield_sync: Vec::new(),
         };
-        let mut synchronization =
-            crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default();
-        synchronization.active = true;
-        synchronization.telemetry_available = true;
-        synchronization.cleanup_quarantined = true;
+        let synchronization = crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
+            active: true,
+            telemetry_available: true,
+            cleanup_quarantined: true,
+            ..Default::default()
+        };
 
         apply_rocm_runtime_health(&mut runtime, &synchronization);
 
@@ -2372,10 +2373,11 @@ mod tests {
             restart_required: false,
             external_yield_sync: Vec::new(),
         };
-        let mut synchronization =
-            crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default();
-        synchronization.active = true;
-        synchronization.telemetry_error = Some("injected telemetry failure".to_string());
+        let synchronization = crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
+            active: true,
+            telemetry_error: Some("injected telemetry failure".to_string()),
+            ..Default::default()
+        };
 
         apply_rocm_runtime_health(&mut runtime, &synchronization);
 

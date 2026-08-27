@@ -456,11 +456,13 @@ fn streaming_finish_metadata_distinguishes_natural_and_unclosed_thinking() {
             finish_reason: Some("stop".to_string()),
         }],
     };
-    let mut metadata = ThinkingBudgetMetadata::default();
-    metadata.configured = true;
-    metadata.max_tokens = Some(16);
-    metadata.tokens_source = ThinkingBudgetSource::Request;
-    metadata.applied = true;
+    let mut metadata = ThinkingBudgetMetadata {
+        configured: true,
+        max_tokens: Some(16),
+        tokens_source: ThinkingBudgetSource::Request,
+        applied: true,
+        ..Default::default()
+    };
     apply_thinking_budget_status_to_metadata(
         &mut metadata,
         ThinkingBudgetStatus {

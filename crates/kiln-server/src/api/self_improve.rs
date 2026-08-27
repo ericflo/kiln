@@ -67,9 +67,10 @@ fn default_judge_teacher() -> String {
     "qwen3.6-27b@local".to_string()
 }
 fn default_judge_config() -> OpdConfig {
-    let mut c = OpdConfig::default();
-    c.lora_rank = 16;
-    c
+    OpdConfig {
+        lora_rank: 16,
+        ..Default::default()
+    }
 }
 
 #[derive(Debug, Serialize)]

@@ -5346,11 +5346,12 @@ impl MemoryConfig {
     /// Translate the validated typed startup configuration into the
     /// dependency-light governor's immutable runtime policy.
     pub fn governor_config(&self) -> kiln_memory::GovernorConfig {
-        let mut governor = kiln_memory::GovernorConfig::default();
-        governor.floor_bytes = self.floor_bytes();
-        governor.ttl = std::time::Duration::from_millis(self.probe_ms);
-        governor.reclaim_mode = self.reclaim_mode.mode();
-        governor
+        kiln_memory::GovernorConfig {
+            floor_bytes: self.floor_bytes(),
+            ttl: std::time::Duration::from_millis(self.probe_ms),
+            reclaim_mode: self.reclaim_mode.mode(),
+            ..Default::default()
+        }
     }
 
     /// Bind the governor to the already-resolved cap-only effective capacity.
@@ -7786,9 +7787,11 @@ rocm_graph_cache_max_bytes = 17179869184
 
     #[test]
     fn public_env_every_fixed_typed_leaf_has_an_explicit_classification() {
-        let mut config = KilnConfig::default();
-        config.eval = Some(EvalConfig::default());
-        config.agent = Some(AgentConfig::default());
+        let mut config = KilnConfig {
+            eval: Some(EvalConfig::default()),
+            agent: Some(AgentConfig::default()),
+            ..Default::default()
+        };
 
         let mut serialized_leaves = Vec::new();
         collect_json_leaf_paths(

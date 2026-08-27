@@ -1739,8 +1739,10 @@ mod tests {
         assert_eq!(group.completions[0].text, "cap answer 10");
         assert!(group.completions[0].trajectory.is_empty());
         assert!(group.completions[0].provenance.is_some());
-        let mut recorded = kiln_train::GrpoConfig::default();
-        recorded.behavior_policy = kiln_train::BehaviorPolicy::Recorded;
+        let recorded = kiln_train::GrpoConfig {
+            behavior_policy: kiln_train::BehaviorPolicy::Recorded,
+            ..Default::default()
+        };
         kiln_train::trainer::validate_grpo_group_policy_data(
             &group,
             &recorded,
