@@ -1,7 +1,7 @@
 //! Explicit decode weight registry for Qwen3.5-4B.
 //!
 //! This removes the hot-path dependency on stringly tensor lookups. Weight
-//! loading can continue to use Candle/safetensors names, but decode code indexes
+//! loading can continue to use safetensors names, but decode code indexes
 //! a compile-checked `(layer_idx, layer_kind, projection)` key and receives the
 //! already-uploaded BF16 transpose or W4A16 Marlin buffers it needs for kernel
 //! dispatch.
