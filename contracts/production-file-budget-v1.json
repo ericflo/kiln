@@ -29,13 +29,13 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6616,
-      "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
+      "max_lines": 6614,
+      "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent. The further delta is the round-73/74 in-flight batch removing two unused imports (f766c3336)."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
-      "max_lines": 8637,
-      "rationale": "The sole production scheduler intentionally owns one state machine. Six explicit lines size its model-execution thread for native graph call stacks, and this exact ceiling prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
+      "max_lines": 8641,
+      "rationale": "The sole production scheduler intentionally owns one state machine. Six explicit lines size its model-execution thread for native graph call stacks, and this exact ceiling prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent. The further delta is the round-74 continuation large_enum_variant #[allow] on EngineCommand (annotation + 2 rationale lines)."
     },
     {
       "path": "crates/kiln-server/src/cli.rs",
@@ -54,8 +54,8 @@
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7968,
-      "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
+      "max_lines": 7976,
+      "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent. The further delta is the round-74 continuation large_enum_variant (PreparedTrainingData) and type_complexity (tokenize_teacher_prompts) #[allow] annotations plus the len_without_is_empty is_empty method."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",

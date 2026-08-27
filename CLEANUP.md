@@ -2503,3 +2503,75 @@ comment cites; deletions carry zero-reference evidence):**
   ceiling sync; its `test_production_file_budget.py` suite passes (6
   tests).
 - `git status` — clean.
+
+## Cleanup Agent (round 73 continuation) — 2026-08-26 — kiln-server clippy sweep completed: 44 warnings → 0
+
+**Scope:** finish the round-73 kiln-server sweep that timed out mid-session.
+The 13-file in-flight working tree (mixed small-lint batch) was verified and
+committed as its own category first, then the remaining lint categories were
+swept largest-first, one category per commit (fmt + lib test + clippy gate on
+each). Judgment-class lints (design decisions, not mechanical rewrites) were
+kept with `#[allow(clippy::…)]` + a one-line in-tree justification, per the
+round-66 precedent. No public signatures changed.
+
+**In-flight batch (round-73 timeout residue) — `f766c3336`:** 13 files, 25
+warnings → 0: unused_imports 6 (imports moved into the test modules that use
+them), doc_overindented_list_items 6, doc_lazy_continuation 2 (bench.rs
+PROMPT_POOL), useless_conversion 2→1, collapsible_if 1, unnecessary_map_or 1
+(map_or → is_none_or), unnecessary_sort_by 1, needless_range_loop 1,
+question_mark 1, manual_div_ceil 1, manual_slice_fill 1,
+assertions_on_constants 1, unused_parens 1, test-scoped import hygiene.
+Baseline-compared via `git stash`: the batch fixed 25 warnings, added 0.
+
+**Category commits (largest first):**
+
+| commit | lint(s) | before → after | approach |
+|---|---|---|---|
+| `37f80db60` | large_enum_variant | 5 → 0 | judgment keep — allow + justification on EngineCommand (token batches on the hot decode path), OpenEnvPolicyTransport, DeliveryCommand, WorkerReceive, PreparedTrainingData |
+| `d0817f879` | await_holding_lock | 4 → 0 | judgment keep — allow + justification on the 4 `remote_teacher_identity.rs` registration tests (deliberate registration-order serialization across awaits) |
+| `8a8d6117d` | clone_on_copy | 4 → 0 | dropped redundant `.clone()` on Copy `Device` bindings in `real_model_integration.rs` |
+| `682c50be9` | cmp_owned | 4 → 0 | guards compare `PathBuf` against `Path::new(…)` (no literal `PathBuf::from` allocation) |
+| `2bbc88b1d` | doc_lazy_continuation | 4 → 0 | reworded doc lines that began with `+ ` (rustdoc list-item parse); content unchanged |
+| `be30ae0e2` | type_complexity | 3 → 0 | judgment keep — allow + justification on spawn_import_archive's stream+handle pair, tokenize_teacher_prompts' (tokens, indices) pair, and the test keep-alive 5-Option tuple |
+| `448ddd6db` | manual_clamp + manual_checked_ops | 2+2 → 0 | training_preflight.rs: `.clamp(1, FLCE_MAX_AUTO_CHUNK)`, `checked_div(...).unwrap_or(0)`, `ceil_div_u64` via `checked_div` + let-else |
+| `8e765f823` | bool_assert_comparison | 2 → 0 | `assert_eq!(x, false)` → `assert!(!x)` |
+| `11744e6c6` | drop_non_drop | 1 → 0 | removed the no-op `drop(writer)` (NLL already ends the borrow) |
+| `5bac43e07` | explicit_counter_loop | 1 → 0 | `truncate_chars` rewritten as an exact-`max_chars` char iteration; identical output, no bookkeeping counter |
+| `09db0e2fd` | items_after_test_module | 1 → 0 | moved the bench tests module (274 lines) to end of `bench.rs`; pure relocation |
+| `f0e04b0ef` | manual_range_contains | 1 → 0 | `t < 1000 && t >= 250` → `(250..1000).contains(&t)` |
+| `a98747117` | map_flatten | 1 → 0 | `.map(Option)`.flatten() → `.filter_map` |
+| `645446ce8` | result_large_err | 1 → 0 | judgment keep — allow + justification on `DeliveryCommand::command` (Err is the ownership hand-back of the rejected command, not a failure payload) |
+| `c3270a6d4` | unnecessary_map_or | 1 → 0 | `map_or(false, pred)` → `is_some_and(pred)` |
+| `6cee4ac18` | useless_conversion | 1 → 0 | dropped redundant `.into_iter()` on an array literal |
+| `99ef0a4f7` | collapsible_if + let_and_return | 1+1 → 0 | main.rs: nested if-lets → edition-2024 let-chain; `let state = <chain>?; state` inlined to the `<chain>?` tail |
+| `5a663e468` | identity_op + len_without_is_empty + manual_repeat_n | 2+1+1 → 0 | `1u64 * 1024 * 1024` → typed `1024 * 1024`; dropped `1 * gb`; added `TrainingQueue::is_empty`; `repeat(n).take(k)` → `std::iter::repeat_n` |
+| `764f04112` | (fix to `8a8d6117d`) | — | two `clone_on_copy` sites had `device: &Device` where `from_vec_on` takes owned `Device`; there `.clone()` was the pointee value-copy, so the correct removal is `*device`. Caught by the full `cargo test -p kiln-server` compile of the test target |
+
+**Total: 44 kiln-server own-code clippy warnings → 0** across
+`--all-targets` (lib, bins, all integration tests, bench).
+
+**Policy repair (caught by the standing gate, red before / green after):**
+`contracts/production-file-budget-v1.json` — the round-73/74
+`#[allow]`-with-justification annotations grew two files past their reviewed
+ceilings, and the in-flight batch shrank one; set all three to the exact
+re-verified line counts per the 2da875018 exact-ceiling precedent:
+batching_engine.rs 8637 → 8641, training_queue.rs 7968 → 7976,
+api/training.rs 6616 → 6614.
+
+**Verification (final gate, after every commit):**
+- `cargo test -p kiln-server` — **all targets pass, 0 failures**; lib
+  **1189 passed / 0 failed / 1 ignored** (the pre-existing baseline).
+- `cargo clippy -p kiln-server --all-targets` — **zero kiln-server warnings**
+  (remaining output is only out-of-scope dependency crates: kiln-core,
+  kiln-opd-loss-kernel — protected/already-swept).
+- `cargo check -p kiln-model -p kiln-train` — clean.
+- `cargo fmt --check` — clean.
+- `python3 scripts/check_repository_artifacts.py` — passes (6694 tracked paths).
+- `python3 scripts/check_production_file_budget.py` — passes (647 files,
+  5000-line default, 14 reviewed exceptions) after the ceiling sync above.
+- `git status` — clean (this commit).
+
+**Remainder:** none inside kiln-server. Dependency-crate warnings observed
+during the sweep (kiln-core `type_complexity` ×2, kiln-opd-loss-kernel
+`doc_lazy_continuation` ×4, etc.) belong to protected/already-swept crates
+and are out of this round's scope. No uncommitted pile remains.
