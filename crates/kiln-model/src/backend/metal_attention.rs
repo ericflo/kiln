@@ -70,7 +70,7 @@ pub(super) fn metal_flash_attn_prefill_head_major(
     if !metal_sdpa_prefill_available() {
         return Ok(None);
     }
-    // Guards read the kt arg directly, BEFORE the candle bridges (#1082).
+    // Guards read the kt arg directly (#1082).
     if !matches!(
         q.dtype(),
         kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
