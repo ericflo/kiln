@@ -3156,6 +3156,9 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
 /// eagerly off the graph, sidestepping the replay-nondeterminism that doubled
 /// output ("BUG2"). Cost is one extra eager batched vocab GEMV + one RMSNorm
 /// per decode step.
+// Live in the cuda lane via `cuda_graph.rs`; dead in rocm-only builds (its
+// only callers are cuda-gated) — cfg_attr required (verified by rocm-lane
+// probe).
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn lm_head_from_batched_hidden_eager(
@@ -4511,6 +4514,8 @@ pub fn model_forward_paged_streaming_with_progress_and_policy(
 ///
 /// Prefix-cache callers use this for a tail pass after a separately executed
 /// head pass, so progress remains cumulative across both forwards.
+// Called only by the `#[cfg(test)]` sibling test (tests/mod.rs:7730); dead
+// in the non-test build — cfg_attr required (verified by default-lane probe).
 #[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_forward_paged_streaming_with_progress_offset(
