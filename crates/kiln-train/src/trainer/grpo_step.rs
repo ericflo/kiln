@@ -789,7 +789,23 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
     device: &Device,
-    opt_state: Option<&mut OptimizerState>,
+    // `mut` (not a `let mut` rebinding): the per-completion optimizer step
+    // below reborrow-moves via `as_deref_mut()` on each loop iteration in
+    // GPU-feature builds (`Option<&mut _>` is not `Copy`, so passing the
+    // value directly would move it out on the first iteration). In the
+    // default build the `unreachable!` arm keeps that call site out of borrow
+    // checking, so `unused_mut` still needs a per-feature-set allow (a plain
+    // `let mut` rebinding instead warns `unused_mut` there unconditionally).
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
+    mut opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
     // Observed only in the GPU-feature step body; non-GPU builds bail before it.
