@@ -20,7 +20,7 @@ use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
 use kiln_server::state::AppState;
 use kiln_server::training_queue::{QueueEntry, QueuedJob};
-use kiln_train::{ChatMessage, GrpoRequest, ScoredCompletion, SftExample, SftRequest};
+use kiln_train::SftRequest;
 
 fn test_tokenizer() -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
@@ -203,17 +203,4 @@ async fn submit_sft_below_cap_does_not_emit_queue_full() {
         code, "training_queue_full",
         "cap should not have fired; body was: {body}"
     );
-}
-
-/// Sanity unused-import check — confirms `ScoredCompletion`/`ChatMessage`/
-/// `GrpoRequest` are reachable so the JSON we construct above keeps shape
-/// parity with the wire types.
-#[allow(dead_code)]
-fn _imports_keep_alive() -> (
-    Option<ScoredCompletion>,
-    Option<ChatMessage>,
-    Option<GrpoRequest>,
-    Option<SftExample>,
-) {
-    (None, None, None, None)
 }

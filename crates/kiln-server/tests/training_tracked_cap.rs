@@ -25,9 +25,7 @@ use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
 use kiln_server::state::{AppState, TrainingJobInfo, TrainingJobType};
 use kiln_server::training_queue::gc_tracked_jobs;
-use kiln_train::{
-    ChatMessage, GrpoRequest, ScoredCompletion, SftExample, SftRequest, TrainingState,
-};
+use kiln_train::TrainingState;
 
 fn test_tokenizer() -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
@@ -344,21 +342,4 @@ fn gc_keeps_recent_terminal_entries() {
     let removed = gc_tracked_jobs(&state);
     assert_eq!(removed, 0, "recent terminal entries must not be evicted");
     assert_eq!(state.training_jobs.read().unwrap().len(), 3);
-}
-
-/// Sanity unused-import check — confirms `ScoredCompletion`/`ChatMessage`/
-/// `GrpoRequest` are reachable so the JSON we construct above keeps shape
-/// parity with the wire types.
-#[allow(dead_code)]
-// Judgment keep (round 74): the 5-Option tuple is the whole point — one
-// return type touching every kept import; aliasing it would hide the check.
-#[allow(clippy::type_complexity)]
-fn _imports_keep_alive() -> (
-    Option<ScoredCompletion>,
-    Option<ChatMessage>,
-    Option<GrpoRequest>,
-    Option<SftExample>,
-    Option<SftRequest>,
-) {
-    (None, None, None, None, None)
 }
