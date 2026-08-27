@@ -169,18 +169,20 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    let mut count = 0usize;
-    for (idx, _) in s.char_indices() {
-        if count == max_chars {
-            let mut out = String::with_capacity(idx + 3);
-            out.push_str(&s[..idx]);
-            out.push('…');
-            return out;
+    let mut kept = String::with_capacity(max_chars.min(s.len()));
+    let mut chars = s.chars();
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(c) => kept.push(c),
+            // The string is shorter than `max_chars` — nothing to truncate.
+            None => return kept,
         }
-        count += 1;
     }
-    // The whole string fits within `max_chars`.
-    s.to_owned()
+    // Exactly `max_chars` consumed; append the marker only if more follows.
+    if chars.next().is_some() {
+        kept.push('…');
+    }
+    kept
 }
 
 /// Current Unix epoch in milliseconds. Saturates at 0 if the system clock is
