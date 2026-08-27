@@ -4645,3 +4645,136 @@ present-tense candle claims around them rather than deleting whole
 blocks); gates: build clean, **33/0** tests (exact baseline match),
 fmt clean, clippy clean (crate), 0 new rustdoc broken links (20 → 7),
 git status clean; commit `9335d7460` + this ledger commit.
+
+## Cleanup Agent (round 93)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** execute round 92's round-93 recommendation
+#1 — sweep the next unswept crate in round 88's inventory,
+`crates/kiln-autograd` (31 candle refs in `src/` across 6 files at
+start: `grad_store.rs` 1, `tape.rs` 5, `tape_scope.rs` 5,
+`backwards/inject_gradient.rs` 16, `backwards/lora_delta_add.rs` 3,
+`backwards/stride.rs` 1). Deletion-first policy, same re-verify-first
+protocol: every factual claim re-checked against the current tree
+before touching it (live symbols grep-verified present, retired
+symbols confirmed absent, `kiln-kt-bridge::tape_bridge`'s own
+contract + the live `kiln-model` tape adapters as authority). Where a
+block mixed true and false content, the true half was kept with minimal
+rewording so it stands alone. Comment-only: zero code lines touched
+(verified by diff — every changed line is a `//`/`///`/`//!` line).
+The secondary candidate (`crates/kiln-conv1d-kernel`, 8 refs) was not
+started — the primary round's gates + ledger took the session.
+
+**HEADLINE NET LINES: −10** (57 insertions / 67 deletions across 5
+files; one file adjudicated KEEP with zero change. Reword-heavy round
+again: the #1082 provenance labels, the bit-equivalence spec block, and
+the wave-12/13 audit history are all true and kept per the protocol, so
+the honest delta is small rather than a large deletion).
+
+**ADJUDICATION TABLE (net per file, all comment-only):**
+
+| file | net | what changed (each claim re-verified against current code) |
+|---|---|---|
+| src/grad_store.rs | **0** | **ADJUDICATED KEEP.** "Lifted from `vk_autograd::VkGradStore`" is provenance — `vk_autograd` is confirmed in this repo's git history (commit `9371035bf`), so it is a true "vendored/lifted from" statement, exactly the class the protocol requires us to keep. "Phase 0.1's audit shows 6 candle `GradStore` references" is a past-tense audit statement. Zero edits. |
+| src/tape_scope.rs | **−2** | (a) Contract item 2's fallback example "(e.g. the candle-autograd `CustomOp` shim)" — stale: **zero live `impl CustomOp` remain anywhere in the repo** (grep-verified; kiln-kt-bridge is candle-free per its own module contract). Reworded to the true fallback (the recording site uses its non-tape path). (b) `with_active_tape` doc's "then the caller copies the kt result back into whatever container the production caller expects (e.g. a candle Tensor)" — stale example: the tape-forward path is kt-native (kiln-model `tape_forward` + kiln-train training are both kt-typed). Reworded to "the caller consumes the kt result directly". **Kept:** the whole wave-12/wave-13 #1082 audit history block, the "20+ transitive callers" audit citations, the `with_active_tape` closure contract (1/3/4), and the pointer to `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md` — **the file exists** (verified), so the pointer is true. |
+| src/tape.rs | **−2** | `backward_with_seeds` doc cited "the `kiln-kt-bridge::tape_emit` bridge" — **absent** (kiln-kt-bridge has exactly `lib.rs` + `tape_bridge.rs`, grep-verified; `tape_emit` appears nowhere repo-wide outside this one comment) — and described a candle `loss.backward()` → candle `GradStore` round-trip, which the live bridge explicitly does **not** do ("no candle GradStore round-trip anymore" — kiln-kt-bridge module contract). Reworded to the live contract, verified against `tape_bridge.rs`: the drivers (`with_tape_authoritative_scope_kt` seeds the kt loss root with `ones_like`; `with_tape_segment_backward_scope` seeds a checkpoint segment output) call `backward_with_seeds`, then project per-input kt grads onto the ids registered during forward (`register_input_mapping_kt` → `build_deposit_grad_map`). Two test comments reworded: "candle output" → "kt output", "candle parameter" → "kt parameter" (leaves are kt `Parameter`s post-#1082). **Untouched:** the test assertions themselves (frozen), the true `backward_with_seeds` semantics ("same walker semantics as `Tape::backward` … short-circuits into the per-input accumulation"), and all other tape.rs candle-free text. |
+| src/backwards/lora_delta_add.rs | **0** | The "why a fused backward" paragraph cited the removed "(kt_input_id, candle_input_id) pairs … share a shape" bridge contract and the "Var-side `candle_id`" mapping — both stale (grep-verified: no such pair API exists; `register_input_mapping_kt` is kt→kt). Re-verified against the live adapter `kiln-model::tape_forward::try_tape_lora_add_kt`: it records `LoraDeltaAddBackward` with the **original A/B kt leaves as inputs** (`tape.record(&out_2d, &[&base_2d, &x_2d, &a_kt, &b_kt], …)`) and then registers `register_input_mapping_kt(a_kt.id(), proj.a.id())` — reworded the paragraph to that live contract. The "force a new `TransposeBackward` substrate" clause was also stale (TransposeBackward already exists in `stride.rs`) and dropped. **Kept:** the fused-node rationale (recorded inputs must be the original leaves so gradient IDs match the optimiser's `Parameter`s) and the `MulSigmoidGateBackward`/`RmsNormBackward` precedent sentence — both true. |
+| src/backwards/stride.rs | **0** | One-word fix: "the kt↔candle bridge" → "the tape bridge" (the bridge is kt-native; kiln-kt-bridge is candle-free). **Kept:** `GdnRecurrentBackward` (verified live in kiln-model `tape_forward.rs` + `forward/linear_attention.rs`) and "the trainer GradStore copy" — both true. |
+| src/backwards/inject_gradient.rs | **−6** | The largest block of stale content in the crate. (a) "What this exists for" described `kiln-train`'s `InjectTensorGradient` in the present tense — that op was **deleted in the candle drop (#1082)** (kiln-train's own comments: "removed in #1082 … deleted as part of the #1082 CP-4 shim removal"); reworded to past-tense deletion provenance, keeping the true semantic description (scalar-zero forward placeholder; backward emits `upstream` regardless of `grad_res`) and the #1082/CP-4 label. (b) "candle/kt tensor" input → "kt tensor". (c) The **entire `# Lifecycle` block** (13 lines → 6) described a flow that no longer exists: `kiln_kt_bridge::tape_bridge::inject_gradient_kt` — **absent repo-wide** (grep-verified) — and "driven by candle's `loss.backward()` produced GradStore" / "flows back into the candle `GradStore` keyed on `arg.id()`". Reworded to the verified-live flow: recording via the usual `with_active_tape` path; the kt-native tape walk seeds the node from whatever it accumulated above (the op ignores it and emits `injected`); the walker deposits that grad under the input's registered leaf id via `register_input_mapping_kt` (verified against `tape_bridge::build_deposit_grad_map` + the live LoRA adapter). (d) "The kt path expects the bridge adapter (`inject_gradient_kt`) to pre-convert the candle `upstream`…" — stale symbol; reworded to the live contract: the caller passes `injected` matching `arg`'s dtype/device, with `new_validated` enforcing shape + dtype at record time (verified in the code). (e) The apply() comment's "a debug check on its rank keeps the wiring honest" is **false against the code** (the code is a plain `let _ = grad_output;` — no check); deleted that sentence. (f) The struct doc + test comment present-tense references to the deleted kiln-train op → past tense. **Kept (load-bearing):** the "kt-side replacement for `kiln-train::trainer::InjectTensorGradient` (#1082, CP-4)" provenance header; the `# Bit-equivalence to the (deleted) candle path` spec block — the ```ignore fence is the crate's **1 ignored doctest** in the strict 290/0/1 test baseline, so it is preserved verbatim; and the "dtype-agnostic, allocation-free (one Arc bump on the kt storage)" claim (verified true of `apply`). |
+
+**ADJUDICATED-KEEP GROUPS (true claims preserved, not stale):**
+
+- All #1082 / CP-4 / Phase 6a / Phase 6.5 / wave-12 / wave-13
+  provenance and audit-history statements (verified against the archive
+  docs and the live #1082-labeled code in kiln-train/kiln-kt-bridge).
+- `grad_store.rs` "Lifted from `vk_autograd::VkGradStore`" — `vk_autograd`
+  confirmed in this repo's git history; "vendored/lifted from" provenance
+  is the keep class per the protocol.
+- The bit-equivalence spec (```ignore block) in `inject_gradient.rs` —
+  historical spec of the *deleted* candle `bwd` contract, and the crate's
+  only ignored doctest (deleting it would have broken the strict
+  290/0/1 baseline).
+- `GdnRecurrentBackward` in `stride.rs` — verified live in kiln-model.
+- `with_active_tape`'s documented recording contract (items 1/3/4) and
+  the wave-13 OPD/FLCE kernel-crate routing history — verified true.
+- All test code and assertions in `tape.rs` (frozen per the protocol).
+
+**VERIFICATION (all gates green):**
+
+- `cargo test -p kiln-autograd` — **290 passed; 0 failed; 1 ignored**
+  (272 unit + 6 + 1 + 4 + 5 + 2 unit suites, plus the 1 ignored doctest
+  in `backwards/inject_gradient.rs`). **Exact match** to the strict
+  baseline — the preserved ```ignore block is the sole ignored doctest,
+  and every edit is a comment so no test content moved.
+- `cargo fmt -p kiln-autograd --check` — clean (exit 0), after every
+  file edit.
+- `cargo clippy -p kiln-autograd --all-targets` — no warnings in the
+  crate (the 14 warnings are the `kiln-tensor` dependency, the
+  documented pre-existing set).
+- `python3 scripts/check_source_parsing_tests.py` — **passed**
+  ("source-parsing inventory matches (0 tests, 0 reads, 0 text
+  assertions)").
+- `python3 scripts/check_repository_artifacts.py` — **passed** (6697
+  tracked paths — unchanged from the round's pre-edit baseline).
+- `git diff` — every changed line is a comment line (no code tokens);
+  verified per-file before each commit.
+- `git status` — clean after the ledger commit.
+
+**COMMITS:** `52e0e2109` (tape_scope.rs, net −2) + `42bf6efc8`
+(tape.rs, net −2 per numstat 7/9) + `c2ac4d209`
+(lora_delta_add.rs, net 0) + `6a9a1acca` (stride.rs, net 0) +
+`ac5a49a4c` (inject_gradient.rs, net −6) + this ledger commit. One
+commit per adjudicated file, cumulative net −10 (57 ins / 67 del).
+
+**ROUND-94 RECOMMENDATION (steered by evidence):**
+
+1. **`crates/kiln-conv1d-kernel` (8 candle refs)** — the round-93
+   secondary candidate that was not started; smallest remaining unswept
+   crate in the round-88 inventory (kiln-vulkan-kernel 62,
+   kiln-flash-attn 14, kiln-gdn-kernel 12, kiln-conv1d-kernel 8,
+   kiln-core 6). A quick win if the queue order is by effort, else
+   continue the inventory order (kiln-vulkan-kernel).
+2. **Dead public API candidate (needs a code round, NOT comment-only):**
+   `kiln_autograd::InjectGradientBackward` (lib.rs:79 re-export) has
+   **zero external consumers repo-wide** (grep-verified: the only
+   references outside its own file are the `backwards/mod.rs` module
+   declaration and the lib.rs re-export). The kiln-train op it replaced
+   was deleted in #1082 and nothing records it onto any live tape.
+   Candidate for deletion (struct + `new`/`new_validated` + apply + the
+   re-export + the module entry) in a code round — but that would also
+   remove the crate's only ignored doctest, so the 290/0/1 baseline
+   would move to 289/0/0 and the gate must be re-baselined in the same
+   round. Out of scope for this comment-only round; flagged per the
+   protocol.
+3. **`kiln-train` OPD docs (comment-only, low-risk):** carried from
+   round 92 rec #2 — `opd_tape_shim.rs` header and `opd.rs` still
+   reference the old `opd/*.rs` layout and the deleted candle shim in a
+   few present-tense spots.
+4. **kiln-model (46 candle-referencing files)** remains the largest
+   remaining candle surface — still a dedicated campaign, not a single
+   round (carried from round 91 rec #3).
+
+**Signature:** kiln cleanup agent, round 93 of the CLEANUP.md campaign
+— the round-88 inventory's next unswept crate (kiln-autograd, 31
+candle refs across 6 files) swept deletion-first with per-claim
+re-verification against the live tree (deleted symbols grep-verified
+absent: `tape_emit`, `inject_gradient_kt`, the candle
+`InjectTensorGradient` in kiln-train, all candle `CustomOp` impls
+repo-wide; live symbols grep-verified present: `tape_bridge`,
+`register_input_mapping_kt`, `build_deposit_grad_map`,
+`with_tape_authoritative_scope_kt`, `with_tape_segment_backward_scope`,
+`GdnRecurrentBackward`, `try_tape_lora_add_kt`, `new_validated`;
+kiln-kt-bridge's own candle-free contract + the live kiln-model tape
+adapters as authority); HEADLINE NET LINES **−10** (57 ins / 67 del,
+zero code lines) across tape_scope.rs −2, tape.rs −1,
+lora_delta_add.rs 0, stride.rs 0, inject_gradient.rs −6 (tape.rs
+7 ins / 9 del = −2, verified by numstat — the tape.rs commit message's
+"net -1" was a line-counting slip; this ledger entry is authoritative).
+grad_store.rs
+adjudicated KEEP — its sole candle ref is git-history-verified
+`vk_autograd` provenance); gates: **290/0/1** tests (exact strict
+baseline match — the preserved ```ignore spec block is the crate's
+only ignored doctest), fmt clean, clippy clean (crate), both Python
+gates passed, git status clean; commits `52e0e2109` + `42bf6efc8` +
+`c2ac4d209` + `6a9a1acca` + `ac5a49a4c` + this ledger commit.
