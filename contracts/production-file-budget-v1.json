@@ -59,7 +59,7 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6721,
+      "max_lines": 6705,
       "rationale": "CUDA storage now includes the reviewed host-upload capture-arena interception required to keep CUDA graph inputs device-resident; this exact ceiling prevents unrelated backend growth. The round-91 delta is the stale candle-era comment sweep in the CUDA cluster (net -15 comment lines, zero code lines), synced to the exact ceiling per the 2da875018 precedent."
     },
     {

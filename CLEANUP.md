@@ -6926,3 +6926,46 @@ for deletion or allow-suppression without owner input.
 
 **Net this round:** +3 lines (1 cfg_attr + 2 justification) —
 warning-suppression in a product lane, same class as round 112.
+
+## Cleanup Agent (round 114 — kiln-tensor: 16 dead `use std::any::Any as _;` imports deleted)
+
+**Date:** 2026-08-27
+
+**Finding (net-deletion class, hidden by diagnostic-cache re-emission):**
+`crates/kiln-tensor/src/cuda_storage.rs` carried 16 local
+`use std::any::Any as _;` imports inside `#[cfg(feature = "cuda")]`
+functions (e.g. `cuda_contiguous`, L1039 et al.). Each function uses
+`.downcast_ref::<CudaStorage>()` — an inherent method of `dyn Any`
+trait objects that needs NO trait import — so every one of the 16 is
+dead. The warnings were invisible in earlier per-crate clippy runs
+because they belong to kiln-tensor's cuda lane and only surface via
+cached-diagnostic re-emission when kiln-tensor is a cache hit under a
+dependent crate's build (this is why gdn/flash-attn/conv1d runs each
+showed "16 unused import" — they were the SAME kiln-tensor warnings,
+re-emitted from cache, not per-crate debt).
+
+**Fix:** deleted all 16 import lines (only file in the repo carrying
+the pattern — repo-wide grep confirms). The module-level
+`use std::any::Any;` (L31) is live (`as_any()` signature + `dyn Any`
+fields) and stays.
+
+**Ceiling sync (precedent 2da875018):** cuda_storage.rs 6721 → 6705 in
+`contracts/production-file-budget-v1.json`.
+
+**Gates (orchestrator, own runs):**
+- `cargo clean -p kiln-tensor` then `cargo clippy -p kiln-tensor
+  --features cuda`: 16 unused-import warnings → **0**; remaining set is
+  the documented judgment class (needless_range_loop ×7, float precision
+  ×2, collapsible_if ×2, partial_cmp ×1, from_str ×1, checked_div ×1,
+  doc-indent ×1 — queued for the test-lane judgment round).
+- `cargo test -p kiln-tensor --lib` (default): **994/0/0** (baseline
+  intact).
+- `cargo fmt --check` clean; `check_production_file_budget.py` pass
+  (646 files, 14 exceptions); `check_repository_artifacts.py` pass.
+
+**Net this round:** **−17 lines** (16 imports − 1 ceiling digit-line
+net; the ceiling edit is 1 line replaced, not added).
+
+**Process note:** the earlier per-crate "16 unused import" audit counts
+were cache re-emission artifacts; the true per-crate debt for the small
+kernel crates is the ~10–19 judgment-class warnings each (see above).

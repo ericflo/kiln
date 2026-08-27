@@ -1036,7 +1036,6 @@ unsafe extern "C" {
 #[cfg(feature = "cuda")]
 pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if src.dtype().is_packed() {
         return Err(crate::Error::Msg(
@@ -1348,7 +1347,6 @@ pub fn cuda_index_select_dim0(
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if src.dtype().is_packed() {
         return Err(crate::Error::Msg(
@@ -1491,7 +1489,6 @@ pub fn cuda_index_select_axis_n(
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if src.dtype().is_packed() {
         return Err(crate::Error::Msg(
@@ -1637,7 +1634,6 @@ pub fn cuda_elementwise_binary(
     kind: i32,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if a.shape() != b.shape() {
         return Err(crate::Error::Msg(format!(
@@ -1990,7 +1986,6 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
 #[cfg(feature = "cuda")]
 pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -2078,7 +2073,6 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
 #[cfg(feature = "cuda")]
 pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     let from = src.dtype();
     if from == target {
@@ -2210,7 +2204,6 @@ pub fn cuda_scatter_add_dim0(
     updates: &crate::Tensor,
 ) -> Result<()> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     // ---- dtype + shape validation ----
     if out.dtype() != updates.dtype() {
@@ -5287,7 +5280,6 @@ pub fn cuda_bool_reduce_axis(
 #[cfg(feature = "cuda")]
 pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if inputs.is_empty() {
         return Err(crate::Error::Msg(
@@ -5462,7 +5454,6 @@ pub fn cuda_rope(
     rotary_dim: usize,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     // Shape / dtype validation (mirrors ops/rope.rs::validate).
     if x.rank() < 2 {
@@ -5669,7 +5660,6 @@ pub fn cuda_rope_split_half(
     rotary_dim: usize,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if x.rank() != 4 {
         return Err(crate::Error::Msg(format!(
@@ -5994,7 +5984,6 @@ pub fn cuda_dropout(
 #[cfg(feature = "cuda")]
 pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -6087,7 +6076,6 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
 #[cfg(feature = "cuda")]
 pub fn cuda_clamp_pow(x: &crate::Tensor, kind: i32, a: f32, b: f32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -6175,7 +6163,6 @@ pub fn cuda_clamp_pow(x: &crate::Tensor, kind: i32, a: f32, b: f32) -> Result<cr
 #[cfg(feature = "cuda")]
 pub fn cuda_compare(a: &crate::Tensor, b: &crate::Tensor, kind: i32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if a.shape() != b.shape() {
         return Err(crate::Error::Msg(format!(
@@ -6293,7 +6280,6 @@ pub fn cuda_where_select(
     f: &crate::Tensor,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if mask.shape() != t.shape() || t.shape() != f.shape() {
         return Err(crate::Error::Msg(format!(
@@ -6428,7 +6414,6 @@ pub fn cuda_where_select(
 #[cfg(feature = "cuda")]
 pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if x.rank() != 2 {
         return Err(crate::Error::Msg(format!(
@@ -6519,7 +6504,6 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
 #[cfg(feature = "cuda")]
 pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
-    use std::any::Any as _;
 
     if v.rank() != 1 {
         return Err(crate::Error::Msg(format!(
