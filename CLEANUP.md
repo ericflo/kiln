@@ -3039,3 +3039,103 @@ passed: 647 files, 5000-line default, 14 reviewed exceptions" (exit 0);
 passed: 6697 tracked paths, 124738250 bytes; CSV <= 1048576, each file <=
 10485760" (exit 0). `git status` clean before any edit and after this
 entry's commit.
+
+## Cleanup Agent (round 78) — 2026-08-26 — kiln-server duplicated-private-helper consolidation: 3 byte-identical function pairs → 1 implementation (net −40 lines, 4 files)
+
+**Steering:** keep-by-default sweep for interior duplication / two
+functions doing the same thing under different names; no public API
+signature changes; every fix value-identical; standing gates green
+before and after.
+
+**Finding (body-hash duplicate scan across all crates):** kiln-server
+carried **three pairs of private functions with byte-identical bodies**:
+
+1. `find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf>` —
+   `src/adapter_verify.rs:337` and `src/api/adapters.rs:416`.
+2. `sha256_file_hex(path: &Path) -> std::io::Result<String>` —
+   `src/adapter_verify.rs:593` and `src/api/adapters.rs:817`.
+3. Chat-template-from-model-dir loader — `src/cli.rs:2314`
+   (`load_inspect_chat_template_from_model_dir`) and `src/main.rs:1812`
+   (`load_chat_template_from_model_dir`), identical 18-line bodies,
+   different names (the "same thing under different names" case).
+
+No prior ledger round touched these (grep of CLEANUP.md for all four
+names: zero hits).
+
+**Change (value-identical consolidation, 4 files, +14/−54):**
+- `src/adapter_verify.rs` — the two adapter helpers became `pub(crate)`
+  with a one-line-each doc note; bodies untouched. `pub(crate)` is
+  crate-internal, so the crate's public API is unchanged.
+- `src/api/adapters.rs` — deleted both private copies (−27 lines) and
+  `use crate::adapter_verify::{find_single_nested_adapter_dir,
+  sha256_file_hex}`; also dropped the now-unused
+  `use sha2::{Digest, Sha256};` (the only consumer was the deleted
+  `sha256_file_hex`).
+- `src/cli.rs` — `load_inspect_chat_template_from_model_dir` renamed to
+  the generic `load_chat_template_from_model_dir` and made `pub` (the
+  one new public item; kiln-server is a leaf crate — no workspace crate
+  depends on it, so no external surface is affected); body untouched;
+  the single internal call site renamed.
+- `src/main.rs` — deleted the private copy (−23 lines incl. its
+  orphaned doc block that the deletion initially left dangling on
+  `spawn_backend_prewarm` — caught by diff review) and its call site
+  now uses `cli::load_chat_template_from_model_dir`; the existing
+  call-site comment block gained 3 lines documenting the helper's
+  location and precedence (standalone `chat_template.jinja` first, then
+  `tokenizer_config.json`'s `chat_template` field) — the knowledge that
+  used to live in the deleted function's doc comment.
+
+**Budget-ceiling interaction (why cli.rs got no doc comment):** cli.rs
+was exactly at its reviewed exception ceiling of **6350** before this
+round. A 4-line doc comment on the new pub fn pushed it to 6354 and
+`check_production_file_budget.py` failed. Rather than grow the
+exception (the contract's exact-fit rationale policy is for forced
+syncs of already-tracked growth), the "shared with `kiln inspect`"
+knowledge moved to the main.rs call-site comment (main.rs has headroom:
+2356 < 5000 default), and cli.rs landed exactly at 6350 — the gate
+passes without a contract change. Note for future rounds: **cli.rs is
+at its ceiling** (6350/6350); any cli.rs growth must first trim or
+split.
+
+**Rejected candidates (evidence):**
+- kiln-train `is_lower_sha256` — byte-identical at
+  `crates/kiln-train/src/echo/diff.rs:295` and `crates/kiln-train/src/hf_interop.rs:364`
+  (a genuine fourth pair) — **not touched this round** to keep this
+  round single-crate; queued for a future kiln-train round (same
+  `pub(crate)`-share pattern would apply; check kiln-train's file
+  ceilings first).
+- kiln-optim `vulkan_device_index` (two modules) — name-similar
+  candidates examined during the scan; the two kiln-optim sites have
+  different surrounding signatures/visibility and live in the
+  policy-complete judgment set; left alone.
+- ~40 name-similar pairs from the name-similarity pass (dtype variants,
+  axis variants, `iter_sft` vs `sft_iter`, `extract_*` family in
+  kiln-eval, `hf_interop.rs` vs `hf_interop_bundle.rs`) — each verified
+  to be complementary logic, overloads, or intentional public/private
+  layering, not duplication; kept.
+- The 2,464 "candle" references — intentional historical/migration
+  context and kt-bridge documentation; not a cleanup target.
+- kiln-tensor phase-4 Metal/Vulkan TODOs — legitimate implementation
+  markers; kept.
+
+**Verification (before AND after, all green):**
+- `cargo check -p kiln-server --all-targets` — clean.
+- `cargo clippy -p kiln-server --all-targets` — **0 kiln-server
+  warnings** (round-73 zero-warning baseline preserved; the only
+  remaining workspace warnings are the protected kiln-tensor judgment
+  set).
+- `cargo test -p kiln-server` — **1386 passed / 0 failed** across all
+  targets (lib 1189 passed/1 ignored = the round-65 baseline exactly;
+  main 8; bench 17; kiln_eval 8; 29 integration suites = 164 tests;
+  doc-tests) — 1189 + 8 + 17 + 8 + 164 = 1386.
+- `cargo fmt --check` — clean.
+- `python3 scripts/check_production_file_budget.py` — "production file
+  budget passed: 647 files, 5000-line default, 14 reviewed exceptions"
+  (cli.rs exactly at its 6350 reviewed ceiling).
+- `python3 scripts/check_repository_artifacts.py` — "repository artifact
+  policy passed: 6697 tracked paths" (exit 0).
+- `git status` clean before edits and after this entry's commit.
+
+**Signature:** kiln cleanup agent, round 78 of the CLEANUP.md campaign —
+one focused duplication cleanup, zero deletions of live code, zero
+public API signature changes, all gates green.
