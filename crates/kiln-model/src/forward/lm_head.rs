@@ -1008,7 +1008,7 @@ pub(crate) fn rocm_w8_lm_head_sample_batch_profiled(
         let normed = normed
             .contiguous()
             .context("rocm w8 batched sample normed contiguous")?;
-        return crate::rocm_w8_proj::sample_batch_bf16_profiled(
+        crate::rocm_w8_proj::sample_batch_bf16_profiled(
             &normed,
             lm_head_w8,
             history_rows,
@@ -1029,7 +1029,7 @@ pub(crate) fn rocm_w8_lm_head_sample_batch_profiled(
                 readback_duration: Some(profiled.readback_duration),
             })
         })
-        .context("rocm w8 batched lm_head sample");
+        .context("rocm w8 batched lm_head sample")
     }
     #[cfg(not(feature = "rocm"))]
     {

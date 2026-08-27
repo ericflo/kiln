@@ -2018,10 +2018,7 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
         kiln_tensor::Device::Cuda(_) => {
             #[cfg(feature = "cuda")]
             {
-                return validate_explicit_backend_identity(
-                    device,
-                    Arc::new(cuda::CudaBackend::new(device)),
-                );
+                validate_explicit_backend_identity(device, Arc::new(cuda::CudaBackend::new(device)))
             }
             #[cfg(not(feature = "cuda"))]
             anyhow::bail!("explicit CUDA runtime requested from a build without the cuda feature");
@@ -2029,10 +2026,7 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
         kiln_tensor::Device::Rocm(_) => {
             #[cfg(feature = "rocm")]
             {
-                return validate_explicit_backend_identity(
-                    device,
-                    Arc::new(rocm::RocmBackend::new(device)),
-                );
+                validate_explicit_backend_identity(device, Arc::new(rocm::RocmBackend::new(device)))
             }
             #[cfg(not(feature = "rocm"))]
             anyhow::bail!("explicit ROCm runtime requested from a build without the rocm feature");

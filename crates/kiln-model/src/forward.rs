@@ -1196,7 +1196,7 @@ fn add_lora_delta_to_base(
         if let Some(out) = try_kt_lora_add(&base, &delta_kt)? {
             return Ok(out);
         }
-        return Ok((base + delta_kt)?);
+        Ok((base + delta_kt)?)
     }
     // #1082: no-CUDA CPU LoRA-add. `compute_lora_delta` is kt-native (CPU-capable),
     // so compute the kt delta and add — no candle bridge (inference CPU path).

@@ -1749,7 +1749,7 @@ impl PagedKvCacheKt {
         #[cfg(not(feature = "cuda"))]
         {
             let _ = (k_pool, v_pool, slots);
-            return Ok(false);
+            Ok(false)
         }
 
         #[cfg(feature = "cuda")]

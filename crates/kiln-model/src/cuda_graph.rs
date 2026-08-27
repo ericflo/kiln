@@ -1358,11 +1358,11 @@ impl CudaGraphRunner {
                 )
             };
             match capture_result {
-                Ok(logits) => return Ok(logits),
+                Ok(logits) => Ok(logits),
                 Err(e) => {
                     tracing::warn!("CUDA graph capture failed: {e:#}, using eager decode");
                     self.enabled = false;
-                    return Self::eager_forward(
+                    Self::eager_forward(
                         backend,
                         token_id,
                         weights,
@@ -1372,7 +1372,7 @@ impl CudaGraphRunner {
                         seq_len,
                         linear_state,
                         lora,
-                    );
+                    )
                 }
             }
         }

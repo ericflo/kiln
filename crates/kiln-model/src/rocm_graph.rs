@@ -4345,7 +4345,7 @@ impl RocmGraphRunner {
                 linear_state,
                 lora,
             ) {
-                Ok(logits) => return Ok(logits),
+                Ok(logits) => Ok(logits),
                 Err(e) => {
                     tracing::warn!(
                         "ROCm graph capture failed: {e:#}; disabling HIP graphs and attempting \
@@ -4356,7 +4356,7 @@ impl RocmGraphRunner {
                     // is permitted only after recovery proves device quiescence.
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
                         .with_context(|| format!("capture failed before recovery: {e:#}"))?;
-                    return self.run_eager_fallback(
+                    self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
                         capture_started.elapsed(),
@@ -4373,7 +4373,7 @@ impl RocmGraphRunner {
                                 lora,
                             )
                         },
-                    );
+                    )
                 }
             }
         }
@@ -4666,26 +4666,21 @@ impl RocmGraphRunner {
                 lora,
             ) {
                 Ok(RocmCaptureStep::CapturedHidden(hidden))
-                | Ok(RocmCaptureStep::CapturedHiddenUncached(hidden)) => return Ok(hidden),
+                | Ok(RocmCaptureStep::CapturedHiddenUncached(hidden)) => Ok(hidden),
                 Ok(RocmCaptureStep::FallbackEager { reason, .. }) => {
-                    return self.run_eager_fallback(
-                        reason,
-                        seq_len,
-                        capture_started.elapsed(),
-                        || {
-                            Self::eager_forward_hidden(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                lora,
-                            )
-                        },
-                    );
+                    self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
+                        Self::eager_forward_hidden(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    })
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -4695,7 +4690,7 @@ impl RocmGraphRunner {
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
                         .with_context(|| format!("capture failed before recovery: {e:#}"))?;
-                    return self.run_eager_fallback(
+                    self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
                         capture_started.elapsed(),
@@ -4712,7 +4707,7 @@ impl RocmGraphRunner {
                                 lora,
                             )
                         },
-                    );
+                    )
                 }
             }
         }
@@ -5010,7 +5005,7 @@ impl RocmGraphRunner {
                 linear_state,
                 lora,
             ) {
-                Ok(token) => return Ok(token),
+                Ok(token) => Ok(token),
                 Err(e) => {
                     tracing::warn!(
                         "ROCm graph capture failed: {e:#}; disabling HIP graphs and attempting \
@@ -5019,7 +5014,7 @@ impl RocmGraphRunner {
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
                         .with_context(|| format!("capture failed before recovery: {e:#}"))?;
-                    return self.run_eager_fallback(
+                    self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
                         capture_started.elapsed(),
@@ -5036,7 +5031,7 @@ impl RocmGraphRunner {
                                 lora,
                             )
                         },
-                    );
+                    )
                 }
             }
         }
