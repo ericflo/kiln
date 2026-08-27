@@ -3929,17 +3929,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
 
-    // `Optimizer` and `backend` are name-level consumers of the GPU-feature
-    // (cuda/metal/vulkan/rocm) kt-tape path; this function currently resolves
-    // them via `crate::trainer` paths. Known feature-gated pattern per CLEANUP
-    // steering: retained, deletion reserved for the dead-code round.
-    #[allow(unused_imports)]
-    use crate::Optimizer;
     use crate::trainer::TrainableLoraParams;
-    // Per-step OPD forward/backward is tape-authoritative and kt-native. The
-    // active tape scope is mandatory; no alternate autograd producer exists.
-    #[allow(unused_imports)]
-    use kiln_model::backend;
     if prompts.is_empty() {
         let message = "opd_train: prompts must be non-empty";
         if let Err(receipt_error) = write_opd_train_receipt(
