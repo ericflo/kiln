@@ -2784,7 +2784,7 @@ impl RocmGraphRunner {
                     !excluded_owners.contains(&key.owner) && !excluded_keys.contains(*key)
                 })
                 .map(|(key, captured)| (key, &captured.accounting))
-                .chain(candidate.into_iter())
+                .chain(candidate)
         };
         let mut accounting = RocmGraphMemoryAccounting {
             complete: true,
