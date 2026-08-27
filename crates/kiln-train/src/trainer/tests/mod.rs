@@ -6932,13 +6932,13 @@ fn rms_norm_tail_backward_cuda_fused_matches_composite_reference() -> Result<()>
     Ok(())
 }
 
-/// Regression: the FLCE auto-heuristic must engage for the original
-/// `/tmp/sft-data.jsonl` repro shape (T~918, vocab=152064). Pre-fix
-/// it required `active_count × num_chunks ≥ 50_000`, which was
-/// ~28K at T=918 and so the unfused lm_head matmul ran instead —
-/// and that matmul, on Vulkan, hard-hung the host (commit 1b8f5f97).
-/// Post-fix the floor is `active_count ≥ 16`, so any non-trivial
-/// supervised batch routes through chunked FLCE.
+// Regression: the FLCE auto-heuristic must engage for the original
+// `/tmp/sft-data.jsonl` repro shape (T~918, vocab=152064). Pre-fix
+// it required `active_count × num_chunks ≥ 50_000`, which was
+// ~28K at T=918 and so the unfused lm_head matmul ran instead —
+// and that matmul, on Vulkan, hard-hung the host (commit 1b8f5f97).
+// Post-fix the floor is `active_count ≥ 16`, so any non-trivial
+// supervised batch routes through chunked FLCE.
 // =====================================================================
 // #1077 Tier 1b + 1c — Per-PR perf-regression smoke tests.
 //
