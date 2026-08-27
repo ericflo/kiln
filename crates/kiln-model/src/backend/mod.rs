@@ -235,9 +235,9 @@ pub mod rocm;
 // `candle_core::CustomOp1` / `CustomOp3` wrappers existed only to wire the
 // Vulkan matmul / LoRA-delta dispatch into candle's `.backward()`. With the
 // kt autograd tape (`kiln_autograd`) as the sole grad producer, the candle
-// autograd islands are dead — `VulkanBackend::{linear_prefill_apply,
-// lora_delta_resident}` now decline so the kt-recorded forward path owns the
-// projection / LoRA matmuls and the tape produces their gradients.
+// autograd islands are dead — `VulkanBackend::lora_delta_resident` declines
+// so the kt-recorded `compute_lora_delta` path owns the LoRA matmul and the
+// tape produces its gradients.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1945,8 +1945,6 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     // (#1082 DoD-100 step 4) kt-native dispatcher. On a pure-CUDA build this
     // references NO candle types: the Cuda arm constructs `CudaBackend` from
     // the kt device directly, and the `_` arm builds a kt-typed `CpuBackend`.
-    // The metal/vulkan arms are cfg-gated (out of the cuda build) and still
-    // bridge to candle for those backends' candle-typed constructors.
     match device {
         #[cfg(feature = "cuda")]
         kiln_tensor::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(*device)),
