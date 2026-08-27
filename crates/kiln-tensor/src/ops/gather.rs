@@ -104,15 +104,13 @@ pub fn gather(x: &Tensor, axis: usize, indices: &Tensor) -> Result<Tensor> {
     }
 
     let mut coord = vec![0usize; rank];
-    for out_idx in 0..n_out {
+    for (out_idx, &idx_val) in idx_flat.iter().enumerate().take(n_out) {
         // Decode out_idx to coord in indices' shape.
         let mut rem = out_idx;
         for d in 0..rank {
             coord[d] = rem / i_strides[d];
             rem %= i_strides[d];
         }
-        // Look up the index value at this position.
-        let idx_val = idx_flat[out_idx];
         if idx_val < 0 || (idx_val as usize) >= x_axis_len {
             bail!("gather: index {idx_val} out of bounds for axis {axis} of length {x_axis_len}");
         }

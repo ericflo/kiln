@@ -4536,7 +4536,7 @@ pub fn cuda_prompt_logprobs(
 /// Implementation: dispatches `kiln_cross_entropy_loss_async` in
 /// `csrc/cross_entropy.cu`. The kernel does the row-wise log-sum-exp
 /// + target-logit subtraction into a per-row F32 scratch buffer,
-/// then a single-block finalize sums and divides by batch.
+///   then a single-block finalize sums and divides by batch.
 ///
 /// Target-index validation runs on-device: an out-of-range target
 /// (negative or `>= vocab`) sets a device-side error flag which we
@@ -6647,11 +6647,7 @@ fn cuda_scan_axis_impl(
     }
     let shape = x.shape();
     let n_cols = shape[rank - 1] as i64;
-    let n_rows = if shape[rank - 1] == 0 {
-        0
-    } else {
-        (x.element_count() / shape[rank - 1]) as i64
-    };
+    let n_rows = x.element_count().checked_div(shape[rank - 1]).unwrap_or(0) as i64;
 
     let x_storage = x
         .storage()

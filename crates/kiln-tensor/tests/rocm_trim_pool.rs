@@ -12,14 +12,13 @@ use kiln_tensor::{DType, Device, Tensor};
 fn mem_available_bytes() -> u64 {
     let raw = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            if let Some(kib) = rest
+        if let Some(rest) = line.strip_prefix("MemAvailable:")
+            && let Some(kib) = rest
                 .split_whitespace()
                 .next()
                 .and_then(|s| s.parse::<u64>().ok())
-            {
-                return kib * 1024;
-            }
+        {
+            return kib * 1024;
         }
     }
     0

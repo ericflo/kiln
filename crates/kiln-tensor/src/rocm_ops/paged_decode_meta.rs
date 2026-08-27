@@ -415,7 +415,7 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
     if hk == h {
         return Ok(src_c);
     }
-    if hk == 0 || h == 0 || h % hk != 0 {
+    if hk == 0 || h == 0 || !h.is_multiple_of(hk) {
         return Err(Error::Msg(format!(
             "rocm_gqa_repeat_heads: output heads h={h} must be a non-zero multiple of hk={hk}"
         )));
@@ -515,7 +515,7 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
     if hk == h {
         return Ok(src_c);
     }
-    if hk == 0 || h == 0 || h % hk != 0 {
+    if hk == 0 || h == 0 || !h.is_multiple_of(hk) {
         return Err(Error::Msg(format!(
             "rocm_gqa_repeat_heads_head_major: output heads h={h} must be a non-zero multiple of hk={hk}"
         )));
@@ -595,6 +595,9 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
 /// `block_table` is U32 `[b, max_blocks_per_seq]`. When `seqused_k` is present,
 /// it must be U32 `[b]` and bounds each row's usable keys. The output is
 /// `[b, 1, h, d]` BF16.
+// 8 params: flat kernel-arg parity with csrc/paged_decode.cu (consistent with
+// the crate's too_many_arguments allowance for hipBLASLt-style signatures).
+#[allow(clippy::too_many_arguments)]
 pub fn rocm_paged_attn_decode_bf16(
     q: &Tensor,
     k_pool: &Tensor,
@@ -619,13 +622,13 @@ pub fn rocm_paged_attn_decode_bf16(
             block_table.dtype()
         )));
     }
-    if let Some(seqused) = seqused_k {
-        if seqused.dtype() != DType::U32 {
-            return Err(Error::Msg(format!(
-                "rocm_paged_attn_decode_bf16: seqused_k must be U32, got {}",
-                seqused.dtype()
-            )));
-        }
+    if let Some(seqused) = seqused_k
+        && seqused.dtype() != DType::U32
+    {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: seqused_k must be U32, got {}",
+            seqused.dtype()
+        )));
     }
     if q.device() != k_pool.device()
         || q.device() != v_pool.device()

@@ -231,7 +231,7 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
 
     // Enumerate every output position, then every reduction
     // assignment; compute the product across operands and accumulate.
-    for out_idx in 0..n_out {
+    for (out_idx, out_slot) in output.iter_mut().enumerate().take(n_out) {
         // Decode out_idx into per-output-letter coords.
         let mut out_coord: Vec<usize> = Vec::with_capacity(parsed.output.len());
         let mut rem = out_idx;
@@ -240,9 +240,9 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
         for d in (0..parsed.output.len().saturating_sub(1)).rev() {
             out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
         }
-        for d in 0..parsed.output.len() {
-            out_coord.push(rem / out_strides[d]);
-            rem %= out_strides[d];
+        for &stride in out_strides.iter().take(parsed.output.len()) {
+            out_coord.push(rem / stride);
+            rem %= stride;
         }
         let mut letter_val: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
         for (i, &b) in parsed.output.iter().enumerate() {
@@ -275,7 +275,7 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
             }
             acc += prod;
         }
-        output[out_idx] = acc;
+        *out_slot = acc;
     }
 
     let out_bytes = write_f32_into(dtype, &output);

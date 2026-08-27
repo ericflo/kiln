@@ -243,8 +243,8 @@ mod tests {
         let rows = read_rows(&out, 1, 4);
         assert!(rows[0][3].is_infinite() && rows[0][3] < 0.0);
         // Others unchanged.
-        for i in 0..3 {
-            assert_eq!(rows[0][i], 1.0);
+        for v in rows[0].iter().take(3) {
+            assert_eq!(*v, 1.0);
         }
     }
 

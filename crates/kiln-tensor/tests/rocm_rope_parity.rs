@@ -87,6 +87,9 @@ fn run_case(leading: usize, seq: usize, head_dim: usize, rotary_dim: usize) {
     }
 }
 
+// 8 params: flat mirror of the kernel's argument list (consistent with the
+// crate's too_many_arguments allowance for kernel-parity signatures).
+#[allow(clippy::too_many_arguments)]
 fn cpu_rope_split_half_ref(
     x: &[f32],
     cos: &[f32],

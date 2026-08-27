@@ -61,11 +61,7 @@ fn rocm_scan_axis_impl(x: &Tensor, axis: usize, kind: i32, label: &str) -> Resul
     }
     let shape = x.shape();
     let n_cols = shape[rank - 1] as i64;
-    let n_rows = if shape[rank - 1] == 0 {
-        0
-    } else {
-        (x.element_count() / shape[rank - 1]) as i64
-    };
+    let n_rows = x.element_count().checked_div(shape[rank - 1]).unwrap_or(0) as i64;
 
     let x_storage = x
         .storage()

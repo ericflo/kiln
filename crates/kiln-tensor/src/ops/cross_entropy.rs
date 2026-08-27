@@ -136,7 +136,7 @@ impl DeviceOp2 for CrossEntropyOp {
         let per = dtype.size_in_bytes();
 
         let mut loss_sum = 0.0_f32;
-        for b in 0..batch {
+        for (b, &target) in target_ids.iter().enumerate().take(batch) {
             let row = load_logits_row_f32(dtype, logits_cpu.as_bytes(), b, vocab, per)?;
             let max_logit = row.iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
             // If row is all -inf, the mean is undefined — bail explicitly.
@@ -148,7 +148,6 @@ impl DeviceOp2 for CrossEntropyOp {
             }
             let log_sum_exp =
                 max_logit + row.iter().map(|&v| (v - max_logit).exp()).sum::<f32>().ln();
-            let target = target_ids[b];
             if target >= vocab as u64 {
                 bail!(
                     "CrossEntropyOp: target {target} out of range (vocab={vocab}) at position {b}"

@@ -267,8 +267,8 @@ mod tests {
         let out = p.apply(&logits).unwrap();
         let rows = read_rows(&out, 1, 4);
         assert!(rows[0][0].is_finite());
-        for i in 1..4 {
-            assert!(rows[0][i].is_infinite() && rows[0][i] < 0.0);
+        for v in rows[0].iter().take(4).skip(1) {
+            assert!(v.is_infinite() && *v < 0.0);
         }
     }
 

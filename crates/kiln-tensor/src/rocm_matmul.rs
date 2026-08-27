@@ -178,6 +178,13 @@ fn should_sync_rocm_matmul_output(m: usize, n: usize, k: usize, batch: usize) ->
         || work >= ROCM_MATMUL_WORK_SYNC_THRESHOLD
 }
 
+// The `return`s in the Enabled/Disabled arms are required: under
+// `cfg(test)` / `hardware-qualification` the `Auto` arm and the heuristic
+// block below are live, so the match is not the function tail and the arm
+// values (incl. the unit `Auto` arm) must not be mixed — the early returns
+// keep arm types uniform in every lane. clippy's needless_return
+// suggestion only holds when the `Auto` arm is cfg-stripped.
+#[allow(clippy::needless_return)]
 fn should_skip_rocm_strided_batched_matmul(
     _m: usize,
     _n: usize,
@@ -323,6 +330,9 @@ fn rocm_bf16_output_matmul_via_f32(
     }
 }
 
+// 8 params: flat mirror of the hipBLASLt-style request (consistent with the
+// crate's too_many_arguments allowance for kernel-parity signatures).
+#[allow(clippy::too_many_arguments)]
 fn should_use_bf16_f32_scalar_fallback(
     m: usize,
     n: usize,

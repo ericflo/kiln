@@ -234,22 +234,21 @@ impl CaptureArena {
                     )));
                 }
                 if let (ArenaInit::Host(recorded), ArenaInit::Host(requested)) = (&buf.init, &init)
+                    && recorded != requested
                 {
-                    if recorded != requested {
-                        let first_diff = recorded
-                            .iter()
-                            .zip(requested)
-                            .position(|(left, right)| left != right)
-                            .map_or(recorded.len().min(requested.len()), |offset| offset);
-                        return Err(Error::Msg(format!(
-                            "CaptureArena replay host data mismatch at alloc #{}: \
-                             recorded {} bytes vs requested {} bytes; first difference \
-                             at byte {first_diff}",
-                            self.cursor,
-                            recorded.len(),
-                            requested.len()
-                        )));
-                    }
+                    let first_diff = recorded
+                        .iter()
+                        .zip(requested)
+                        .position(|(left, right)| left != right)
+                        .map_or(recorded.len().min(requested.len()), |offset| offset);
+                    return Err(Error::Msg(format!(
+                        "CaptureArena replay host data mismatch at alloc #{}: \
+                         recorded {} bytes vs requested {} bytes; first difference \
+                         at byte {first_diff}",
+                        self.cursor,
+                        recorded.len(),
+                        requested.len()
+                    )));
                 }
                 let storage = buf.storage.clone();
                 let view = self.borrow_view(dtype, &storage)?;

@@ -39,8 +39,8 @@ pub fn precompute_rope_freqs(
     let mut cos_bytes = vec![0u8; max_seq * half * 4];
     let mut sin_bytes = vec![0u8; max_seq * half * 4];
     for s in 0..max_seq {
-        for i in 0..half {
-            let a = (s as f32) * inv_freq[i];
+        for (i, &f) in inv_freq.iter().enumerate().take(half) {
+            let a = (s as f32) * f;
             let c = a.cos();
             let ss = a.sin();
             let off = (s * half + i) * 4;

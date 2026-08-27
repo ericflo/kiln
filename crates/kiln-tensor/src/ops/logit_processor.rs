@@ -471,11 +471,10 @@ mod tests {
         let out = TopPProcessor::new(0.5).apply(&logits).unwrap();
         let rows = read_rows(&out, 1, 4);
         assert_eq!(rows[0][0], 10.0);
-        for i in 1..4 {
+        for (i, v) in rows[0].iter().enumerate().take(4).skip(1) {
             assert!(
-                rows[0][i].is_infinite() && rows[0][i] < 0.0,
-                "expected mask at i={i}, got {}",
-                rows[0][i]
+                v.is_infinite() && *v < 0.0,
+                "expected mask at i={i}, got {v}"
             );
         }
     }

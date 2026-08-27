@@ -238,19 +238,6 @@ mod tests {
         }
     }
 
-    /// Find a seed that makes XTC skip the next call.
-    fn skip_seed(probability: f32) -> u64 {
-        let mut s: u64 = 1;
-        loop {
-            let mut snapshot = s;
-            let r = next_f32(&mut snapshot);
-            if r >= probability {
-                return s;
-            }
-            s += 1;
-        }
-    }
-
     #[test]
     fn xtc_fires_and_masks_top_choices() {
         // Distribution: [5.0, 4.0, 3.0, -10.0]. Softmax probs roughly:

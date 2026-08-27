@@ -5,8 +5,8 @@
 //! gather index math. We cover both directions:
 //!   * `rocm_diagonal_extract`: `[n, n]` -> `[n]` main-diagonal gather.
 //!   * `rocm_diag_build`: `[n]` -> `[n, n]` zero matrix with `v` on the diagonal.
-//! across the F32 / BF16 / F16 dtype matrix, compared to a CPU reference. Skips
-//! when no ROCm device is present.
+//!     across the F32 / BF16 / F16 dtype matrix, compared to a CPU reference. Skips
+//!     when no ROCm device is present.
 //!
 //! Run: `cargo test -p kiln-tensor --features rocm --test rocm_diag_parity`
 #![cfg(feature = "rocm")]

@@ -816,7 +816,7 @@ pub(crate) fn rocm_synchronize_context_same_stream_dependency(
     if crate::rocm_capture_arena_active() {
         return Ok(());
     }
-    let stream = crate::active_rocm_stream(&ctx);
+    let stream = crate::active_rocm_stream(ctx);
     ctx.synchronize_same_stream_dependency(&stream, reason)
         .map_err(|e| {
             Error::Msg(format!(
@@ -1311,7 +1311,7 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
             "rocm_slice_set: zero-size destination row".to_string(),
         ));
     }
-    if src_n % inner != 0 {
+    if !src_n.is_multiple_of(inner) {
         return Err(Error::Msg(format!(
             "rocm_slice_set: src element count {src_n} is not a whole number of dst rows \
              (inner={inner})"

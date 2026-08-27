@@ -31,7 +31,7 @@ use kiln_tensor::ops::logit_penalties::{
     FrequencyPenaltyProcessor, PresencePenaltyProcessor, RepetitionPenaltyProcessor,
 };
 use kiln_tensor::ops::logit_processor::{
-    LogitProcessor, LogitProcessorChain, TemperatureProcessor, TopKProcessor, TopPProcessor,
+    LogitProcessorChain, TemperatureProcessor, TopKProcessor, TopPProcessor,
 };
 use kiln_tensor::ops::logit_xtc::XtcProcessor;
 use kiln_tensor::{CpuStorage, DType, Tensor};
@@ -119,7 +119,7 @@ fn full_chain_respects_logit_bias_neg_inf_ban() {
         Box::new(TopKProcessor::new(20)),
     ]);
 
-    let logits = Tensor::from_slice(&vec![3.0f32; 16], vec![1, 16]).unwrap();
+    let logits = Tensor::from_slice(&[3.0f32; 16], vec![1, 16]).unwrap();
     let masked = chain.apply(&logits).unwrap();
 
     let sampler = GumbelSampler::with_seed(11);

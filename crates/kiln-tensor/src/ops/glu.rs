@@ -40,7 +40,7 @@ impl GluKind {
             GluKind::Glu => 1.0 / (1.0 + (-x).exp()),
             GluKind::SwiGLU => x / (1.0 + (-x).exp()),
             GluKind::GeGLU => {
-                const C: f32 = 0.7978845608_f32;
+                const C: f32 = 0.797_884_6_f32;
                 let inner = C * (x + 0.044715 * x * x * x);
                 0.5 * x * (1.0 + inner.tanh())
             }

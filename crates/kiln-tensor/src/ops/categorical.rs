@@ -127,8 +127,8 @@ impl Multinomial {
             let r = next_u01(&mut rng) * row_sum;
             let mut acc = 0.0f32;
             let mut picked = (vocab - 1) as i64;
-            for v in 0..vocab {
-                acc += row[v];
+            for (v, &p) in row.iter().enumerate().take(vocab) {
+                acc += p;
                 if r <= acc {
                     picked = v as i64;
                     break;

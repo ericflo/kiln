@@ -128,7 +128,7 @@ mod tests {
     fn uniform_in_range() {
         let t = rand_uniform(vec![100], -1.0, 1.0, 42, DType::F32).unwrap();
         for v in read_f32(&t) {
-            assert!(v >= -1.0 && v < 1.0, "out of range: {v}");
+            assert!((-1.0..1.0).contains(&v), "out of range: {v}");
         }
     }
 

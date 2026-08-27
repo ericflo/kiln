@@ -60,7 +60,7 @@ impl UnaryKind {
                 // tanh approximation; matches PyTorch's
                 // `F.gelu(x, approximate="tanh")` and candle's
                 // `Activation::Gelu`.
-                const SQRT_2_OVER_PI: f32 = 0.7978845608_f32;
+                const SQRT_2_OVER_PI: f32 = 0.797_884_6_f32;
                 let inner = SQRT_2_OVER_PI * (x + 0.044715 * x * x * x);
                 0.5 * x * (1.0 + inner.tanh())
             }

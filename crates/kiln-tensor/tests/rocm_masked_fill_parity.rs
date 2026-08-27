@@ -25,7 +25,7 @@ fn val(i: usize) -> f32 {
 
 /// Deterministic mask byte (0 or 1) for index `i`.
 fn mask_byte(i: usize) -> u8 {
-    ((i * 53 + 11) % 3 == 0) as u8
+    ((i * 53 + 11).is_multiple_of(3)) as u8
 }
 
 #[test]

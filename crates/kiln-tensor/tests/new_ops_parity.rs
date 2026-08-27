@@ -7,7 +7,7 @@
 //! Phase 9's parity gate will hook into.
 
 use kiln_tensor::ops;
-use kiln_tensor::{CpuStorage, DType, Tensor};
+use kiln_tensor::{CpuStorage, Tensor};
 
 /// Read all f32 bytes from the underlying storage. Use this only when
 /// the tensor's layout is guaranteed contiguous AND start_offset=0

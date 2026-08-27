@@ -37,7 +37,7 @@ fn cpu_ref(kind: i32, x: f32) -> f32 {
         KIND_SILU => x / (1.0 + (-x).exp()),
         KIND_SIGMOID => 1.0 / (1.0 + (-x).exp()),
         KIND_GELU => {
-            let k = 0.797_884_56_f32; // sqrt(2/pi)
+            let k = 0.797_884_6_f32; // sqrt(2/pi)
             let inner = k * (x + 0.044715 * x * x * x);
             0.5 * x * (1.0 + inner.tanh())
         }

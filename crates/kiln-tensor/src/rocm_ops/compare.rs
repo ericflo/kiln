@@ -51,7 +51,7 @@ pub fn rocm_compare(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tensor> {
             )));
         }
     };
-    if kind < 0 || kind > 5 {
+    if !(0..=5).contains(&kind) {
         return Err(Error::Msg(format!("rocm_compare: invalid kind {kind}")));
     }
     if !a.is_contiguous() || !b.is_contiguous() {

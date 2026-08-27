@@ -115,7 +115,7 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
             row_out[0] = row_in[0];
             continue;
         }
-        for j in 0..target_len {
+        for (j, out_slot) in row_out.iter_mut().enumerate().take(target_len) {
             // Source position in floating-point input-coordinate space.
             let src_pos = match align {
                 AlignCorners::Yes => {
@@ -134,7 +134,7 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
             let lo = src_pos.floor() as usize;
             let hi = (lo + 1).min(last - 1);
             let frac = src_pos - lo as f32;
-            row_out[j] = row_in[lo] * (1.0 - frac) + row_in[hi] * frac;
+            *out_slot = row_in[lo] * (1.0 - frac) + row_in[hi] * frac;
         }
     }
 

@@ -5,9 +5,7 @@
 //! Verifies the substrate trains a real architecture on a synthetic
 //! next-token prediction task.
 
-use kiln_autograd::{
-    AddBackward, CrossEntropyBackward, GeluBackward, LayerNormBackward, MatmulBackward, Tape,
-};
+use kiln_autograd::{CrossEntropyBackward, GeluBackward, LayerNormBackward, MatmulBackward, Tape};
 use kiln_tensor::ops::{add, cross_entropy, gelu, layer_norm, matmul, xavier_uniform};
 use kiln_tensor::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
 use std::sync::Arc;

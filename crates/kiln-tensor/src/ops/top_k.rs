@@ -110,8 +110,7 @@ pub fn top_k(x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
                 .then_with(|| ia.cmp(ib))
         });
         // Write the first k.
-        for j in 0..k {
-            let (v, i) = row[j];
+        for (j, &(v, i)) in row.iter().enumerate().take(k) {
             let off_val = (r * k + j) * per;
             match dtype {
                 DType::F32 => values_bytes[off_val..off_val + 4].copy_from_slice(&v.to_le_bytes()),

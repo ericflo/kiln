@@ -56,8 +56,8 @@ pub fn masked_select(x: &Tensor, mask: &Tensor) -> Result<Tensor> {
     let count = mb.iter().take(n).filter(|&&b| b != 0).count();
     let mut out = vec![0u8; count * per];
     let mut w = 0usize;
-    for i in 0..n {
-        if mb[i] != 0 {
+    for (i, &m) in mb.iter().enumerate().take(n) {
+        if m != 0 {
             let src = i * per;
             let dst = w * per;
             out[dst..dst + per].copy_from_slice(&xb[src..src + per]);

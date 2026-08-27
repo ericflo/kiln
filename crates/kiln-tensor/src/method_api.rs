@@ -112,7 +112,7 @@ impl Dim for D {
 fn broadcast_shape(lhs: &[usize], rhs: &[usize], op: &'static str) -> Result<Vec<usize>> {
     let out_rank = lhs.len().max(rhs.len());
     let mut out = vec![0usize; out_rank];
-    for i in 0..out_rank {
+    for (i, slot) in out.iter_mut().enumerate().take(out_rank) {
         // Right-aligned: index from the end.
         let rev = out_rank - i;
         let l = if lhs.len() < rev {
@@ -125,7 +125,7 @@ fn broadcast_shape(lhs: &[usize], rhs: &[usize], op: &'static str) -> Result<Vec
         } else {
             rhs[rhs.len() - rev]
         };
-        out[i] = if l == r {
+        *slot = if l == r {
             l
         } else if l == 1 {
             r
@@ -1603,7 +1603,7 @@ mod tests {
     fn rsqrt_equals_recip_sqrt() {
         let x = t(&[1.0, 4.0, 16.0, 100.0], &[2, 2]);
         let got = v(&x.rsqrt().unwrap());
-        let want = vec![1.0, 0.5, 0.25, 0.1];
+        let want = [1.0, 0.5, 0.25, 0.1];
         for (g, w) in got.iter().zip(want.iter()) {
             assert!((g - w).abs() < 1e-5, "rsqrt: got {g} want {w}");
         }
@@ -1981,9 +1981,9 @@ mod tests {
     fn ctors_accept_tuple_shape_and_device_ref() {
         // candle-flip parity: tuple shapes + `&Device` ctor args.
         let dev = Device::Cpu;
-        let z = Tensor::zeros((2, 3), DType::F32, &dev).unwrap();
+        let z = Tensor::zeros((2, 3), DType::F32, dev).unwrap();
         assert_eq!(z.shape(), &[2, 3]);
-        let scalar = Tensor::zeros((), DType::F32, &dev).unwrap();
+        let scalar = Tensor::zeros((), DType::F32, dev).unwrap();
         assert_eq!(scalar.shape(), &[] as &[usize]);
         // tuple + scalar shapes through the `Into<Shape>` façade
         // (`from_slice`/`from_vec` stay 2-arg, CPU-only — the 3-arg

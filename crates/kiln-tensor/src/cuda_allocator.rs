@@ -256,10 +256,10 @@ impl Allocator for CudaAllocator {
 
     fn alloc(&mut self, dtype: DType, n_elements: usize) -> Result<Storage> {
         // Try the cache first.
-        if let Some(slot) = self.cache.get_mut(&(dtype, n_elements)) {
-            if let Some(s) = slot.pop() {
-                return Ok(s);
-            }
+        if let Some(slot) = self.cache.get_mut(&(dtype, n_elements))
+            && let Some(s) = slot.pop()
+        {
+            return Ok(s);
         }
         // Cache miss.
         match self.mode {

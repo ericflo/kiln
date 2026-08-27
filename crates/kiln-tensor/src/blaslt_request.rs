@@ -107,6 +107,9 @@ impl BlasLtMatmulRequest {
         })
     }
 
+    // Live in the cuda/rocm matmul lanes (cuda_matmul.rs / rocm_matmul.rs
+    // call sites); dead in the default lane — lane-precise allow.
+    #[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(dead_code))]
     pub(crate) fn with_strided_batch(
         mut self,
         batch_count: usize,

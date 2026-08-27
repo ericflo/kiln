@@ -216,7 +216,7 @@ impl Default for GumbelSampler {
 ///
 /// `seed` seeds the Gumbel RNG via [`GumbelSampler::with_seed`].
 pub fn gumbel_softmax_sample(logits: &Tensor, temperature: f64, seed: u64) -> Result<Tensor> {
-    if !(temperature > 0.0) {
+    if temperature.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         bail!(
             "gumbel_softmax_sample: temperature must be > 0 (route temperature <= 0 to a greedy \
              argmax), got {temperature}"
@@ -346,7 +346,7 @@ mod tests {
     fn gumbel_different_seeds_diverge() {
         // Flat distribution → samples are RNG-dominated. Over many seeds
         // we expect to see > 1 distinct token id.
-        let logits = Tensor::from_slice(&vec![1.0f32; 32], vec![1, 32]).unwrap();
+        let logits = Tensor::from_slice(&[1.0f32; 32], vec![1, 32]).unwrap();
         let mut tokens = std::collections::HashSet::new();
         for seed in 1..200 {
             let s = GumbelSampler::with_seed(seed);

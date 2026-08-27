@@ -54,6 +54,9 @@ impl Error {
 
     /// Wrap a borrowed [`str`] into a [`Error::Msg`]. Marginally cheaper
     /// than [`Error::msg`] for static-string call sites.
+    // Public API (constructor, not a FromStr impl): name mirrors std's
+    // FromStr for discoverability; not a trait impl.
+    #[allow(clippy::should_implement_trait)]
     #[inline]
     pub fn from_str(s: &str) -> Self {
         Error::Msg(s.to_owned())
