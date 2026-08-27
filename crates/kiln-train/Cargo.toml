@@ -94,15 +94,6 @@ optional = true
 # synthetic-data convergence check via `candle_nn::optim::AdamW` +
 # `Optimizer::backward_step`) was deleted along with the OPD candle grad
 # path. No `candle_nn::` reference remains in the crate.
-# Test-only: was added for `inject_gradient_parity` (cfg(test) +
-# #[cfg(feature = "cuda")]) to build deterministic bf16 fixtures for
-# the candle ⟷ kt-tape parity assertion (substrate landed in 9b2eda8e;
-# the dev-dep wasn't added at the time and the cuda-gated test was
-# never exercised by a CUDA-less CI). That test was deleted in the
-# candle drop, so this dev-dep is now unreferenced (removal queued for a
-# manifest-cleanup round). Pinned to "2" to match the rest
-# of the workspace's `half` deps. (#1082)
-half = "2"
 
 [[bin]]
 name = "kiln-replay"
