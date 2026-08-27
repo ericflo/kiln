@@ -919,7 +919,7 @@ pub fn transformer_block_paged(
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet —
         // the cache-owning struct migration that allocates one is a
         // follow-up commit. Default `None` keeps this path on the
-        // candle writer only.
+        // primary writer only.
         #[cfg(feature = "cuda")]
         None,
     )
@@ -949,7 +949,7 @@ pub(super) fn transformer_block_paged_with_rope_tables(
     >,
     // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
     // GQA paged-attention call below so the kt cache can mirror the
-    // CUDA-graph paged-KV write. `None` keeps the path on the candle
+    // CUDA-graph paged-KV write. `None` keeps the path on the primary
     // writer only; same migration playbook as `graph_inputs`.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
@@ -1092,7 +1092,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     kv_slot: Option<&Tensor>,
     #[cfg(feature = "metal")] metal_icb_layer: Option<MetalPagedDecodeIcbLayer<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` forwarded as-is to the
-    // GQA layer. `None` (default) keeps the candle accessor path.
+    // GQA layer. `None` (default) keeps the primary accessor path.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
