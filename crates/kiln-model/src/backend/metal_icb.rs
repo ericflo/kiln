@@ -17,13 +17,11 @@ use kiln_tensor::metal_types::{
 
 use crate::execution_phase::{GraphPhase, GraphPhaseTimer};
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalGraphScalarBuffer {
     buffer: Buffer,
 }
 
-#[allow(dead_code)]
 impl MetalGraphScalarBuffer {
     fn new_u32(device: &MetalRawDevice, value: u32) -> Result<Self> {
         Self::new_copy(device, &value)
@@ -75,7 +73,6 @@ impl MetalGraphScalarBuffer {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalGraphResourceRef {
     buffer: Buffer,
@@ -98,6 +95,9 @@ impl MetalGraphResourceRef {
     }
 }
 
+// Test-lane only: every caller sits in the single-token ICB capture/replay
+// path (`metal_record_single_token_paged_decode_icb_graph` + its `#[cfg(test)]`
+// consumer); the module is metal-gated, so this allow is inert elsewhere.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalPagedKvWriteTokenMajorIcbArgs {
@@ -106,6 +106,9 @@ pub(crate) struct MetalPagedKvWriteTokenMajorIcbArgs {
     pub(crate) head_dim: MetalGraphScalarBuffer,
 }
 
+// `new`/`update_slot`/`scalar_resources` are all consumed only by the
+// single-token ICB capture + replay tests; allow required for the metal
+// non-test build.
 #[allow(dead_code)]
 impl MetalPagedKvWriteTokenMajorIcbArgs {
     pub(crate) fn new(
@@ -134,7 +137,6 @@ impl MetalPagedKvWriteTokenMajorIcbArgs {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalPagedKvWriteTokenMajorBatchIcbArgs {
     pub(crate) batch: MetalGraphScalarBuffer,
@@ -143,7 +145,6 @@ pub(crate) struct MetalPagedKvWriteTokenMajorBatchIcbArgs {
     pub(crate) total_slots: MetalGraphScalarBuffer,
 }
 
-#[allow(dead_code)]
 impl MetalPagedKvWriteTokenMajorBatchIcbArgs {
     pub(crate) fn new(
         companion: &MetalCompanion,
@@ -170,7 +171,6 @@ impl MetalPagedKvWriteTokenMajorBatchIcbArgs {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalPagedAttnDecodeDynSeqlenIcbArgs {
     pub(crate) batch: MetalGraphScalarBuffer,
@@ -183,7 +183,6 @@ pub(crate) struct MetalPagedAttnDecodeDynSeqlenIcbArgs {
     pub(crate) total_slots: MetalGraphScalarBuffer,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MetalPagedAttnDecodeDynSeqlenScalars {
     pub(crate) batch: u32,
@@ -196,7 +195,6 @@ pub(crate) struct MetalPagedAttnDecodeDynSeqlenScalars {
     pub(crate) total_slots: u32,
 }
 
-#[allow(dead_code)]
 impl MetalPagedAttnDecodeDynSeqlenIcbArgs {
     pub(crate) fn new(
         companion: &MetalCompanion,
@@ -248,6 +246,10 @@ impl MetalPagedAttnDecodeDynSeqlenIcbArgs {
     }
 }
 
+// Test-lane only: constructed solely by
+// `metal_record_single_token_paged_decode_icb_graph`, whose only caller is the
+// `#[cfg(test)]` single-token ICB replay test; allow required for the metal
+// non-test build.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct MetalSingleTokenPagedDecodeIcbGraph {
@@ -256,6 +258,8 @@ pub(crate) struct MetalSingleTokenPagedDecodeIcbGraph {
     pub(crate) attn_args: MetalPagedAttnDecodeDynSeqlenIcbArgs,
 }
 
+// `replay`/`replay_count` are exercised only by the `#[cfg(test)]`
+// single-token ICB replay test; allow required for the metal non-test build.
 #[allow(dead_code)]
 impl MetalSingleTokenPagedDecodeIcbGraph {
     pub(crate) fn replay(&self, slot: u32, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
@@ -277,7 +281,7 @@ impl MetalSingleTokenPagedDecodeIcbGraph {
     }
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 #[derive(Debug)]
 pub(crate) struct MetalPagedDecodeIcbGraph {
     pub(crate) captured: kiln_graph_metal::MetalCapturedGraph,
@@ -285,6 +289,10 @@ pub(crate) struct MetalPagedDecodeIcbGraph {
     pub(crate) replay_state: ReplayState,
 }
 
+// `replay` (direct method) is consumed only by the `#[cfg(test)]` batched ICB
+// replay test — production replays through `replay_plan` + the `ReplayPlan`
+// impl (`metal_graph.rs`), so the allow is required for the metal non-test
+// build.
 #[allow(dead_code)]
 impl MetalPagedDecodeIcbGraph {
     pub(crate) fn replay(&self, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
