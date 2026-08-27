@@ -97,7 +97,7 @@ const EPI_IDENTITY: i32 = 0;
 const EPI_BIAS: i32 = 1;
 const EPI_RELU: i32 = 2;
 const EPI_GELU: i32 = 3;
-#[allow(dead_code)]
+const EPI_BIAS_GELU: i32 = 6;
 
 const ALGO_BLOB_MAX: usize = 256;
 

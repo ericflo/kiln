@@ -6709,3 +6709,79 @@ green `cargo clippy -p kiln-tensor --all-targets` in the ledger's
 history; workspace sweep clean of the lint class everywhere it could
 build; 994/0 lib tests; one other-crate pre-existing rocm-lane
 compilation defect documented with its suggested one-line fix.
+
+## Cleanup Agent (round 111b — repair: round 108's EPI_BIAS_GELU over-deletion)
+
+**Date:** 2026-08-27
+
+**Regression found (by round-111 sub-agent's feature-lane sweep):**
+round 108 (commit `897bbf599`) deleted THREE wire-code constants in BOTH
+`crates/kiln-rocblas/src/hipblaslt_handle.rs` and
+`crates/kiln-blas/src/cublaslt_handle.rs` — `EPI_SILU` (4), `EPI_BIAS_SILU`
+(5), and `EPI_BIAS_GELU` (6) — but the round-108 ledger entry recorded
+only the SiLU pair. `EPI_BIAS_GELU` is LIVE: it is read by
+`resolve_epilogue_code` at hipblaslt_handle.rs:1076 and
+cublaslt_handle.rs:698 (`Epilogue::BiasGelu => Ok(EPI_BIAS_GELU)`), inside
+feature-gated code (`rocm` / `cublaslt` features). The default-features
+build never compiles those arms, so round 108's clippy/test gates — and CI,
+which has no ROCm/cublasLt feature lane — were all green over a broken
+rocm/cuda lane: any `--features rocm` (or `--features cublaslt`) build of
+kiln-rocblas / kiln-blas and their dependents failed with E0425
+(unresolved `EPI_BIAS_GELU`). Root cause: the orchestrator's round-108
+verification read the diff STAT (4 deletions) and the ledger narrative
+("SiLU pair"), not the actual hunk (3 constants + 2 allows − 1); the
+round-108 grep only searched the two SiLU names.
+
+**Repair (this round):**
+- Restored `const EPI_BIAS_GELU: i32 = 6;` in both crates, beside
+  `EPI_GELU` (original position), and removed the dangling
+  `#[allow(dead_code)]` that round 108's deletion left attached to the
+  following `ALGO_BLOB_MAX` const in both files.
+- The two SiLU constants stay deleted: their match arms map
+  `Epilogue::Silu | BiasSilu => Err(UnsupportedEpilogue)` before any
+  constant use, and no other references exist (feature-agnostic
+  repo-wide grep: 0).
+- Audited the rest of round 108's deletions the same way: vulkan-kernel
+  `VulkanDevice.entry` field (0 reads in any cfg) and opd-loss-kernel
+  `cuda_kernel_supports` (0 refs) — both confirmed safe.
+
+**Verification (orchestrator, own runs):**
+- `cargo check -p kiln-rocblas --features rocm` — **passes** (was E0425
+  before the repair; failure independently confirmed by the round-111
+  sub-agent via `cargo test -p kiln-tensor --features rocm`).
+- `cargo check -p kiln-blas --features cublaslt` (with
+  `CUDARC_CUDA_VERSION=12080`) — **passes**.
+- `cargo check -p kiln-tensor --features rocm` — passes.
+- `cargo check -p kiln-model --features rocm` — passes (2 pre-existing
+  feature-lane warnings, see below; unrelated to this repair).
+- `cargo test -p kiln-rocblas` / `-p kiln-blas` (default): 23/0/0 each.
+- `cargo fmt --check` clean; `check_production_file_budget.py` pass;
+  `check_repository_artifacts.py` pass.
+
+**Standing protocol additions (for all future rounds):**
+1. When verifying a deletion, read the actual `git show` HUNKS (every
+   `-` line), not `--stat` line counts; grep every deleted name, not just
+   the ones the narrative names.
+2. If a touched crate has feature-gated consumers, compile the touched
+   crate under EACH relevant feature before declaring the round green.
+   Standing checks for the blas surface (all buildable on this host;
+   build.rs is a documented no-op without a toolkit):
+   `cargo check -p kiln-rocblas --features rocm`,
+   `cargo check -p kiln-blas --features cublaslt`,
+   `cargo check -p kiln-tensor --features rocm`.
+3. CI has no ROCm/cublasLt lane — the rocm surface of
+   kiln-rocblas/kiln-blas/kiln-tensor/kiln-gdn-kernel is verified locally
+   only; do not treat green CI as evidence for those lanes.
+
+**New feature-lane warnings surfaced during verification (queued, not
+fixed this round):**
+- `kiln-gdn-kernel` (rocm lane): `fn device_stream_submission` never used
+  (kt_api.rs:109) — UNDOCUMENTED; probe next round (dead in all lanes →
+  delete; live in another lane → keep + evidence).
+- `kiln-model` (rocm lane): `BatchedPagedDecodeGraphInputs.max_seqlen_k`
+  never read — pre-existing since round 104b's adjudication of that struct
+  (104b item 8 documents the field's cuda/rocm liveness cross-lane; the
+  warning is rocm-lane-specific and is a warning, not an error).
+
+**Net this round:** +2 lines (the restored const), −2 lines (dangling
+allows) = **0 net**; correctness restored.
