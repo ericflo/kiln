@@ -19,8 +19,8 @@
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
-      "max_lines": 10803,
-      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The 29-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "max_lines": 10862,
+      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The line growth is the cleanup-campaign `#[allow]`-with-evidence annotations: the 29-line delta from rounds 67\u201371 (2026-08-26/27) plus the 59-line round 104a delta (29 cfg_attr(not(rocm)) allow justifications). This ceiling sync repairs the round 104a missed sync and follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/vk_decode_resident.rs",
