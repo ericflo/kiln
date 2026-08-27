@@ -2500,7 +2500,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         )?;
         tracing::debug!(
             synced,
-            "synced LoRA Vars to candle before streamed GRPO save"
+            "synced LoRA params to kt master storage before streamed GRPO save"
         );
 
         params.save_peft(&output_dir, model_config.num_layers)?;

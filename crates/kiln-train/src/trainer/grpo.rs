@@ -1212,7 +1212,10 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     .context("capture final GRPO adapter state")
             },
         )?;
-        tracing::debug!(synced, "synced LoRA Vars to candle before GRPO save");
+        tracing::debug!(
+            synced,
+            "synced LoRA params to kt master storage before GRPO save"
+        );
 
         // Save the trained adapter
         params.save_peft(&output_dir, model_config.num_layers)?;
