@@ -37,6 +37,9 @@ pub struct CudaKernelPolicy {
     pub(crate) gdn_chunk_pre_permute: bool,
 }
 
+// Live under `feature = "cuda"`: kiln-server `model_cuda_kernel_policy` maps
+// profiles to `native_default`/`portable_fallback`; `portable_fallback` has no
+// default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 impl CudaKernelPolicy {
     /// Device-neutral subset of the CUDA routes enabled before policy
@@ -144,6 +147,8 @@ impl Default for CudaKernelPolicy {
 
 /// Install process-lifetime CUDA kernel policy. Reinstalling the same value is
 /// idempotent; conflicting installation fails instead of changing live routes.
+// Called by kiln-server `install_pre_device_startup_policy` (cuda lane);
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub fn install_cuda_kernel_policy(policy: CudaKernelPolicy) -> Result<()> {
     match CUDA_KERNEL_POLICY.set(policy) {
@@ -153,7 +158,6 @@ pub fn install_cuda_kernel_policy(policy: CudaKernelPolicy) -> Result<()> {
     }
 }
 
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn current_cuda_kernel_policy() -> CudaKernelPolicy {
     *CUDA_KERNEL_POLICY.get_or_init(CudaKernelPolicy::default)
 }
