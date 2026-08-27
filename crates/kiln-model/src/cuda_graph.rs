@@ -619,7 +619,7 @@ impl CudaGraphRunner {
             .with_context(|| {
                 format!("allocate persistent batched LinearAttentionState for bucket {batch_size}")
             })?;
-            self.batched_state_pool.insert(batch_size, state);
+            e.insert(state);
         }
         Ok(self.batched_state_pool.get_mut(&batch_size))
     }
@@ -2588,14 +2588,13 @@ impl CudaGraphRunner {
         let mut width: Option<usize> = None;
         for bt in block_tables {
             let padded = Self::padded_block_table(bt, paged_cache, max_seqlen_k)?;
-            if width.is_none() {
-                width = Some(padded.len());
-            } else if width != Some(padded.len()) {
-                anyhow::bail!(
-                    "new_batched_block_table_buffer: inconsistent padded widths ({} vs {})",
-                    width.unwrap(),
+            match width {
+                None => width = Some(padded.len()),
+                Some(w) => anyhow::ensure!(
+                    w == padded.len(),
+                    "new_batched_block_table_buffer: inconsistent padded widths ({w} vs {})",
                     padded.len()
-                );
+                ),
             }
             flat.extend_from_slice(&padded);
         }
