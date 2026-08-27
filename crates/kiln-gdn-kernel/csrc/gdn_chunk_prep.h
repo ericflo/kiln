@@ -2,7 +2,7 @@
 //
 // Fuses the elementwise portion of the chunkwise analytical GDN recurrence
 // that surrounds the three cuBLAS matmuls (KKT, QKT, ks_entry, q_s). The
-// candle-op reference in `kiln-model::forward::gdn_chunkwise_recurrence`
+// kt-op reference chain in `kiln-model::forward::gdn_chunkwise_recurrence`
 // spends 7+ launches per chunk to build these tensors; this kernel folds
 // them into a single block-per-(batch, head) launch.
 //

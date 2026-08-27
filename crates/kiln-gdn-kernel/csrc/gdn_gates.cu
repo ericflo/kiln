@@ -24,7 +24,7 @@
 //   - All F32 intermediates inside the kernel for numerical stability
 //   - Shape [B, T, nv]; nv <= 256
 //
-// Parity oracle: the candle-op chain above in
+// Parity oracle: the kt-op chain above in
 // kiln_model::forward::gated_deltanet_forward (Step 6).
 
 #include <cuda_bf16.h>

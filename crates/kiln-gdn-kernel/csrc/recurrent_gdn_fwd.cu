@@ -23,8 +23,8 @@
 // kiln configures dk = dv = 128, so the per-thread state column is 128 F32
 // values = 512 bytes ≈ 128 32-bit registers — comfortably under sm_86's 255
 // reg/thread cap. Shared memory is tiny: 2 * dk * 4 (q, k as F32) + a few
-// scalars ≈ 1 KiB. The win over the candle-op path is eliminating the
-// chunkwise machinery (preshape, decay matrix, KKT, forward sub, B_mask,
+// scalars ≈ 1 KiB. The win over the chunkwise path is eliminating its
+// machinery (preshape, decay matrix, KKT, forward sub, B_mask,
 // matmul into state) when there is only a single token to advance.
 
 #include <cuda.h>

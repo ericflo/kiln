@@ -1,7 +1,7 @@
 // kiln-gdn-kernel: fused GDN gated RMSNorm kernel
 //
 // Collapses the `kiln/gdn/gated_norm` bf16 decode/prefill body from the
-// portable candle chain:
+// portable kt-op chain:
 //
 //   x_f32 -> rms_norm(x, weight, eps) -> silu(z_f32) -> mul -> bf16
 //

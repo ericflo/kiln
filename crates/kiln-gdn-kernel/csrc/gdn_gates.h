@@ -16,7 +16,7 @@ extern "C" {
 //   g_out    = -exp(A_log) * softplus(a + dt_bias)       [rows, nv] bf16
 //
 // Intermediates are in F32 inside the kernel (softplus / exp / sigmoid
-// are done in F32 for stability, matching the candle F32 reference path
+// are done in F32 for stability, matching the kt F32 reference path
 // in kiln-model::forward::gated_deltanet_forward Step 6).
 //
 // Return codes:
