@@ -7227,3 +7227,53 @@ commits + the budget sync, + this ledger.
 crate; `check_production_file_budget.py` and `check_repository_artifacts.py` pass
 (646 files / 6694 tracked paths); `git status` clean after each commit.
 Not pushed.
+
+## Cleanup Agent (round 116b — LEDGER CORRECTION: rounds 115/116 lint-debt closure claims were under-measured)
+
+**Date:** 2026-08-27
+
+**Defect:** rounds 115/116 (and their orchestrator verification) measured
+"in-crate warnings" with a span-line filter of exactly TWO leading spaces
+(`grep "^  -->"`). Clippy emits `-->` spans with 2–6 leading spaces
+depending on the warning's layout (secondary spans, multi-line notes).
+The 3-space-indented spans were silently dropped, so "0 in-crate
+warnings" verdicts were wrong wherever a warning used a 3-space span.
+
+**Corrected measurement (same protocol, fixed span filter `^\s{2,6}-->`):**
+| crate | lane | true in-crate sites |
+|---|---|---|
+| kiln-model | cuda | **119** |
+| kiln-model | rocm | **60** |
+| kiln-train | cuda | **29** |
+| kiln-train | rocm | **27** |
+| kiln-tensor | cuda | 1 |
+| kiln-tensor | rocm | 6 |
+| kiln-server | cuda | 6 |
+| kiln-server | rocm | 9 |
+| kiln-rmsnorm-kernel | cuda | 6 |
+| kiln-rmsnorm-kernel | rocm | 6 |
+| kiln-rocblas | rocm | 1 |
+| all other crates/lanes | — | 0 |
+
+≈270 sites (lane-duplicated). Class mix: 53× collapsible_if, 25×
+redundant closure, 16× needless borrow, 15× is_multiple_of, 15× doc
+lazy-continuation, 14× needless return, 10× drop-non-Drop, 14×
+too_many_arguments (judgment), 6× await-holding-mutex (judgment), 6×
+field-reassign-with-default, 4× private-in-public (judgment), 4× hex
+grouping, 5× unused imports, plus ~15 "never used" dead-code sites
+(dead-code adjudication round pending) and the known `max_seqlen_k`
+×3.
+
+**What remains TRUE from rounds 115/116:** every fix they landed is real
+and valid (verified: kiln-tensor 994/0, kiln-model 394/0, kiln-train
+534/0, 3-lane clippy re-checks, flash-attn parity delta adjudicated as
+host flakiness). Only the *closure claims* ("0 in-crate") are void.
+
+**Standing protocol (replaces the round-115 measurement rule):** span
+filter MUST be `grep -E "^\s{2,6}-->"`; per-crate verdicts must also
+grep the lint NAME table, not just spans.
+
+**Consequence:** the feature-lane lint closure is now a multi-round
+campaign (117a kiln-model mechanical → 118 kiln-train → 119 tail
+crates → 120 dead-code adjudication → 121 judgment class). CI remains
+blind to all of it (no rocm/cuda lane) — local gates only.
