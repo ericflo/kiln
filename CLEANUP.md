@@ -4526,3 +4526,122 @@ baseline-identical (4 pre-existing approx_constant denies, evidence in
 baseline worktree), both Python gates passing after the 6736→6721
 exact-ceiling sync, git status clean; commits `7b26e498a`,
 `7fa99c3d8`, `5b9cf4bc7`, `1179aec10` + this ledger commit.
+
+## Cleanup Agent (round 92)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** execute round 91's round-92 recommendation
+#2 — sweep the first unswept crate in round 88's inventory,
+`crates/kiln-opd-loss-kernel` (76 candle refs in `src/` at start).
+Deletion-first policy, same re-verify-first protocol: every factual
+claim re-checked against the current tree before touching it (live
+symbols grep-verified, retired symbols confirmed absent, manifest +
+`kiln-kt-bridge` feature set as authority). Where a block mixed true and
+false content, the true half was kept with minimal rewording so it stands
+alone. Comment-only: zero code lines touched (verified by diff — every
+changed line is a `#`/`//`/`///`/`//!` line).
+
+**HEADLINE NET LINES: −2** (122 insertions / 124 deletions across 5
+files; this was a reword-heavy round because most stale blocks mixed a
+false present-tense candle claim with a true #1082 provenance or a true
+candle-free claim that the protocol requires us to keep, so the honest
+delta is small rather than a large deletion).
+
+**ADJUDICATION TABLE (net per file, all comment-only):**
+
+| file | net | what changed (each claim re-verified against current code) |
+|---|---|---|
+| Cargo.toml | **+3** | The `kiln-kt-bridge` comment claimed `default-features = false` "explicitly opts out of kiln-kt-bridge's `candle` feature" and that a "candle-on default would re-introduce candle-core". Stale: `crates/kiln-kt-bridge/Cargo.toml` is `[features] default = []` with **no `candle` feature** (grep-verified; "[candle fully removed]" comment present) and the dep table has zero candle entries. The cuda/rocm-feature comments repeated the "deliberately NOT opting into kiln-kt-bridge?/candle" framing. Reworded all three to the current dep-graph truth (kiln-kt-bridge is fully candle-free; `default-features = false` kept as a load-bearing guard so a future candle feature stays disabled). The `#1082` header's "moved UP into `kiln-train::opd_candle_shim`, which legitimately keeps candle" clause is false — `opd_candle_shim` is gone; reworded to "deleted with the candle drop; kiln-train's kept OPD adapters are kt-native". The manifest directives (`default-features = false`, feature forwards) are **untouched**. |
+| src/lib.rs | **−2** | "Phase A — the pure-candle reference implementation, kept as the reference path for the `kt_api` entry points" is false: `opd_top_k_reverse_kl_phase_a_per_position` and `per_position_phase_a` are absent (grep-verified) — Phase A was deleted in #1082. Reworded to past-tense (Phase A *was* the reference, *deleted* in #1082; `kt_api` is the crate's only surface). "moved UP into `kiln-train::opd_tape_shim` (which legitimately keeps candle)" → the shim is kt-native/candle-free (verified). The `kt_tape` module header's "parallel kt-tape entry … the pilot port" → it is the production kt-tape entry (the candle CustomOp1 it superseded is deleted). Kept: the 100%-candle-free claim, the "candle `DType` ported to `kiln_tensor::DType`" provenance, and the #1082 deletion history. |
+| src/phase_b.rs | **0** | "still called by the kt-typed backward … which powers both the kt-tape pilot and the candle kt-forward-op shim (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`)" — that shim is deleted (grep-verified absent). Reworded: the FFI powers the kt-tape entry + the direct kt-typed backward entries. "now reached only through the kt-shim" → reached directly via the kt-typed backward entries. Kept: the whole "What was removed" deletion list (`OpdLossCustomOp`, `opd_top_k_reverse_kl_phase_b`, `opd_loss_phase_b_backward_via_kt_bridge`, the fused-FWD FFI, `PerPositionMetrics`/`compute_per_position_metrics`) — all confirmed absent — and the "fused backward FFI symbols still called by `opd_top_k_reverse_kl_phase_b_bwd_kt`" truth. |
+| src/kt_api.rs | **−5** | Deleted/reworded every dangling reference to a deleted candle symbol: `crate::OpdLossCustomOp` / `opd_top_k_reverse_kl_phase_a_per_position` / `per_position_phase_a` / `crate::PerPositionMetrics` / `crate::compute_per_position_metrics` / `crate::phase_b::OpdLossOutput` / `crate::phase_b::cuda_kernel_backward` / `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`. "moved this crate's candle-typed glue UP into `kiln-train::opd_tape_shim` … this crate keeps only the raw CUDA FFI" → the candle glue was *deleted* (shim is kt-native); the raw CUDA FFI is pure-kt. "Backward is still TBD / the candle CustomOp1 is currently the only production path / follow-up task to wire a backward / `mean_all` recorder not yet implemented" are false — the kt-typed backward entries (`opd_top_k_reverse_kl_phase_b_bwd_kt`, `_scalar_mean_unit_grad_kt`, `_composite_kt`) are wired (grep-verified, L1008/L1257/L1316) and production callers go through the kt-tape entry (`opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape`, kt_tape.rs L439, re-exported lib.rs L141). Kept: the #1082 provenance, "independent of `anyhow`", the numerical-contract provenance (now framed as the *deleted* Phase A reference), and the frozen `OpdLossError` Display string. |
+| src/kt_tape.rs | **+2** | The module header's "existing `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op` wraps … inside a candle `CustomOp1` (`KtForwardOp1`)" is false (that shim is deleted); reworded to past-tense deletion provenance. "This module is the parallel entry that drops the candle CustomOp wrapper … candle's `BackpropOp` chain (legacy) vs kiln's `Tape::record` (new)" → it supersedes the (deleted) candle chain. "Phase A … its candle-autograd flow … is the parity oracle" → past-tense. "Production caller migration … the production caller in kiln-train still uses the candle CustomOp path" → kiln-train now records the kt-tape entries directly (e.g. `opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt`, verified L103). "same FFI symbols the candle `OpdLossCustomOp::bwd` path uses" / "Bit-identical to the candle/kt-tape CUDA paths" / "successor to … `via_kt_forward_op`" / "as the candle Phase-B `CustomOp1`" / "the production caller is expected to pre-check exactly like the existing kt-forward-op shim does" → all reworded to the (deleted) candle path or the live `cuda_kernel_supports` pre-check. Kept: "No candle types touched", "Same FFI symbols", "same envelope", "same numerical contract", and the Phase 6a/CP-4 / #1082 provenance. |
+
+**ADJUDICATED-KEEP GROUPS (true claims preserved, not stale):**
+
+- "This crate is 100% candle-free" / "No candle types touched" /
+  "candle-free at the dependency-graph level" — all verified true
+  (manifest + source grep-verified candle-free).
+- "the raw CUDA FFI declarations … are pure-kt" (phase_b.rs
+  `extern "C"` block, linked via `build.rs`) — verified true; the fused
+  backward FFI symbols `kiln_opd_topk_kl_bwd_{bf16,f32}` are **live**
+  (declared phase_b.rs, called by `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`).
+- Every #1082 past-tense deletion/migration statement (Phase A deleted,
+  `OpdLossCustomOp` deleted, fused-FWD FFI retired, the candle glue
+  removed) — verified against the absent symbols.
+- The `#1082` archive-doc pointers
+  (`docs/archive/candle-removal/...`) — both files exist (verified).
+- The `OpdLossError` Display message
+  `"kt-opd-loss: {name} is not yet implemented; use the candle-typed
+  entry point"` (kt_api.rs L109) and its test assertion (L1694) are
+  **string literals / test code**, not comments — left untouched per the
+  comment-only mandate.
+
+**VERIFICATION (all gates green):**
+
+- `cargo build -p kiln-opd-loss-kernel` — clean.
+- `cargo test -p kiln-opd-loss-kernel` — **33 passed; 0 failed** (unit),
+  0 (rocm_opd_loss_parity), 0 (doc-tests). Exact match to the
+  pre-change baseline; unchanged because every edit is a comment.
+- `cargo fmt -p kiln-opd-loss-kernel --check` — clean (exit 0).
+- `cargo clippy -p kiln-opd-loss-kernel --all-targets` — no warnings in
+  the crate (the 14 warnings are the `kiln-tensor` dependency,
+  pre-existing, out of scope).
+- `cargo doc -p kiln-opd-loss-kernel --no-deps` — **no new unresolved
+  intra-doc links introduced** (mine is a strict subset of the baseline
+  symbol set); 4 previously-dangling symbols
+  (`crate::PerPositionMetrics`, `crate::compute_per_position_metrics`,
+  `opd_top_k_reverse_kl_per_position_via_kt_forward_op`,
+  `opd_top_k_reverse_kl_phase_a_per_position`) fixed; total
+  unresolved-link warnings reduced 20 → 7 (the remaining 7 are
+  pre-existing, feature-gated or non-candle).
+- `git diff` — every changed line is a comment line (no code tokens).
+- `git status` — clean after the ledger commit.
+
+**COMMITS:** `9335d7460` (the comment-only sweep, net −2) + this ledger
+commit.
+
+**ROUND-93 RECOMMENDATION (steered by evidence):**
+
+1. **Next unswept crate: `crates/kiln-autograd`** (31 candle refs per
+   round 88's inventory), same re-verify-first content-based protocol.
+   Note round-92 already confirmed kiln-autograd now implements the
+   `mean_all` backward (`src/backwards/reduce.rs::mean_all_backward`)
+   — so any "mean_all recorder not yet implemented" claim there is
+   stale. Then kiln-vulkan-kernel (62), kiln-flash-attn (14),
+   kiln-gdn-kernel (12), kiln-conv1d-kernel (8), kiln-core (6) per the
+   same round-88 inventory.
+2. **`kiln-train` OPD docs (comment-only, low-risk):**
+   `crates/kiln-train/src/opd_tape_shim.rs` header and
+   `crates/kiln-train/src/opd.rs` still reference the old `opd/*.rs`
+   layout and the deleted candle shim in a few present-tense spots. A
+   small companion round should re-verify and reword those the same way
+   (the shim itself is already kt-native/candle-free — verified).
+3. **Dead-public-API candidate (needs a code round, NOT comment-only):**
+   `kiln-opd-loss-kernel::PerPositionMetricsRow` (lib.rs) appears to be
+   an unreferenced public struct after the #1082 removal of the candle
+   `PerPositionMetrics` consumer. Confirm no external caller before a
+   round-93+ code round deletes it (out of scope for a comment round).
+4. **kiln-model** (46 candle-referencing files) remains the largest
+   remaining candle surface — still a dedicated campaign, not a single
+   round (carried from round 91 rec #3).
+
+**Signature:** kiln cleanup agent, round 92 of the CLEANUP.md campaign
+— the round-88 inventory's first unswept crate (kiln-opd-loss-kernel,
+76 candle refs) swept deletion-first with per-claim re-verification
+against the live tree (deleted symbols grep-verified absent:
+`OpdLossCustomOp`, `per_position_phase_a`, `crate::PerPositionMetrics`,
+`crate::compute_per_position_metrics`, `via_kt_forward_op`; live symbols
+grep-verified present: `opd_top_k_reverse_kl_phase_b_bwd_kt`/
+`_scalar_mean_unit_grad_kt`/`_composite_kt`, `opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape`,
+`cuda_kernel_supports`, `per_position_forward_kt`; kiln-kt-bridge
+feature set + kiln-train `opd_tape_shim` as authority); HEADLINE NET
+LINES **−2** (122 ins / 124 del, zero code lines) across Cargo.toml
++3, lib.rs −2, phase_b.rs 0, kt_api.rs −5, kt_tape.rs +2 (the net is
+small because the round preserved the true #1082 provenance and
+candle-free claims the protocol requires, rewording the false
+present-tense candle claims around them rather than deleting whole
+blocks); gates: build clean, **33/0** tests (exact baseline match),
+fmt clean, clippy clean (crate), 0 new rustdoc broken links (20 → 7),
+git status clean; commit `9335d7460` + this ledger commit.
