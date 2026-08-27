@@ -3737,3 +3737,188 @@ recorded with evidence, 3 out-of-scope code artifacts reported; all standing
 gates green (534/0/2 kiln-train, clippy zero own-code warnings, fmt clean,
 both Python gates passing, exact-ceiling budget synced 8496→8493, git
 clean); kiln-server density read (5 files / 46 refs) queued for round 87.
+
+## Cleanup Agent (round 87)
+
+**Date:** 2026-08-27
+
+**Scope (steered, two-part):**
+Part A — the three code-level candle-era artifacts round 86 reported as
+out-of-scope (its "ready-made round-87 candidate set"): A1 unused `half`
+dev-dep, A2 misleading `candle_*` local bindings in `opd.rs`, A3 two
+candle-naming `tracing::debug!` strings (consumer check first, then
+KEEP or REWORD). Part B — the kiln-server stale-comment sweep round 86
+density-read queued: 5 files, 46 references (`bench.rs` 16, `device.rs`
+15, `training_preflight.rs` 10, `state.rs` 4, `api/training.rs` 1),
+present-tense false claims fixed, labeled migration history kept,
+comment-only.
+
+**A1 — `half` dev-dependency removed (8f1f6261c + 76412089d).**
+Verified zero `half::` / `use half` / `half = ` references in
+`crates/kiln-train` (src, tests, examples) before deletion — the fn it
+served (`inject_gradient_parity`) was deleted in the candle drop.
+Deleted the `half = "2"` dev-dep plus its 9-line orphaned comment block
+(`Cargo.toml` L97-105 at the time); the adjacent `candle-nn` removal-
+history note (L92-96) is labeled migration history and stays. `Cargo.lock`
+updated in the follow-up commit (kiln-train's dependency edge lost the
+`half` entry; half itself remains in the graph via other workspace
+crates). `cargo check -p kiln-train` clean after.
+
+**A2 — `opd.rs` binding renames (08cb807ed).**
+Six sites across the two grad-deposit loops: `grads_by_candle_raw` →
+`grad_deposits`, `candle_grads` → `grad_deposits`, loop var `candle_raw`
+→ `deposit_raw`. The bindings hold the tape bridge's raw out-map deposit
+keys (`usize`) + kt grads — `tape_bridge.rs:322` and `:403-408` return
+`HashMap<usize, Tensor>`; no candle object is involved. The steering's
+suggested `param_raw` was rejected: `param_raw` is already the
+post-decode local in both loops (the decoded param id), so it would
+collide. Local lets only — zero API impact. Line count unchanged
+(8493; the exact reviewed ceiling holds).
+**New out-of-scope report (same naming class, NOT fixed — not in the
+steered scope):** `trainer/forward_backward.rs` L48/180, L488/518,
+L725/874 and `trainer/reporting.rs` L1237/1243 carry the same
+`grads_by_candle_raw` / `candle_grads` / `candle_raw` pattern — a
+ready-made round-88 candidate.
+
+**A3 — debug-string reword (8dd808946).**
+Consumer check (repo-wide, all file types, `grep -r "synced LoRA Vars
+to candle"`): both strings appeared only at their own
+`tracing::debug!` sites — no test asserts the text, no kiln-server
+receipt parser or persisted-format doc matches it, no receipt field
+carries it. Both are transient structured-log events, so the REWORD
+branch (not KEEP) applied: "synced LoRA Vars to candle before [streamed]
+GRPO save" → "synced LoRA params to kt master storage before [streamed]
+GRPO save", matching `lora_parameters::sync_to_master` semantics
+(lora_parameters.rs:463-475: pulls LoRA params from the registry buffer
+back into kt master storage). The `synced=` structured field is
+unchanged; zero behavior change beyond log text.
+
+**B-bench.rs — 4 sites fixed (f6a056c83); 12 refs kept.**
+- L297 warmup doc: "first-use Metal/Candle compilation latency" →
+  "first-use backend compilation latency (e.g. Metal JIT)" — the
+  warmup mechanism (first-use JIT/kernel-load cost) is still real;
+  "Candle" was a stale layer label.
+- Phase 7 kt-twin block: "candle `paged_cache`" → "primary
+  `paged_cache` (both kt now)" (×2) and "the kt mirror only exercises
+  the writer surface" → "the kt twin only mirrors writes" —
+  "candle paged_cache" is false: `forward.rs:40` is
+  `use crate::PagedKvCacheKt as PagedKvCache`, the primary IS the kt
+  cache. Role split verified: primary writer authoritative + twin
+  mirrors the same write (`full_attention.rs:4113-4120`, "Both caches
+  hold the same K/V/slot device storage"); the `try_kt_paged_kv_*`
+  accessors are metadata parity reads, not KV data reads.
+- MTP note: two contradictory paragraphs consolidated into one — the
+  first ("the MTP step and the candle host sampler both still consume
+  candle tensors, so bridge the last-position hidden state to candle")
+  is refuted by its own successor, by `speculative.rs:824`
+  (`h_prev: &Tensor` kt), `sampling.rs:96` (`greedy_sample(&Tensor)`),
+  and the code one line below (`h_prev = prefill_h_prev_kt`, no
+  bridge). The entry function returns kt:
+  `model_dispatch.rs:3584-3585` → `Result<(Tensor, Tensor)>`.
+- Kept (verified accurate): L140 `(issue #1082, candle removal)`,
+  L184-186 `(#1082) Deleted bench_kt_tensor_to_candle` note, L903/
+  L1128/L1625 `#1082 forward-flip: ... (no candle bridge)` (the named
+  fn signatures confirmed kt-typed), L1057/L1830/L2099 `#1082
+  candle-drop: ...` history, L1084-1086 forward-flip paragraph (its
+  "now takes kt DType/Device directly" claim matches
+  `forward.rs:440-448`).
+
+**B-device.rs — 5 regions fixed (61b674820); 11 refs kept.**
+- Module doc: "still materialise a candle device ... constructed via
+  the kiln_kt_bridge helpers" → "selection is kt-native end-to-end, no
+  candle device is constructed" — refuted by every fn body (each
+  branch returns a plain `kiln_tensor::Device`).
+- `select_device_kt` doc: "Internally constructs the candle device ...
+  translates back to kt" → "returns kt directly, constructs no candle
+  device" — same refutation.
+- `select_device_with_options_kt` doc: the described
+  `candle_core::Device::new_cuda_with_stream` + `disable_event_tracking`
+  setup "behind
+  `kiln_kt_bridge::candle_cuda_device_with_stream_no_event_tracking`"
+  → "both modes return the plain kt CUDA device; the capture stream is
+  the kt one; the `cuda_graphs` flag only selects the startup log
+  line". The named helper **does not exist** (grep empty) — a dangling
+  symbol; the body's own `#1082: kt-native` note (kept) already said
+  the accurate thing. All cited symbols verified to exist:
+  `CudaGraphRunner` (cuda_graph.rs:473), `with_active_cuda_stream`
+  (active_stream.rs:83), `kiln_tensor::primary_cuda_context`
+  (kt_tape.rs:434 usage).
+- Vulkan branch: "candle-core has no native Vulkan device" → "the kt
+  `Device` is index-only (no native handle)" (consistent with the
+  L52 code comment's own "kt Device is index-only").
+- `mark_vulkan_active` note: "the candle device reports as
+  Device::Cpu" + dangling `projection_original_drop_enabled_for_device`
+  (symbol does not exist anywhere) → cites the real `vulkan_active()`-
+  gated guards: `ProjectionLoadPolicy::for_model_loader_device`
+  (capability.rs:1747) and the CPU-arm of
+  `training_precision_policy_for_device_kt` (mod.rs:2109).
+- Kept: the L46-58 `#1082: kt-native — no candle device` block
+  (accurate history + its symbols verified).
+
+**B-training_preflight.rs — 10 sites reworded (cfa92e99c); 0 refs left.**
+The Vulkan dual-residency design (kt CPU-side weights +
+`VulkanBuffer` mirrors, 2x working-set multiplier, Phase 1.2-1.4
+stub plan) is **still the current architecture** — verified against
+`vulkan_weights.rs` (kt `TensorId`-keyed `VulkanBuffer` caches, "no
+candle bridge") and the live `WeightResidency::for_vram` behavior
+(still returns `DualResidentCpuAndVulkan` for unified memory). Only the
+storage-owner label was stale: "candle CPU tensor/storage/mirror/copy"
+→ "kt CPU tensor/storage/mirror/copy", "candle owns the weights" → "the
+kt layer owns the weights", "candle/Vulkan caches" → "kt/Vulkan
+caches". All in-place; line count unchanged (2418).
+
+**B-state.rs — 4 refs, all KEPT, zero diff (correct outcome).**
+L3948 `#1082 candle-drop: candle PagedKvCache::new_uninit_with_fp8_kt
+-> kt PagedKvCacheKt::new_with_fp8` (labeled history; the kt
+constructor is the one called directly below), L5808-5809 `#1082: now
+emits a kt Device::Cpu directly ... previous kt→candle bridge ... is
+gone` (labeled history; the macro does emit `::kiln_tensor::Device::Cpu`),
+L8119 `#1082 candle-drop: ... -> PagedKvCacheKt::new_with_fp8` (labeled
+history).
+
+**B-api/training.rs — 1 site reworded (a4c1c1467); 0 refs left.**
+"weights on Vulkan APUs live in BOTH candle CPU storage and
+VulkanBuffer caches" → "... kt CPU storage ...". The dual-resident
+claim is still true (same verification as B-preflight); the Phase 1.2
+switch to `SingleCopy` is still the documented future step. In-place
+swap; line count unchanged (6614 — the exact reviewed ceiling holds).
+
+**Out of scope (reported, NOT fixed):**
+- `trainer/forward_backward.rs` + `trainer/reporting.rs` — the same
+  `grads_by_candle_raw` / `candle_grads` / `candle_raw` binding pattern
+  A2 fixed in opd.rs (4 sites); not in the steered file list. See A2.
+
+**Verification (standing gates, after all eight commits):**
+- `cargo test -p kiln-train` — **534 passed / 0 failed / 2 ignored**
+  (exact baseline).
+- `cargo test -p kiln-server` — **1388 passed / 0 failed / 3 ignored**
+  (exact baseline).
+- `cargo clippy -p kiln-train -p kiln-server --all-targets` — **zero**
+  warnings in kiln-train/kiln-server sources (remaining warnings are
+  pre-existing in dependency crates: `grep -c` for the two target
+  crates' src paths on clippy output = 0).
+- `cargo fmt --check` — clean (each group verified before commit;
+  A3's first draft tripped the 100-col limit and was split to match
+  the fmt-suggested form before committing).
+- `python3 scripts/check_repository_artifacts.py` — **passed**
+  (6697 tracked paths).
+- `python3 scripts/check_production_file_budget.py` — **passed**
+  (647 files, 5000-line default, 14 reviewed exceptions; all three
+  exact-ceiling files — opd.rs 8493, state.rs 8392, api/training.rs
+  6614 — unchanged and at their ceilings).
+- `git status` — clean after this ledger commit.
+
+**Signature:** kiln cleanup agent, round 87 of the CLEANUP.md campaign —
+the three round-86 out-of-scope code artifacts executed as steered
+(half dev-dep + lock, opd.rs binding renames with the `param_raw`
+collision documented, two debug strings consumer-checked-then-reworded)
+plus the full kiln-server stale-comment sweep (46 refs adjudicated: 20
+fixed/reworded, 26 kept with per-site evidence; state.rs all-KEEP =
+zero diff): 8 commits (`8f1f6261c`, `08cb807ed`, `8dd808946`,
+`f6a056c83`, `61b674820`, `cfa92e99c`, `a4c1c1467`, `76412089d`),
+two dangling-symbol comment refs caught and replaced with verified-live
+symbols (`candle_cuda_device_with_stream_no_event_tracking`,
+`projection_original_drop_enabled_for_device`), both exact-ceiling
+files untouched, all standing gates green at exact test baselines,
+next-round candidate reported (forward_backward.rs / reporting.rs
+binding renames).
