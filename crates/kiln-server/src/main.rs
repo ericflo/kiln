@@ -1101,7 +1101,7 @@ async fn main() -> Result<()> {
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
         let speculative_runtime_policy = SpeculativeRuntimePolicy::new(speculative_mtp_support);
-        let state = AppState::new_real_with_serving_profile(
+        AppState::new_real_with_serving_profile(
             model_config,
             runner,
             tokenizer,
@@ -1125,8 +1125,7 @@ async fn main() -> Result<()> {
             gradient_checkpoint_policy,
             checkpoint_boundary_policy,
         )
-        .context("failed to initialize real server state")?;
-        state
+        .context("failed to initialize real server state")?
     } else {
         // Mock mode: use scheduler + mock engine.
         tracing::debug!("no model path set — running in mock mode");
@@ -1566,91 +1565,89 @@ async fn main() -> Result<()> {
     // NEVER fire a weekly round). Transient run failures log and retry
     // next interval; only an invalid [agent.self_improve] config stops
     // the loop (loudly).
-    if let Some(agent_cfg) = config.agent.clone() {
-        if let Some(hours) = agent_cfg.self_improve_interval_hours.filter(|&h| h > 0) {
-            let scheduler_state = state.clone();
-            let req_template = agent_cfg.self_improve.clone();
-            let status_path = state.adapter_dir.join(".self_improve_scheduler.json");
-            let interval_ms = hours.saturating_mul(3_600_000);
-            let now_ms = kiln_server::recent_requests::now_unix_ms();
-            // Resume the persisted cadence; clamp into [now, now+interval]
-            // so a config change or clock jump can't park the loop years out.
-            let mut status: kiln_server::state::SelfImproveSchedulerStatus =
-                std::fs::read_to_string(&status_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-            status.interval_hours = hours;
-            if status.next_run_unix_ms == 0 || status.next_run_unix_ms > now_ms + interval_ms {
-                status.next_run_unix_ms = now_ms + interval_ms;
-            }
-            let persist = {
-                let status_path = status_path.clone();
-                move |s: &kiln_server::state::SelfImproveSchedulerStatus| {
-                    if let Ok(body) = serde_json::to_vec(s) {
-                        let _ = kiln_resource::locked_atomic_write(&status_path, &body);
-                    }
-                }
-            };
-            persist(&status);
-            *scheduler_state.self_improve_scheduler.write().unwrap() = Some(status.clone());
-            tracing::info!(
-                interval_hours = hours,
-                next_run_unix_ms = status.next_run_unix_ms,
-                "self_improve scheduler armed"
-            );
-            tokio::spawn(async move {
-                loop {
-                    let now = kiln_server::recent_requests::now_unix_ms();
-                    let wait_ms = status.next_run_unix_ms.saturating_sub(now).max(1_000);
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    if scheduler_state
-                        .shutdown
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        break;
-                    }
-                    let req = match &req_template {
-                        Some(v) => match serde_json::from_value(v.clone()) {
-                            Ok(req) => req,
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "[agent].self_improve config invalid; scheduler stopping"
-                                );
-                                break;
-                            }
-                        },
-                        None => Default::default(),
-                    };
-                    let ran_at = kiln_server::recent_requests::now_unix_ms();
-                    status.last_run_unix_ms = Some(ran_at);
-                    match kiln_server::api::self_improve::submit_self_improve(&scheduler_state, req)
-                    {
-                        Ok(resp) => {
-                            tracing::info!(
-                                jobs = resp.job_ids.len(),
-                                "scheduled self_improve round queued"
-                            );
-                            status.last_result =
-                                Some(format!("queued {} job(s)", resp.job_ids.len()));
-                            status.last_job_ids = resp.job_ids;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = ?e,
-                                "scheduled self_improve round failed to queue; will retry next interval"
-                            );
-                            status.last_result = Some(format!("failed: {e:?}"));
-                            status.last_job_ids = Vec::new();
-                        }
-                    }
-                    status.next_run_unix_ms = ran_at + interval_ms;
-                    persist(&status);
-                    *scheduler_state.self_improve_scheduler.write().unwrap() = Some(status.clone());
-                }
-            });
+    if let Some(agent_cfg) = config.agent.clone()
+        && let Some(hours) = agent_cfg.self_improve_interval_hours.filter(|&h| h > 0)
+    {
+        let scheduler_state = state.clone();
+        let req_template = agent_cfg.self_improve.clone();
+        let status_path = state.adapter_dir.join(".self_improve_scheduler.json");
+        let interval_ms = hours.saturating_mul(3_600_000);
+        let now_ms = kiln_server::recent_requests::now_unix_ms();
+        // Resume the persisted cadence; clamp into [now, now+interval]
+        // so a config change or clock jump can't park the loop years out.
+        let mut status: kiln_server::state::SelfImproveSchedulerStatus =
+            std::fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+        status.interval_hours = hours;
+        if status.next_run_unix_ms == 0 || status.next_run_unix_ms > now_ms + interval_ms {
+            status.next_run_unix_ms = now_ms + interval_ms;
         }
+        let persist = {
+            let status_path = status_path.clone();
+            move |s: &kiln_server::state::SelfImproveSchedulerStatus| {
+                if let Ok(body) = serde_json::to_vec(s) {
+                    let _ = kiln_resource::locked_atomic_write(&status_path, &body);
+                }
+            }
+        };
+        persist(&status);
+        *scheduler_state.self_improve_scheduler.write().unwrap() = Some(status.clone());
+        tracing::info!(
+            interval_hours = hours,
+            next_run_unix_ms = status.next_run_unix_ms,
+            "self_improve scheduler armed"
+        );
+        tokio::spawn(async move {
+            loop {
+                let now = kiln_server::recent_requests::now_unix_ms();
+                let wait_ms = status.next_run_unix_ms.saturating_sub(now).max(1_000);
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                if scheduler_state
+                    .shutdown
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    break;
+                }
+                let req = match &req_template {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "[agent].self_improve config invalid; scheduler stopping"
+                            );
+                            break;
+                        }
+                    },
+                    None => Default::default(),
+                };
+                let ran_at = kiln_server::recent_requests::now_unix_ms();
+                status.last_run_unix_ms = Some(ran_at);
+                match kiln_server::api::self_improve::submit_self_improve(&scheduler_state, req) {
+                    Ok(resp) => {
+                        tracing::info!(
+                            jobs = resp.job_ids.len(),
+                            "scheduled self_improve round queued"
+                        );
+                        status.last_result = Some(format!("queued {} job(s)", resp.job_ids.len()));
+                        status.last_job_ids = resp.job_ids;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "scheduled self_improve round failed to queue; will retry next interval"
+                        );
+                        status.last_result = Some(format!("failed: {e:?}"));
+                        status.last_job_ids = Vec::new();
+                    }
+                }
+                status.next_run_unix_ms = ran_at + interval_ms;
+                persist(&status);
+                *scheduler_state.self_improve_scheduler.write().unwrap() = Some(status.clone());
+            }
+        });
     }
 
     let addr = format!("{host}:{port}");
