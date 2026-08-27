@@ -3556,3 +3556,69 @@ Public API: purely additive (`pub fn` in a `pub mod`); kiln-train is consumed by
 - The TRL SFT template's header comment referencing `qwen3_5_think.jinja` is upstream TRL text inside a digest-pinned file — do not "fix" it; the pin (`22faf421…`) would break.
 
 **Signature:** kiln cleanup agent, round 83 of the CLEANUP.md campaign — test-fixture consistency audit across all 8 fixture families in `crates/` (chat templates, TRL-pinned template, 3 oracle JSONs, 3 tokenizer-builder families, tiny-ModelConfig family, shape constants, 285 payload literals): **zero drifted fixture values** — every duplication proven either parse-identical or an intentional documented variant; the one true hand-copied fixture pair (`synthetic_tokenizer`, proven byte-identical modulo indentation) consolidated into the canonical `pub` library helper its own module doc demanded, behavior proven identical by deterministic before/after dry-run comparison, net −35 lines, all standing gates green (534/0/2 kiln-train, 1388/0/3 kiln-server, clippy zero own-code warnings, fmt clean, both Python gates passing, qualification hash untouched), commit `bad53b3df`; 5 rejected candidates recorded with evidence.
+
+## Cleanup Agent (round 85)
+
+**Date:** 2026-08-26 (session continued under goal orchestration)
+
+**Task:** stale-comment sweep (the round-82 fallback that rounds 83-84
+never reached) — non-marker comments in kiln-model asserting behavior the
+code no longer performs, plus a sample re-verification of recent ledger
+citations.
+
+**Provenance (salvage, recorded honestly):** the sub-agent session for
+this round **timed out at 2700s** with a 22-file kiln-model pile
+uncommitted and no ledger entry. Per the salvage protocol (rounds 70/73
+precedent), the orchestrator verified the pile before landing it:
+
+- **Scripted proof the pile is comment-only:** filtered the full
+  `git diff` for changed lines NOT matching comment syntax
+  (`//`, `///`, `/*`, ` *`, `//!`) — **0 non-comment lines** across all
+  22 files. No code, attribute, string-literal, or API change possible.
+- **Hunk spot-checks** confirm the change class: false
+  present-tense candle-era claims corrected to the post-#1082 reality
+  (e.g. `lm_head.rs` "candle Tensor" → "kt Tensor", "candle clone of
+  the pre-allocated buffer" → "kt handle over the pre-allocated buffer";
+  `fp8.rs` "(still candle-typed) tensors … bridges at the call
+  boundary" → "(kt-typed end-to-end; the call boundary is an identity
+  alias)"). Legitimate migration-history notes were preserved, not
+  deleted.
+- `cargo test -p kiln-model` — **394 passed / 0 failed** (exact
+  round-76 baseline).
+- `cargo clippy -p kiln-model --all-targets` — **0 own-code warnings**
+  (round-76 zero state preserved).
+- `cargo check -p kiln-model --features vulkan` — clean (feature-gated
+  files still parse).
+- `cargo fmt --check` — clean.
+- `python3 scripts/check_repository_artifacts.py` — passed (6697 paths).
+- `python3 scripts/check_production_file_budget.py` — passed (647
+  files, 14 exceptions unchanged).
+
+**Change:** 22 kiln-model files (backend/{cpu,cuda,metal,metal_attention,
+metal_runtime,rocm,vulkan,mod}.rs, cuda_graph.rs, forward.rs,
+forward/{ffn,full_attention,linear_attention,
+linear_attention_streaming,lm_head,primitives,tests/mod,
+training_primitives,transformer,weight_loading}.rs, fp8.rs, generate.rs),
+381 insertions(+) / 403 deletions(−), **100% comment/doc text**.
+
+**Landed as** `8fda22504`
+(`refactor(kiln-model): fix stale present-tense candle-era claims in
+doc-comments (round 85 salvage)`).
+
+**Lesson for future rounds (feeding back per protocol):** broad,
+exploratory sweeps (this one was "scan the whole codebase for stale
+comments") time out sub-agent sessions — the round-85 pile was large
+enough that verification, tests, and the ledger entry did not fit in
+45 minutes. **Scope comment sweeps to one crate per round**, and have
+the sub-agent commit per-file-group early (incremental-commit rule), so
+a timeout leaves committed work instead of a pile. If the sweep is to
+continue, the natural next scopes are kiln-server and kiln-train
+(both carry large candle→kt-era doc surfaces too).
+
+**Sample ledger-citation audit (round 85 steering item 2, partial —
+the session died before completing it):** the round-83 sha256-identity
+table re-verified against the tree (helpers present at
+`crates/kiln-server/src/teacher_identity.rs:745/:759`, all six
+delegation sites delegating, error texts intact) — consistent. A full
+systematic sample audit of the last 6 rounds' claims remains available
+as a future-round target.
