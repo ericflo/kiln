@@ -1516,6 +1516,10 @@ impl PagedKvCacheKt {
             "batched token-major KV write metadata length mismatch"
         );
 
+        // `slots` is consumed only by the metal-lane batch build below (and the
+        // cpu-lane no-op reference); allow the unused-variable warning on
+        // cuda/rocm lanes.
+        #[allow(unused_variables)]
         let slots = self.resolve_unique_decode_slots(block_tables, start_positions)?;
         #[cfg(not(any(feature = "cuda", feature = "metal", feature = "rocm")))]
         let _ = &slots;

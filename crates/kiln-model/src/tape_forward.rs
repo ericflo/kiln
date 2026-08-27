@@ -1794,6 +1794,9 @@ pub fn try_tape_flash_attn_kt(
         {
             return Ok(None);
         }
+        // `sq` is consumed only by the rocm-lane long-sequence policy check below;
+        // allow the unused-variable warning on cuda/cpu lanes.
+        #[allow(unused_variables)]
         let Ok((bq, sq, hq, dq_)) = q.dims4() else {
             return Ok(None);
         };
