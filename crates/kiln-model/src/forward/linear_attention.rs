@@ -1718,7 +1718,7 @@ pub(super) fn gdn_chunkwise_recurrence_head_last_full_chunks(
 ///
 /// Returns: [batch, seq_len, hidden_size]
 ///
-/// Candle-op reference path for the Step-6 GDN gates. This is the original
+/// Reference path for the Step-6 GDN gates. This is the original
 /// Phase-6 implementation; it's kept as a fallback for shapes/dtypes outside
 /// the fused kernel's envelope and as the algorithmic oracle for parity tests.
 ///
