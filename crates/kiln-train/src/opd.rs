@@ -76,19 +76,19 @@ use anyhow::{Context, Result, anyhow};
 // `candle_core::` ref count from 59 → 0 as part of the per-file
 // path-collapse pass in full candle removal (#1082).
 //
-// The candle dep itself stays because `compute_stable_opd_loss` returns
-// `Tensor`s that the trainer's `.backward()` roots on, and the
-// underlying KL+SFT composition still uses candle autograd. Drop the
-// candle dep once the entire OPD loss path migrates to kt-typed
-// autograd via `KtForwardOp1` / `KtForwardOp2` (kt_api.rs Phase 7).
+// The candle dep itself stayed while `compute_stable_opd_loss` returned
+// `Tensor`s that the trainer's `.backward()` rooted on and the underlying
+// KL+SFT composition still used candle autograd. That condition has since
+// been satisfied — the entire OPD loss path is kt-typed (kt_api.rs Phase 7
+// landed), so the crate-level candle deps are gone.
 // (#1082 candle-drop) `Var` + `TensorId` dropped from the facade import:
 // the OPD candle grad path that used candle `Var`s + a `HashMap<TensorId,
 // Tensor>` grad map was deleted. The production tape-authoritative scalar path
-// is now kt-native (`opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` takes kt
-// `hidden`/`head_t` directly). The candle `Tensor` / `DType` facade aliases stay
-// for the remaining candle seam in `opd_step_loss` (the per-position candle
-// shim path, used by `opd_step_loss_simple` + parity tests) and the OPD-loss
-// test fixtures.
+// is kt-native (`opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` takes kt
+// `hidden`/`head_t` directly). The facade `Tensor` / `DType` aliases now
+// resolve to kt (Wave E4), so `opd_step_loss` / `opd_step_loss_simple` (the
+// per-position shim path) + parity tests + the OPD-loss test fixtures are
+// kt-typed end-to-end.
 use crate::cd_types::{DType, Tensor};
 // (#1082) `Device` is only referenced from test-mode helpers
 // (`opd_train_synthetic_validation`, `mod tests`); gating the import
@@ -1506,7 +1506,7 @@ pub struct OpdStepOutputs {
 /// [`OpdStepInputs`] (the alignment checks, `label_mask`, `top_k` resolution,
 /// and the teacher logprob fetch).
 ///
-/// Shared by [`opd_step_loss`] (candle-autograd / per-position path) and the
+/// Shared by [`opd_step_loss`] (per-position path) and the
 /// tape-authoritative scalar-mean path in [`opd_train`] so the (potentially
 /// expensive) teacher fetch + bookkeeping happens exactly once and identically
 /// on both code paths. (#1082 CP-4 endgame.)
@@ -2782,8 +2782,8 @@ fn sample_student_rollout(
                 streaming_prefill,
             )
             .with_context(|| format!("on-policy rollout segment [{start},{end})"))?;
-            // Detach between chunks so the candle buffer cache can
-            // free intermediates — bit-exact with monolithic since
+            // Detach between chunks so intermediates can be freed —
+            // bit-exact with monolithic since
             // we don't need gradients here.
             current = current.detach();
         }
@@ -4685,7 +4685,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                     // positions are remapped to the teacher's frame. This
                     // bookkeeping is path-independent (it only touches host
                     // token arrays) so we compute it once before the
-                    // tape-authoritative-vs-candle dispatch below.
+                    // tape-authoritative dispatch below.
                     let teacher_prompt: &[u32] = &teacher_prompt_tokens[prompt_idx];
                     let (teacher_full_tokens_owned, teacher_shifted_positions): (
                         Vec<u32>,

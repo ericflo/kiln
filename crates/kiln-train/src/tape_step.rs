@@ -12,14 +12,14 @@
 //! * `kiln_flce_kernel::fused_linear_cross_entropy_phase_b_via_kt_tape`
 //! * `kiln_opd_loss_kernel::*_via_kt_tape`
 //!
-//! Each is a parallel entry alongside the existing candle-CustomOp shim.
-//! None of them can be promoted to the production caller because
-//! `kiln-train` drives backward through
+//! Each is a parallel entry alongside the (then) candle-CustomOp shim.
+//! None of them could be promoted to the production caller at the time
+//! because `kiln-train` drove backward through
 //! `candle_core::Tensor::backward()` (the candle `BackpropOp` /
-//! `GradStore` walker), while the pilots record onto
-//! `kiln_autograd::Tape` (a disjoint walker). The two graph systems are
-//! mutually-incompatible until `kiln-train` itself adopts the
-//! `kiln_autograd::Tape` substrate.
+//! `GradStore` walker), while the pilots recorded onto
+//! `kiln_autograd::Tape` (a disjoint walker). `kiln-train` has since
+//! adopted the `kiln_autograd::Tape` substrate as its production grad
+//! producer (the #1082 candle drop).
 //!
 //! This module is **the first `kiln-train` training entry built
 //! entirely on `kiln_autograd::Tape`** — no `candle_core::Tensor`, no
@@ -30,18 +30,18 @@
 //! the gradient store so callers can verify per-parameter gradient
 //! flow.
 //!
-//! It is **not** the production training entry — the trainer's real
-//! per-step loop in `crate::trainer` still drives `loss.backward()`.
-//! Promoting any of the three kt-tape kernel pilots to the production
-//! caller requires this substrate to first cover the full per-step
-//! graph (matmul + rmsnorm + FLCE + OPD + LoRA fan-in). That is multi-
-//! PR work; this commit lands the smallest end-to-end proof point so
-//! the next PR has a concrete substrate to extend, not a green-field.
+//! It was **not** the production training entry when it landed — the
+//! trainer's real per-step loop in `crate::trainer` then drove
+//! `loss.backward()`. The trainer has since flipped to the kt tape, so
+//! this module's role is now historical: it was the first in-crate
+//! end-to-end kt-tape step and the concrete substrate the follow-on PRs
+//! extended to cover the full per-step graph (matmul + rmsnorm + FLCE +
+//! OPD + LoRA fan-in).
 //!
 //! # What this module proves
 //!
 //! 1. `kiln-train` *can* depend on `kiln_autograd` without breaking
-//!    the candle-typed trainer (no shared symbols, no feature-gating
+//!    the (then) candle-typed trainer (no shared symbols, no feature-gating
 //!    conflicts).
 //! 2. A real supervised-learning step composes end-to-end on
 //!    `kiln_tensor::Tensor` + `kiln_autograd::Tape` + `kiln_tensor::ops`.
@@ -184,11 +184,12 @@ pub struct StepOutput {
 /// via `kiln_autograd::Tape`.
 ///
 /// This is the CP-4 substrate's first concrete training entry inside the
-/// `kiln-train` crate. It does NOT replace any existing trainer path;
-/// it sits alongside the candle-typed trainer as a proof point that
-/// `kiln_autograd::Tape` can carry a real training step end-to-end from
-/// inside the same crate that today owns `loss.backward()` for the
-/// production model.
+/// `kiln-train` crate. It did NOT replace any existing trainer path when
+/// it landed; it sat alongside the (then) candle-typed trainer as a proof
+/// point that `kiln_autograd::Tape` can carry a real training step
+/// end-to-end from inside the same crate that then owned
+/// `loss.backward()` for the production model (the trainer has since
+/// flipped to the kt tape).
 ///
 /// # Forward
 ///

@@ -9,35 +9,38 @@ pub mod adapter_output;
 pub mod adapter_shape;
 pub mod checkpoint;
 mod credential_provider;
-// (#1082) Per-crate candle facade — every `candle_core::` path that
-// `trainer.rs` previously held inline (type aliases, generic constructor
-// helpers, safetensors I/O shims, `cd_bail!` macro) now lives in this
-// module. Keeps `trainer.rs` at one direct candle reference (the
-// `CustomOp1` trait impl, which cannot be type-aliased on stable Rust).
+// (#1082) Per-crate type facade — `trainer.rs` used to hold every
+// `candle_core::` path inline (type aliases, generic constructor
+// helpers, safetensors I/O shims, `cd_bail!` macro); those shims/macro are
+// gone with the candle drop, and the remaining bare-name aliases are
+// kt-pinned (see the module doc). `trainer.rs` is candle-free.
 pub(crate) mod cd_types;
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;
 // (#1082) `pub mod echo;` deleted: ECHO's only caller was the OPD candle
 // gradient-checkpointing path (`opd_step_forward_backward_candle`), which
-// the candle-drop removed. ECHO's FLCE composite has no kt-tape coverage,
-// so it dropped out with the candle path. Re-add a kt-native ECHO module
-// when the FLCE env-CE term gets a tape adapter.
+// the candle-drop removed. ECHO's FLCE composite had no kt-tape coverage
+// at the time, so it dropped out with the candle path. (The env-CE term
+// itself has since been resurrected on the fused GRPO/OPD tape roots —
+// resurrection PR2 — but the standalone `echo` module has not been
+// revived.)
 // (#1082) Candle↔kt boundary for the SFT/FLCE trainer — relocated out of
 // `kiln-flce-kernel` so that kernel crate became 100% candle-free (the
 // THIRD kernel-crate candle drop, after `kiln-opd-loss-kernel` and
-// `kiln-rmsnorm-kernel`). Holds the candle-typed `FlceMatmulProvider` trait,
-// the pure-candle Phase A reference, the Phase B candle `CustomOp1`, the
+// `kiln-rmsnorm-kernel`). It held the candle-typed `FlceMatmulProvider`
+// trait, the pure-candle Phase A reference, and the Phase B candle
+// `CustomOp1`,
 // (#1082 candle-drop) `flce_candle_shim` deleted — the candle FLCE CustomOp +
 // `FlceMatmulProvider` (the `KILN_CUDA_FLCE` provider opt-in) are gone; FLCE is
 // kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 // (#1082) CP-4: GRPO policy-gradient scalar-loss tape root. The
-// candle↔kt boundary for the GRPO trainer's tape-authoritative path —
+// kt-tape boundary for the GRPO trainer's tape-authoritative path —
 // a single fused tape node taking the full `[1, T, V]` policy logits and
-// producing the scalar PG (+ optional KL) loss, whose backward recomputes
-// the candle GRPO forward with autograd ON to yield `dL/dlogits`. Mirrors
-// `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (the
-// SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD).
+// producing the scalar PG (+ optional KL) loss, whose backward is a
+// kt-analytic C2 that yields `dL/dlogits` (zero candle). Mirrors
+// `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt` (the
+// SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` (OPD).
 pub mod grpo_tape_shim;
 pub mod hf_grpo_interop;
 pub mod hf_interop;
@@ -50,9 +53,10 @@ pub mod opd;
 pub mod openenv_provenance;
 // (#1082) Candle↔kt boundary for the OPD trainer — relocated out of
 // `kiln-opd-loss-kernel` so that kernel crate became 100% candle-free
-// (the first kernel-crate candle drop). Holds the pure-candle Phase A
-// reference path, the candle `CustomOp1`-based kt-forward-op shim, and
-// the kt-tape production-caller adapters. See module docstring. (#1082)
+// (the first kernel-crate candle drop). It held the pure-candle Phase A
+// reference path and the candle `CustomOp1`-based kt-forward-op shim (both
+// deleted with the candle drop); it now holds the kt-tape
+// production-caller adapters. See module docstring. (#1082)
 pub mod opd_tape_shim;
 pub mod pi_trajectory;
 pub mod receipt;
@@ -60,9 +64,10 @@ pub mod remote_teacher;
 pub mod replay;
 pub mod sft_ingestion;
 pub mod sft_tape_shim;
-// CP-4 substrate pilot — `kiln_autograd::Tape`-based parallel training
-// entry. Sits alongside the candle-typed `trainer` module so future PRs
-// can extend it to cover the full per-step graph. See module docstring
+// CP-4 substrate pilot — `kiln_autograd::Tape`-based training
+// entry. It sat alongside the (then) candle-typed `trainer` module as the
+// first in-crate kt-tape proof point; the trainer has since adopted the
+// kt tape as its production substrate. See module docstring
 // + `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`. (#1082)
 pub mod tape_step;
 pub mod teacher_identity;
@@ -1397,7 +1402,7 @@ pub enum LossAggregation {
     PerSample,
     /// DAPO Token-Level Loss: sum-over-all-tokens-in-group divided by
     /// total active tokens, single optimizer step per group. The kiln
-    /// default from Phase 1 onward (candle path).
+    /// default from Phase 1 onward (kt path).
     #[default]
     TokenLevel,
 }

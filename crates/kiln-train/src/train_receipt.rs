@@ -694,8 +694,8 @@ pub struct EchoReceipt {
     pub initial_env_ce: Option<f64>,
     #[serde(default)]
     pub final_env_ce: Option<f64>,
-    /// Why a configured ECHO term did not contribute to the loss (e.g. no
-    /// kt-tape gradient root post candle-drop, #1082). `None` when the
+    /// Why a configured ECHO term did not contribute to the loss (e.g. the
+    /// run's rollouts carried no environment tokens). `None` when the
     /// term fired or was never requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_reason: Option<String>,

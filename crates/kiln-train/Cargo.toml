@@ -7,12 +7,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# CP-4 substrate dep — pulled in for `crate::tape_step`, the first
-# `kiln_autograd::Tape`-based training entry in this crate. The
-# production trainer in `crate::trainer` still drives candle's
-# `loss.backward()`; the kt-tape entry sits alongside it as the
-# substrate proof point that future PRs extend to cover the full
-# per-step graph. See `crates/kiln-train/src/tape_step.rs` module
+# CP-4 substrate dep — first pulled in for `crate::tape_step`, the
+# first `kiln_autograd::Tape`-based training entry in this crate. The kt
+# tape has since become the production trainer's grad producer (the #1082
+# candle drop removed the candle `loss.backward()` path). See
+# `crates/kiln-train/src/tape_step.rs` module
 # docstring + `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
 # for the full CP-4 rationale. (#1082)
 kiln-autograd = { workspace = true }
@@ -22,31 +21,25 @@ kiln-eval = { workspace = true }
 kiln-resource = { workspace = true }
 kiln-flce-kernel = { workspace = true }
 kiln-rmsnorm-kernel = { workspace = true }
-# CP-4 (#1082): the `kiln_kt_bridge::tape_bridge` module owns the
-# `with_tape_scope_emit_to_grad_store` wrapper that merges
-# `kiln_autograd::Tape`-recorded backward grads into the candle
-# `GradStore` produced by `loss.backward()`. The wrapper is the
-# CUDA-only `kiln-kt-bridge/cuda` feature; the default CPU/Metal/Vulkan
-# build of `kiln-train` does not need the bridge (the wrapper is
-# called only behind `#[cfg(feature = "cuda")]` in `trainer.rs`).
+# CP-4 (#1082): the `kiln_kt_bridge::tape_bridge` module provides the
+# tape-authoritative scopes this crate drives backward through —
+# `with_tape_authoritative_scope_kt` + `with_tape_segment_backward_scope` —
+# plus the kt-param deposit encode/decode (`register_input_mapping_kt` /
+# `decode_kt_param_deposit`) the kt grad producers read tape grads back
+# with.
 kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 kiln-model = { workspace = true }
 kiln-opd-loss-kernel = { workspace = true }
 kiln-tensor = { workspace = true }
 # Leaf crate that defines the kt-native `TensorId` (wraps `u64`).
 # Pulled in unconditionally (no longer `optional = true` /
-# `vulkan`-gated) so the `cd_types::KtTensorId` alias + the
-# `cd_tensor_id_to_kt` conversion shim are available to every build
-# profile. This is the substrate PR for the
+# `vulkan`-gated) so the `cd_types::TensorId` alias is available to
+# every build profile. This is the substrate PR for the
 # `cd_types::TensorId (= candle_core::TensorId)` →
 # `kiln_tensor_id::TensorId` migration tracked in
 # `docs/archive/candle-removal/kiln-train-candle-core-deps-still-required-2026-05-28.md`. The
 # crate is dependency-free (see `crates/kiln-tensor-id/Cargo.toml`), so
-# pulling it into the default build adds no transitive cost.
-# `vk_train.rs` continues to import the symbol from
-# `kiln_tensor_id::TensorId` directly under the `vulkan` feature, which
-# now resolves through this unconditional dep instead of a feature
-# enable. (#1082)
+# pulling it into the default build adds no transitive cost. (#1082)
 kiln-tensor-id = { workspace = true }
 # (#1082) kt-native parameter + optimizer crates. `kiln-param` provides
 # `Parameter` (one logical param, one stable kt `TensorId`, BF16/F32
@@ -61,10 +54,9 @@ kiln-param = { workspace = true }
 kiln-optim = { workspace = true }
 # candle-core dropped from the cuda lane (#1082): kiln-train src + tests are
 # candle-code-free (the cuda+vulkan parity test pulls candle via kiln-model).
-# `candle-nn` is dev-only now: the last production caller
-# (`build_local_teacher_fixture` log_softmax) was inlined in commit
-# 35ad29e6; the only remaining refs are in
-# `opd::opd_train_synthetic_validation` which is `#[cfg(test)]`. (#1082)
+# The last candle-nn users (`build_local_teacher_fixture` log_softmax, then
+# `opd::opd_train_synthetic_validation`) were deleted in the candle drop —
+# see the [dev-dependencies] note below. (#1082)
 safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -102,11 +94,13 @@ optional = true
 # synthetic-data convergence check via `candle_nn::optim::AdamW` +
 # `Optimizer::backward_step`) was deleted along with the OPD candle grad
 # path. No `candle_nn::` reference remains in the crate.
-# Test-only: `inject_gradient_parity` (cfg(test) + #[cfg(feature = "cuda")])
-# uses `half::bf16::from_f32` to build deterministic bf16 fixtures for
+# Test-only: was added for `inject_gradient_parity` (cfg(test) +
+# #[cfg(feature = "cuda")]) to build deterministic bf16 fixtures for
 # the candle ⟷ kt-tape parity assertion (substrate landed in 9b2eda8e;
 # the dev-dep wasn't added at the time and the cuda-gated test was
-# never exercised by a CUDA-less CI). Pinned to "2" to match the rest
+# never exercised by a CUDA-less CI). That test was deleted in the
+# candle drop, so this dev-dep is now unreferenced (removal queued for a
+# manifest-cleanup round). Pinned to "2" to match the rest
 # of the workspace's `half` deps. (#1082)
 half = "2"
 
