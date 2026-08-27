@@ -6033,3 +6033,36 @@ is therefore verified behavior-neutral. (Root cause: an earlier
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 102 —
 headline net **−1** line; zero code-behavior change.
+
+## round 103 — re-adjudicate every `#[allow]` for `dead_code`/`unused_imports`/`unused_mut`/`unused_variables`/`unused_assignments` in kiln-server
+**scope**: `crates/kiln-server/` only (`src/` + `tests/`); all 32 matching allow sites, no other crate, no docs/, no scripts/.
+**baseline** (pre-change, clean tree at `5d4914c4a`): `cargo test -p kiln-server` = **1388 passed / 0 failed / 3 ignored across 34 test targets**; `cargo clippy -p kiln-server --all-targets -- -W clippy::all` = **0 kiln-server own-code warnings** (17 dependency warnings in kiln-core/kiln-tensor, pre-existing, out of scope); `cargo fmt -p kiln-server --check` clean; `scripts/check_production_file_budget.py` pass; `scripts/check_repository_artifacts.py` pass.
+
+**work** (4 commits):
+1. `788b263b6` api/ — delete dead `_Response` alias + its orphaned `TrainingResponse` import name (net −4); sharpen the two kept allow justifications (completions re-export one-liner now cites `#[cfg(test)]` as the sole consumer; `resolve_teacher` doc corrected — it says "used by trainer code in `run_opd`", which is false: `run_opd` is kiln-train code, the only caller is the test `resolve_alias_returns_invalid_on_unknown`).
+2. `7eac49cf8` config/bin — add the required test-only justification one-liner to the 6 bare `apply_*_env_value` allows (net +6); justify `EvalRunResponse.message` wire field (net +2).
+3. `bcd285a9e` tests/ — delete both never-called `_imports_keep_alive` fns plus the unused imports they existed solely to pin (net −32); the round-74 "judgment keep" on `training_tracked_cap.rs` is formally superseded — the round-103 mandate is re-adjudication, and zero callers is zero callers.
+4. `3102a3997` policy — sync `contracts/production-file-budget-v1.json` config.rs ceiling 11278 → 11284 (exact post-annotation line count; the exact-ceiling precedent 2da875018, last used in `862d66f06`).
+
+**sites adjudicated: 32 → kept 29, deleted 3, report-only (public API) 0.**
+
+*Kept, justified this round (8):*
+1. `config.rs:5760 apply_deterministic_env_value` — `mod tests` (config.rs:10818 `apply_deterministic_env_override_parses`) pins it; live path is `apply_env_overrides`.
+2. `config.rs:5788 apply_stream_stall_grace_env_value` — pinned by `apply_env_override_parses`; live path `apply_env_overrides`.
+3. `config.rs:5796 apply_max_batch_tokens_env_value` — pinned by `apply_env_override_parses`; live path `apply_env_overrides`.
+4. `config.rs:5805 apply_max_prefill_tokens_per_cycle_env_value` — pinned by `apply_env_override_parses`; live path `apply_env_overrides`.
+5. `config.rs:5815 apply_max_prefill_layers_per_cycle_env_value` — pinned by `apply_env_override_parses`; live path `apply_env_overrides`.
+6. `config.rs:5825 apply_max_decode_batch_env_value` — pinned by `apply_env_override_parses`; live path `apply_env_overrides`.
+7. `bin/kiln_eval_cli.rs:422 EvalRunResponse.message` — wire-model field, required (no `#[serde(default)]`) in deserialization; presence pins the response shape, never read client-side.
+8. `api/completions.rs:18 pub use batch::{BatchCompletion, ...}` — `use super::*` glob consumers in `generation.rs`/`moderation.rs`/`tools.rs` + tests; empirically required: removing the allow re-fires `unused_imports` (the two `BatchCompletion*` names are only referenced under `#[cfg(test)]`), verified by temporary-removal probe and restored.
+
+*Kept with pre-existing valid evidence (21):* `training_queue.rs:2189 GrpoSubmissionStats.max_seq_len` (grpo_jsonl_tests) · `api/completions/generation.rs:446 unused_assignments` (probe: removing allow re-fires — the `response = response.with_thinking(true)` override must stay) · `api/corrections.rs:440 confirmed()` (mod tests) · `api/schema.rs:22 from_log_record` (mod tests) · `api/streaming.rs:22 write_all` (mod tests) · `api/teachers.rs:247 resolve_teacher` (test `resolve_alias_returns_invalid_on_unknown`) · `api/training.rs:1726 start_with_policy`, `:2154 materialize_openenv_corpus_file`, `:2172 materialize_openenv_corpus_files` (mod tests) · `batching_engine.rs:720 max_seq_len` (grpo_jsonl_tests) · `cli.rs:528 from_environment_value` (mod tests) · `config.rs:250/342/935/2607/2677/2743/2809 from_env_var ×7` (parse-error contract tests) · `openenv_cli.rs:830 qualification_enabled` (rocm/vulkan-gated `rocm/vulkan_qualification_is_off_by_default`, `qualification` fns) · `tests/real_model_integration.rs:619 OpdRequest` (rocm/vulkan-gated `opd_e2e_rocm/vulkan` only; dead in the default build by design, feature-gated keep stands).
+
+*Deleted (3):* `api/self_improve.rs:559 _Response` (private alias, zero consumers anywhere) · `tests/training_queue_cap.rs:209 _imports_keep_alive` (zero callers; its 4 pinned imports all unused) · `tests/training_tracked_cap.rs:350/353 _imports_keep_alive` (+ its `clippy::type_complexity` allow; zero callers; its 5 pinned imports all unused).
+
+**verification** (final state, all commits in): `cargo test -p kiln-server` = **1388 passed / 0 failed / 3 ignored / 34 targets — identical to baseline**; `cargo clippy -p kiln-server --all-targets -- -W clippy::all` = **0 own-code warnings** (dependency warnings unchanged); `cargo fmt -p kiln-server --check` clean; `scripts/check_production_file_budget.py` pass (config.rs at exact ceiling 11284); `scripts/check_repository_artifacts.py` pass (6697 tracked paths); `cargo check -p kiln-server --features rocm` compiles (the lane that keeps `qualification_enabled`/`OpdRequest` live); `git status` clean.
+
+**net lines**: code **−28** (api −4, config/bin +8, tests −32) + policy sync (net 0, ceiling +6 documented); zero behavior change, zero public API deleted.
+
+**Signature:** kiln cleanup agent (sub-agent), round 103 —
+headline net **−28** code lines; zero code-behavior change.
