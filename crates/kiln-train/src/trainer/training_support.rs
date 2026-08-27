@@ -58,6 +58,13 @@ impl GrpoBenchmarkTimings {
         self.reference_forward_ms += elapsed.as_secs_f64() * 1000.0;
     }
 
+    // keep: used under GPU features (cuda/metal/vulkan/rocm) by
+    // `grpo_step_forward_backward_tape_authoritative_kt`
+    // (forward_backward.rs) and `train_tokenized_grpo_group_with_grad_norms`
+    // (grpo_step.rs), which bucket the whole tape-authoritative GRPO step
+    // (policy forward + backward, see forward_backward.rs:884-888) into
+    // the backward_ms receipt field.
+    #[allow(dead_code)]
     pub(super) fn add_backward(&mut self, elapsed: Duration) {
         self.backward_ms += elapsed.as_secs_f64() * 1000.0;
     }
