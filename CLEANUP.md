@@ -5183,3 +5183,73 @@ unchanged ×4, both Python gates passed ×4, git status clean; commits
 commit; round-96 recommendation: split kiln-model (618 refs / 46
 files) into 4 focused rounds by module boundary (root-dense-trio 225,
 forward/ 169, backend/ 146, root-tail 78).
+
+## Cleanup Agent (round 96a — kiln-model campaign, slice 1 of 4)
+
+**Date:** 2026-08-27
+
+**Provenance:** the round-96a sub-agent session **timed out at the 2700s
+boundary after completing all three steered files** (incremental commits
+were in place per protocol — nothing was lost). The orchestrator
+completed the quality gate, fixed the one latent issue the first full
+kiln-model suite run after round 90 exposed (see below), and landed this
+ledger entry. This is the second timeout salvage of the campaign
+(round 85 was the first); both salvages were safe because the
+incremental-commit protocol left no uncommitted pile.
+
+**Scope:** kiln-model campaign slice 1 — EXACTLY three files (the root
+dense trio from the round-95 census):
+- `crates/kiln-model/src/tape_forward.rs` (~110 refs)
+- `crates/kiln-model/src/forward.rs` (~83 refs)
+- `crates/kiln-model/src/paged_kv_cache_kt.rs` (~43 refs)
+
+**Work (comment-only, zero code lines — orchestrator filter-verified):**
+- `89ea57e95` tape_forward.rs — net **−11** (stale candle-era claims
+  deleted/reworded; #1082 history kept)
+- `4dd185fdf` forward.rs — net **−19** (incl. the two "borrow adapter"
+  mentions adjudicated against the live decode path)
+- `5692ec288` paged_kv_cache_kt.rs — net **+1** (reworded the DtoD
+  memcpy stream attribution: kt storage's raw stream via
+  `cuda_stream_raw()`, not the deleted candle device's; gather-path
+  index H2D upload "via candle" → via kt; every #1082
+  "Replaces the candle PagedKvCache::*" history line kept, verified)
+- HEADLINE NET LINES **−29** (net across the three files)
+
+**Latent staleness found + fixed (round-90 byproduct, not a 96a
+regression):** the first full `cargo test -p kiln-model` run after
+round 90's removal of kiln-kt-bridge from kiln-server's manifest
+failed `generated_capability_report_check_mode_is_non_mutating_
+and_enforced` — `docs/backend-capability-report.json` still listed
+`kiln-kt-bridge/<backend>` in the **kiln-server** feature blocks
+(round 90 deleted those four feature-forwarding entries). The failing
+target also aborted the remaining suites, masking the true count.
+Regenerated the report via
+`scripts/generate_backend_capability_report.py` (round-76
+precedent) and committed `55dac859a`: the only delta is the four
+kiln-kt-bridge lines in the kiln-server block (kiln-model's own
+block correctly retains its live kiln-kt-bridge feature — round 90
+kept kiln-kt-bridge in kiln-model/kiln-train/kiln-rmsnorm-kernel).
+Lesson: a manifest-level removal in one crate can stale a cross-crate
+generated artifact whose freshness is only enforced by ANOTHER crate's
+test suite — the standing gate list should include the dependent
+crate's contract tests when manifests change.
+
+**Series baseline (established for 96b/96c/96d):**
+- `cargo test -p kiln-model`: **394 passed / 0 failed / 0 ignored**
+- `cargo clippy -p kiln-model --all-targets`: **0 own-code warnings**
+
+**Verification (orchestrator, own runs):** comment-only filter over all
+three code commits = 0 non-comment lines; 394/0 EXACT (post-
+regeneration, full suite to completion); clippy 0 own warnings;
+`cargo fmt --check` clean; both Python gates pass; `git status` clean.
+
+**Campaign plan status:** 96a DONE. Remaining: **96b** `forward/`
+family (12 files, ~169 refs) → **96c** `backend/` family (17 files,
+~146 refs) → **96d** root tail (14 files, ~78 refs). Each slice is
+disjoint; same protocol as 96a.
+
+**Signature:** kiln cleanup agent (orchestrator-completed), round 96a
+of the CLEANUP.md campaign — 3 files, HEADLINE NET LINES **−29**,
+394/0 exact, 1 latent staleness (round-90 byproduct) found + fixed +
+root-caused; commits `89ea57e95` + `4dd185fdf` + `5692ec288` +
+`55dac859a` + this ledger commit.
