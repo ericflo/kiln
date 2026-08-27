@@ -7070,3 +7070,160 @@ bare) + this ledger entry. Not pushed.
    (pre-existing, flagged for the owner since round ~110).
 4. CUDA-lane `cargo test` for the cuda-default crates is link-blocked on this
    host (no CUDA toolkit) — pre-existing round-112 finding.
+
+### Cleanup round 116 — 2026-08-27 — Lane-precise closure: kiln-tensor (default/cuda/rocm) + flash-attn / small-kernel rocm lanes to zero own-code warnings
+
+**Steering:** close all remaining warn-by-default clippy debt in the in-scope crates
+— kiln-tensor across default + cuda + rocm lanes, kiln-flash-attn's rocm lane, and the
+small kernel crates' rocm lanes (kiln-gdn-kernel, kiln-conv1d-kernel,
+kiln-opd-loss-kernel) — the non-default-lane debt queued by round 115. Apply only
+value/semantics-preserving fixes matching Clippy's exact suggestions; judgment-class
+keeps get explicit, lane-precise allows with rationale. One commit per crate; ledger
+commit last. Never push.
+
+**Before → after own-code warnings** (measured on the pre-fix tree per lane):
+
+| crate | lane | before | after | classes fixed |
+|---|---|---|---|---|
+| kiln-rmsnorm-kernel | cuda | 1 | 0 | `unused_imports` (tests/muon_cuda_parity.rs — round-115 orphan) |
+| kiln-tensor | default | 31 | 0 | needless_range_loop (10), manual_range_contains (2), excessive_precision (2), neg_cmp_op_on_partial_ord (1), needless_borrows (2), useless_vec (3), unused_imports (4), doc_lazy_continuation (2) + dead `skip_seed` helper deleted |
+| kiln-tensor | cuda | 18 | 0 (+1 keep) | collapsible_if (2, let-chains), manual_checked_ops (1), doc_lazy_continuation (1), + the default-lane sites above |
+| kiln-tensor | rocm | 26 lib + 6 test | 0 | collapsible_if (3, let-chains), manual_is_multiple_of (4), manual_checked_ops (1), needless_borrow (1), identity_op (2), excessive_precision (1), + test-target range-loops / imports |
+| kiln-flash-attn | rocm | 18 lib + 4 test | 0 | 9× is_multiple_of, 5× collapsible_if, 2× needless_return, 1× manual_checked_ops, 3× needless_range_loop, 1× identity_op; 2× too_many_arguments allows |
+| kiln-gdn-kernel | rocm | 2 | 0 | 2× needless_range_loop (the round-115-queued pair, tests/rocm_gdn_parity.rs:397/404) |
+| kiln-conv1d-kernel | rocm | 3 | 0 | 2× manual_memcpy (→ `copy_from_slice`), 1× needless_range_loop (tests/rocm_conv1d_parity.rs) |
+| kiln-opd-loss-kernel | rocm | 4 | 0 | 1× redundant_closure (the round-115-queued kt_tape.rs:653) + 3× too_many_arguments allows (round-115-deferred judgment class) |
+
+**kiln-rmsnorm-kernel** (`0e2906a12`): round 115 left one orphan — unused `Device`
+import in tests/muon_cuda_parity.rs:22 (sole use is fully-qualified
+`kiln_tensor::Device::Rocm(0)`). Import removed; 1 → 0.
+
+**kiln-tensor** (`150203453`): 38 files, +108/−116.
+- **Fixed:** 10 range-loops → iterator/`enumerate().take(n)` (method_api, categorical,
+  cross_entropy, einsum ×2, gather, interpolate_1d, masked_select, rope_init, top_k);
+  4 logit-processor test loops (mirostat/misc/modern/processor — clippy's suggested
+  outer-`rows` iterator was imprecise; the correct inner `rows[0]` iteration used
+  instead, value-identical); `manual_range_contains` (`random.rs` → `(-1.0..1.0)`);
+  `excessive_precision` (glu.rs 0.797_884_6_f32 — same f32 bits); `neg_cmp_op_on_
+  partial_ord` (gumbel_sample → `partial_cmp(&0.0) != Some(Greater)`); 2×
+  `doc_lazy_continuation` (cuda_storage, rocm_diag_parity test); 4 unused imports
+  (full_sampler_chain `LogitProcessor`, training_full_block `AddBackward`, +2);
+  dead `skip_seed` helper deleted (logit_xtc — `fire_seed` is a distinct live helper);
+  cuda: 2× `collapsible_if` (capture_alloc, cuda_allocator — edition-2024 let-chains),
+  `manual_checked_ops` (cuda_storage zero-guarded division →
+  `checked_div(shape[rank-1]).unwrap_or(0)`, identical for the zero case);
+  rocm: 3× `collapsible_if` (rocm_allocator cache-hit, paged_decode_meta seqused,
+  rocm_trim_pool test), 4× `manual_is_multiple_of` (paged_decode_meta ×2, rocm_storage,
+  rocm_masked_fill_parity test), `manual_checked_ops` (scan_axis `checked_div`),
+  `needless_borrow` (rocm_storage `active_rocm_stream(ctx)`), 2× `identity_op`
+  (rocm_concat_parity `2*1*3` → `2*3`), `excessive_precision` (rocm_activation_parity).
+- **KEPT (explicit allows, judgment class):** `should_implement_trait` (error.rs
+  `from_str` — pub API, no `FromStr` rename); `dead_code` lane-precise
+  `cfg_attr(not(any(feature="cuda", feature="rocm")), allow(dead_code))` on
+  blaslt_request `with_strided_batch` (live only in cuda/rocm matmul lanes);
+  3× `too_many_arguments` (rocm_paged_attn_decode_bf16, should_use_bf16_f32_scalar_
+  fallback, tests cpu_rope_split_half_ref — flat kernel-parity signatures, matching
+  this campaign's flat-ABI allow precedent); 1× `needless_return`
+  (should_skip_rocm_strided_batched_matmul — removing the returns breaks the
+  cfg(test)/hardware-qualification `Auto` arm: arm-type mismatch `bool` vs `()`).
+- **Gates:** `cargo test -p kiln-tensor --lib` 994/994; `cargo fmt --check` clean;
+  cuda_storage.rs 6701 ≤ 6705 budget; clippy 0 in default lib+tests and rocm lib +
+  all rocm test targets; cuda lane clean except the known structural keep
+  `items_after_test_module` (cuda_storage.rs:2338).
+
+**kiln-flash-attn** (`00eb513a7`): rocm lane only (rocm_sdpa.rs +
+rocm_flash_attn_parity.rs; `mod rocm_sdpa` is `#[cfg(feature = "rocm")]`-gated so the
+cuda lane is untouched). 22 sites → 0 (18 lib + 4 test).
+- **Fixed:** 9× `manual_is_multiple_of` (`h % hk == 0`/`!= 0` →
+  `is_multiple_of`/`!is_multiple_of`; every negated site is preceded by the `hk == 0`
+  guard in the same chain); 5× `collapsible_if` (fwd native/tiled/ffi dispatch,
+  native-bwd preferred, collapsed-GQA bwd direct path — let-chains, the disjunction
+  wrapped in parens per clippy); 2× `needless_return` (match-arm tails →
+  `Ok(result) => Ok(result)`, `Err(tiled_err)` tail); `manual_checked_ops` (tile
+  budget `if denom == 0 {…} else {…/denom…}` → `checked_div(denom).unwrap_or(remaining)`);
+  3× test range-loops (scores/exps/probs `sj` loops → `iter()/.iter_mut().enumerate()
+  .take(sk)`, `sj` retained for `v_at`/`v_idx`/`k_idx`); `identity_op`
+  (`b*1*h*d` → `b*h*d`).
+- **KEPT:** 2× `too_many_arguments` allows (paged_gather 9 params,
+  paged_kv_write_token_major_bf16_batch_slot_rocm 8 params — flat kernel-parity
+  contracts, matching the file's existing bare allows on the neighboring `try_*`
+  FFI wrappers). The first draft carried 2-line rationale comments with the
+  allows, which pushed the file to 5331 and broke the reviewed exact 5328
+  ceiling; the comments were removed (file's local convention is bare allows,
+  rationale recorded here) bringing it to 5327, and the exact ceiling was synced
+  down (see `chore(budget)` below).
+- **Gates:** fmt clean; clippy rocm lane (`--no-default-features --features rocm
+  --lib --tests`) 0 warnings; lib tests 13/13; rocm_flash_attn_parity suite
+  8 passed / 9 failed — **failure set byte-identical to the pristine-tree baseline**
+  (stash A/B verified): pre-existing hipBLASLt device-execution failure
+  (`m=7 n=7 k=128 bf16→f32`) + quarantine cascade on this host, not a regression.
+
+**kiln-gdn-kernel** (`b736ad658`): the round-115-queued pair
+(tests/rocm_gdn_parity.rs:397/404) — both gated-RMSNorm CPU-reference loops now
+`weight.iter().enumerate().take(hidden)` with `h` retained for `idx = row + h`.
+Gates: fmt clean, clippy rocm lane 0, lib 2/2, parity 5/5.
+
+**kiln-conv1d-kernel** (`e5e2eba94`): the round-115-queued trio
+(tests/rocm_conv1d_parity.rs:128/209/220) — 2 causal-state window-fill loops →
+`copy_from_slice(&cs_h[srow..srow + (KW - 1)])` (exact clippy suggestion),
+conv-over-padded-entry `j` loop → `wrow.iter().enumerate().take(KW)` with `j` retained
+for `padded = ti + j`. Gates: fmt clean, clippy rocm lane 0, parity 2/2.
+
+**kiln-opd-loss-kernel** (`bbd0afb3c`): the round-115-queued `redundant_closure`
+(kt_tape.rs:653 — `|a, b| kiln_tensor::ops::add(a, b)` → `kiln_tensor::ops::add`,
+identical Fn type) + the round-115-deferred 3× `too_many_arguments`
+(kt_api.rs:1256 8/7, :1283 9/7, :1363 9/7) now closed with explicit allows on the
+flat fused-bwd kernel-parity signatures — consistent with the campaign's flat-ABI
+allow precedent (round 66 flce; rounds 116 kiln-tensor/flash-attn) and with the
+functions' `#[cfg(any(feature = "cuda", feature = "rocm"))]` gating. Gates: fmt
+clean, clippy rocm lane 0, lib 34/34, parity 2/2.
+
+**Process notes:**
+- flash-attn's true rocm lane is `--no-default-features --features rocm` (its default
+  feature is `cuda`; `--features rocm` alone builds the COMBINED cuda+rocm graph).
+  All rocm-lane measurements this round used the no-default form.
+- Round 115's "14–18 per small crate" miscount source (kiln-tensor dep-lane re-emission)
+  is now moot for the in-scope crates: their own-code debt is closed, and the only
+  remaining dep warning in the rocm graph is the pre-existing kiln-rocblas
+  hipblaslt_handle.rs:663 redundant same-type raw-pointer cast (dep crate, out of
+  scope).
+
+**Out-of-scope / unresolved (recorded, not caused by this round):**
+1. kiln-tensor rocm **lib-test target** pre-existing E0599 cluster: 6 errors in
+   `rocm_matmul.rs` / `rocm_ops/paged_decode_meta.rs` under `cfg(test)` referencing
+   `kiln_hip::RocmStridedBatchedMatmulMode::Auto`, `RocmBf16MatmulOutputMode::Auto`,
+   `RocmTensorKernelPolicy::qualified` — API added cfg-gated behind
+   `hardware-qualification` (kiln-hip) but referenced from kiln-tensor `cfg(test)`
+   code. Blocks only kiln-tensor's own rocm lib-test target; rocm lib, all rocm
+   parity test targets, and every other in-scope crate build and test clean.
+2. Combined cuda+rocm lane only: rustc (not clippy) warn-by-default `private item
+   shadows public glob re-export` — kiln-tensor `lib.rs:64` `#[cfg(feature = "cuda")]
+   mod fp8;` vs `lib.rs:218` `#[cfg(feature = "rocm")] pub use rocm_ops::*;`
+   (rocm_ops re-exports module name `fp8`). Fires only when BOTH features are on
+   (e.g. flash-attn `--features rocm` without `--no-default-features`). Closing it is
+   a visibility/API design decision (module naming), not a lint-mechanical fix —
+   deferred to an API round.
+3. flash-attn parity suite's 9 device-level failures (hipBLASLt execution + quarantine
+   cascade) — pre-existing on this host, baseline-identical.
+4. Carried from round 115: 7 kiln-vulkan-kernel test binaries SIGSEGV on this machine's
+   RADV/driver; CUDA-lane `cargo test` link-blocked on this host (no CUDA toolkit).
+
+**Standing gates (own runs):** `cargo fmt --check` clean (rc=0) after every crate;
+`git status` clean after each commit. Test gates as listed per crate above.
+
+**Net this round:** 46 files changed, +181/−189 (net −8 lines) across the six
+commits + the budget sync, + this ledger.
+
+**Commits (in order, one per crate, then this ledger):**
+- `0e2906a12` fix(kiln-rmsnorm-kernel): round 116 — close orphaned round-115 warn-by-default debt
+- `150203453` refactor(kiln-tensor): round 116 — close warn-by-default clippy debt across default/cuda/rocm lanes
+- `6f9dd0b01` refactor(kiln-flash-attn): round 116 — close rocm-lane warn-by-default clippy debt
+- `1729ea603` refactor(kiln-gdn-kernel): round 116 — close rocm-lane warn-by-default clippy debt
+- `99eef8395` refactor(kiln-conv1d-kernel): round 116 — close rocm-lane warn-by-default clippy debt
+- `6ac2922dd` refactor(kiln-opd-loss-kernel): round 116 — close rocm-lane warn-by-default clippy debt
+- `f243ba594` chore(budget): round 116 — exact-ceiling sync for rocm_sdpa.rs (5328→5327) and cuda_storage.rs (6705→6701)
+
+**Standing gate results (own runs):** `cargo fmt --check` clean (rc=0) after every
+crate; `check_production_file_budget.py` and `check_repository_artifacts.py` pass
+(646 files / 6694 tracked paths); `git status` clean after each commit.
+Not pushed.
