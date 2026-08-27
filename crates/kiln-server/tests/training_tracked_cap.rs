@@ -350,6 +350,9 @@ fn gc_keeps_recent_terminal_entries() {
 /// `GrpoRequest` are reachable so the JSON we construct above keeps shape
 /// parity with the wire types.
 #[allow(dead_code)]
+// Judgment keep (round 74): the 5-Option tuple is the whole point — one
+// return type touching every kept import; aliasing it would hide the check.
+#[allow(clippy::type_complexity)]
 fn _imports_keep_alive() -> (
     Option<ScoredCompletion>,
     Option<ChatMessage>,

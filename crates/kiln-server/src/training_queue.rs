@@ -2327,6 +2327,9 @@ fn load_declared_merge_source_lora(
     })
 }
 
+// Judgment keep (round 74): (token_ids, top_k_fixture_indices) is the per-prompt
+// scoring shape; factoring the pair into a named type adds surface for one site.
+#[allow(clippy::type_complexity)]
 fn tokenize_teacher_prompts(
     operation: &str,
     source_id: &str,

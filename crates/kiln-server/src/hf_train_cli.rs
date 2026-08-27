@@ -609,6 +609,9 @@ fn write_import_archive(
         .context("flushing HF/TRL import upload stream")
 }
 
+// Judgment keep (round 74): the stream + JoinHandle pair is the two ends of
+// one upload task; a named struct would add a type for a single call site.
+#[allow(clippy::type_complexity)]
 fn spawn_import_archive(
     envelope: PathBuf,
     root: String,
