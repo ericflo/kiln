@@ -17,11 +17,12 @@
 ///
 /// `#[non_exhaustive]` — Phase 8.x may add `Managed` (mac-only,
 /// discrete-GPU optimization for the rare non-Apple-Silicon path).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MpsUmaHint {
     /// Touched only from the GPU. Use `MTLStorageModePrivate` for
     /// fastest GPU access. Default for intermediate matmul outputs.
+    #[default]
     PrivateGpuOnly,
     /// Touched from both CPU and GPU (host upload, host readback).
     /// Use `MTLStorageModeShared` — zero-copy on UMA.
@@ -46,12 +47,6 @@ impl MpsUmaHint {
     /// buffer. The MPS storage-mode picker reads this.
     pub const fn needs_uma_visible(self) -> bool {
         matches!(self, MpsUmaHint::SharedUma | MpsUmaHint::HostMirror)
-    }
-}
-
-impl Default for MpsUmaHint {
-    fn default() -> Self {
-        MpsUmaHint::PrivateGpuOnly
     }
 }
 
