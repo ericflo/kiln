@@ -455,6 +455,12 @@ pub fn opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape(
     )
 }
 
+// 8 args: the 6-arg kernel input contract + `tape` + the
+// `scalar_mean_unit_root_grad` gradient-convention flag; the flat
+// list mirrors the FFI composite-backward input contract 1:1
+// (round-66 kiln-flce-kernel flat-kernel-input precedent for the
+// same OPD loss family).
+#[allow(clippy::too_many_arguments)]
 fn opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
     hidden: &KtTensor,
     head_t: &KtTensor,

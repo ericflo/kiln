@@ -29,8 +29,8 @@
 //! 1. [`OpdLossError`] — kt-typed error, independent of candle /
 //!    anyhow.
 //! 2. [`opd_top_k_reverse_kl_kt`] — kt-typed scalar-mean forward
-//!    entry point. Re-implements the gather + matmul + log-softmax
-//!    + reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
+//!    entry point. Re-implements the gather, matmul, log-softmax,
+//!    and reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
 //!    Phase A candle reference (the per-position variant
 //!    `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_phase_a_per_position`
 //!    — the scalar-mean phase_a entry was deleted in #1082 since the
@@ -179,6 +179,12 @@ fn validate_inputs_kt(
     )
 }
 
+// 8 args: the 6-arg kernel input contract (see `validate_inputs_kt`)
+// plus the two caller options this inner variant exposes
+// (`active_count_override`, `validate_topk_bounds`); the flat list
+// mirrors the FFI backward input contract 1:1, so no options struct
+// is introduced (round-66 kiln-flce-kernel flat-kernel-input precedent).
+#[allow(clippy::too_many_arguments)]
 fn validate_inputs_kt_inner(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -995,6 +1001,13 @@ pub enum OpdLossOutputKt {
 /// Validated against a central finite-difference of the forward loss
 /// in the `composite_bwd_finite_difference` unit test below (CPU,
 /// deterministic).
+// Public API: the 8 flat inputs mirror the FFI composite-backward
+// input contract (hidden / head / teacher-topk pair / label mask /
+// grad-loss / k / output-mode) 1:1, and this is the kiln-train
+// integration surface (called from kiln-train/src/opd.rs), so the
+// flat signature is preserved rather than regrouped (round-71
+// kiln-server public-API-stability precedent).
+#[allow(clippy::too_many_arguments)]
 pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -2141,6 +2154,12 @@ mod tests {
     /// weights folded into the loss:
     ///   ScalarMean  : L = (1/T_active) Σ_t KL_t     (grad_w all = 1)
     ///   PerPosition : L = Σ_t grad_w[t] · KL_t
+    // 10 args: the finite-difference harness passes the flat hidden
+    // buffer + dims, the kernel input contract (head / idx / lp /
+    // mask / k), and the FD probe parameters (grad_w, scalar_mean)
+    // explicitly; flat test helper mirroring the kernel contract
+    // (round-71 kiln-server flat test-helper precedent).
+    #[allow(clippy::too_many_arguments)]
     fn forward_loss_for_fd(
         hidden_flat: &[f32],
         seq_len: usize,

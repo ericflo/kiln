@@ -8,7 +8,7 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -96,7 +96,7 @@ fn build_cuda() {
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
 }
 
-fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+fn configure_nvcc_from_cuda_root(cuda_root: &Path) {
     if env::var_os("NVCC").is_some() {
         return;
     }
