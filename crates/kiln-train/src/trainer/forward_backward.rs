@@ -66,7 +66,7 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
                     // instead of materializing `[1, T, V]` logits. The frozen tied head
                     // receives no gradient; the FLCE tape node returns `dhidden`, keeping
                     // the LoRA path connected through `model_forward_no_head`.
-                    let loss = kiln_autograd::with_active_tape(|tape| {
+                    kiln_autograd::with_active_tape(|tape| {
                         kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
                             &normed,
                             &weights.embed_tokens_t,
@@ -85,8 +85,7 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
                         kiln_kt_bridge::BridgeError::new(format!(
                             "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
                         ))
-                    })?;
-                    loss
+                    })?
                 }
                 SftFlceLossRoute::VulkanActiveRows => {
                     #[cfg(feature = "vulkan")]
