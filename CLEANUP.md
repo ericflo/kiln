@@ -6888,3 +6888,41 @@ kiln-rmsnorm-kernel needed no change). Not pushed.
 warning-suppression (one factual comment + one lane-precise attribute),
 not dead-code justification; the suppressed function is live in every cuda
 lane, where the allow is inactive.
+
+## Cleanup Agent (round 113 — feature-lane dead-code: rmsnorm kt_error; max_seqlen_k adjudicated keep)
+
+**Date:** 2026-08-27
+
+**Fix (kiln-rmsnorm-kernel, 3 lines):**
+`kt_error` (kt_api.rs:44, ungated private helper) has exactly 5 call
+sites, all inside the `#[cfg(feature = "rocm")]` wrapper
+`fused_rmsnorm_kt_rocm_row_tiled` — so it is dead in every non-rocm
+lane. The cuda-lane build emitted `warning: function kt_error is never
+used`; the no-features lane was empirically silent (rustc dead-code
+anomaly, noted — the round-112 sub-agent reproduced the same asymmetry).
+Added `#[cfg_attr(not(feature = "rocm"), allow(dead_code))]` + 2-line
+justification, lane-precise: INACTIVE in the rocm lane (where the
+helper is live), so it cannot mask a future rocm-lane dead-code bug.
+Probes: cuda lane warning 1 → 0; rocm lane 0; no-features lane 0.
+
+**Adjudicated KEEP (no change):** `BatchedPagedDecodeGraphInputs.max_seqlen_k`
+(kiln-model full_attention.rs:2225), never-read warning in the rocm lane
+only. full_attention.rs carries FOUR parallel struct families with
+`max_seqlen_k` fields (cuda+rocm-gated ×2 at L2166/L2225,
+not(any(cuda,rocm))-gated at L2662, metal-gated at L3629) and per-backend
+construct/read paths; the rocm-lane never-read may reflect a
+backend-parity design question, not lint debt. Keep-by-default policy:
+warning (not error), rocm lane is local-only (no CI lane), already
+adjudicated in round 104b item 8 (cross-lane liveness). NOT a candidate
+for deletion or allow-suppression without owner input.
+
+**Gates (orchestrator, own runs):**
+- `cargo clippy -p kiln-rmsnorm-kernel` cuda / rocm / no-features lanes:
+  0 kt_error warnings in all three (was 1 in cuda lane before).
+- `cargo test -p kiln-rmsnorm-kernel --no-default-features` and
+  `--no-default-features --features rocm`: 0 failures (rocm lane 4/0).
+- `cargo fmt --check` clean; `check_production_file_budget.py` pass;
+  `check_repository_artifacts.py` pass.
+
+**Net this round:** +3 lines (1 cfg_attr + 2 justification) —
+warning-suppression in a product lane, same class as round 112.

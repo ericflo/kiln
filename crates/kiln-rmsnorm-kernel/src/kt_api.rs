@@ -41,6 +41,9 @@ impl From<BridgeError> for RmsNormError {
     }
 }
 
+// cuda/no-features lanes only: all 5 call sites are inside the `#[cfg(feature = "rocm")]`
+// row-tiled wrapper, so this helper is dead everywhere except the rocm lane.
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 fn kt_error(context: impl Into<String>, err: kiln_tensor::Error) -> RmsNormError {
     RmsNormError::Msg(format!("{}: {err}", context.into()))
 }
