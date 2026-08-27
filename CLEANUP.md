@@ -6339,3 +6339,157 @@ APIs (awaiting sign-off).
 
 **Signature:** kiln cleanup agent (orchestrator inline), round 108 —
 headline net **−37** lines; zero justification lines added.
+
+## Cleanup Agent (round 109 — kiln-train stale-allow probe, all 51 sites adjudicated; 9 stale allows deleted with 6 dead items, 42 kept with live-cfg evidence; net −123)
+
+**Date:** 2026-08-27
+
+**Scope:** every `#[allow(dead_code)]` / `#[allow(unused_*)` /
+`#[cfg_attr(…, allow(unused_*)]` site in `crates/kiln-train` (src/ + tests/
++ examples), 51 sites across 12 files (`clippy::*` allows out of scope).
+Per-file procedure: delete ALL of the file's in-scope allows at once → ONE
+`cargo clippy -p kiln-train --all-targets` → for each warned item, grep
+repo-wide (`crates/`, `scripts/`, `.github/`) for live consumers under any
+cfg/feature/tests/benches → keep the allow if live somewhere, delete item +
+allow if dead in every build. No signature, behavior, or error-string
+changes anywhere.
+
+**Per-file verdicts (9 deleted / 42 kept):**
+
+- **checkpoint_execution.rs (4 sites → 2 deleted, 2 kept, net −57):**
+  - `model_is_gdn_only` — DELETED: zero callers repo-wide (only its own
+    doc/keep-comment referenced it); not pub, no doc-link refs.
+  - `tiled_training_tile_size` — DELETED: zero callers repo-wide; deletion
+    also dropped the now-unused `GDN_CHUNK_SIZE` name from trainer.rs's
+    `kiln_model::forward` import (1 line).
+  - `attn_kind_at` + `partition_segment_layers_by_attn_type` — KEPT: both
+    are consumed only by the cfg(test) test
+    `test_partition_segment_layers_by_attn_type` (tests/mod.rs) — dead in
+    the lib build, live in the test build, so the allows are load-bearing.
+- **tensor_support.rs (2 sites → 2 deleted, net −33):**
+  - `zeros_dtype_on` + `ones_dtype_on` — DELETED: zero code callers
+    repo-wide (every consumer resolved the live `zeros_f32_on` or the
+    fully-qualified `kiln_tensor::Tensor::zeros/ones`); the stale
+    "`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`" name list in the
+    tests/mod.rs replacement record was reworded to name only the live
+    helper (2 lines, net −2 in tests/mod.rs for this).
+- **opd.rs (8 sites → 2 deleted, 6 kept, net −10):**
+  - `use crate::Optimizer;` + `use kiln_model::backend;`
+    (function-scoped, in `opd_train`) — DELETED: zero bare-name consumers
+    in the function body in any build (all real uses are
+    fully-qualified `kiln_model::backend::…` / `crate::trainer::…` paths;
+    `Optimizer` is already module-imported at opd.rs:105), so both imports
+    + their `#[allow(unused_imports)]` + 6 stale comment lines are pure
+    dead weight. `use crate::trainer::TrainableLoraParams;` in the same
+    block is LIVE (used at opd.rs:4161) and stays.
+  - KEPT (all six probe-warned, all with GPU-feature kt-tape-dispatch
+    consumers in the same function): `head_t`, `run_env_ce`,
+    `lora_grad_norms`, `total_obs_len`, `teacher_tokens_opt` /
+    `teacher_active_opt`, `checkpoint_segments` — each is assigned/read
+    only inside the `#[cfg(any(feature="cuda", feature="metal",
+    feature="vulkan", feature="rocm"))]` tape step; the
+    `cfg_attr(not(any(…)), allow(unused_…))` shape is exactly right.
+- **grpo_step.rs (12 sites → 0 deleted, 12 kept):**
+  9 `cfg_attr(not(GPU), allow(unused_mut|unused_variables))` sites on
+  `opt_state`, `policy_audit`, `group_loss_sum`, `group_accum`,
+  `group_echo_ce_sum`, `group_echo_ce_weight`, `loss_params`,
+  `comp_echo_env_ce`, `loss_val` — all probe-warned, all consumed only in
+  the GPU-gated step body of `train_tokenized_grpo_group_with_grad_norms`
+  (e.g. `opt_state` at grpo_step.rs:1275/1317, `policy_audit` via
+  `observe_grpo_policy_audit_completion` @1245). 3 `allow(dead_code)`
+  sites: `ExpectedLoraGradientSet::CheckpointLayerRange` (constructed at
+  grpo_step.rs:1674 inside `merge_checkpoint_lora_grad_segment`, which is
+  live under GPU features via forward_backward.rs:528/1087 + tests),
+  `merge_checkpoint_lora_grad_segment` (forward_backward.rs:528/1087
+  GPU-gated + 6 test callers), `tokenize_grpo_group` (8 test-only callers
+  in tests/mod.rs) — all kept with evidence.
+- **sft_data.rs (11 sites → 0 deleted, 11 kept):** all probe-warned in the
+  default build; every item has a live consumer — the six
+  `analytic_sft_tail_grad_*` / `validate_*` items via the GPU-gated
+  checkpointed SFT tail in forward_backward.rs:389-461 + tests/mod.rs:6738+;
+  `rms_norm_backward_pre_final_norm` via forward_backward.rs:389/1029 +
+  opd.rs:5612 + tests; `synchronize_training_tensor_ready` via
+  forward_backward.rs:289-375; `dtype_size_bytes` via forward_backward.rs:276;
+  `StoredCheckpointBoundaries` (struct + impl) via forward_backward.rs:278;
+  `load_or_recompute_checkpoint_boundary` via forward_backward.rs:461.
+- **forward_backward.rs (8 sites → 0 deleted, 8 kept):** all probe-warned;
+  all consumed under `#[cfg(any(feature="cuda", feature="metal",
+  feature="vulkan", feature="rocm"))]` (e.g.
+  `ensure_tape_forward_backward_supported` @236, the checkpointed tail
+  @286, `grpo_step_forward_backward_tape_authoritative_kt` @709) and/or
+  by grpo_tape_shim.rs:1976/2160 (both GPU-gated) + cfg(test) callers.
+- **reference_policy.rs (1 site → 1 kept):** `token_log_probs` —
+  probe-warned; live via grpo_tape_shim.rs:1959/2152 (GPU-gated loss
+  roots) + tests/mod.rs:2699 (test oracle).
+- **training_support.rs (1 site → 1 kept):** `GrpoBenchmarkTimings::add_backward`
+  — probe-warned; callers at forward_backward.rs:888 (GPU-gated) and
+  grpo_step.rs:1174 (inside the `#[cfg(any(GPU))]` step block).
+- **cd_types.rs (1 site → 1 deleted, net −7):** `pub(crate) type TensorId`
+  — DELETED: zero bare-name consumers crate-wide (tape_step.rs imports
+  `TensorId` directly from `kiln_tensor`; opd.rs uses
+  `kiln_tensor_id::TensorId` fully-qualified); the keep-comment's
+  "documented facade invariant" was comment-only justification, not usage.
+- **trainer.rs (1 site → 1 deleted, net −13 with cascade + reflow):**
+  the 20-name `use kiln_model::forward::{…}` block (gdn/gqa/mlp family) —
+  DELETED: every name has zero references in kiln-train in any build (all
+  real uses are inside kiln-model's own module); the 2-line
+  "retained, deletion reserved for the dead-code round" comment was the
+  stale reservation this round closes. Net −13 = 12-line block + 2 comment
+  lines, plus the round's earlier 1-line `GDN_CHUNK_SIZE` import-name drop
+  and the mechanical rustfmt repack of the surviving import list (+3/−4).
+- **tests/mod.rs (1 site → 1 deleted, net −3):**
+  `tiny_config_full_attn_bf16`'s `cfg_attr(not(feature="vulkan"),
+  allow(dead_code))` — allow was STALE: the function is consumed by the
+  NON-gated test
+  `long_context_gpu_full_attention_forces_exact_checkpointing`
+  (tests/mod.rs:7312) and by `#[cfg(feature="rocm")]` tests; the
+  "only vulkan-gated tests consume this" comment was factually wrong and
+  was dropped with the allow.
+- **examples/long_context_grpo_bench.rs (1 site → 1 kept):** the file-level
+  `#![cfg_attr(not(feature="cuda"), allow(dead_code, unused_imports))]` —
+  probe (drop it) produced 6 warnings in the default build: `Args` fields
+  `lora_rank/lora_alpha/learning_rate/seed`, `VramPoller` (+`start`/`finish`),
+  `current_vram_mib`, `checkpoint_segments`, `bench_config` — all live
+  under `--features cuda` (cuda `run_cuda_record` calls `bench_config`,
+  `checkpoint_segments`, `VramPoller::start`; reads the four `Args`
+  fields; `current_vram_mib` feeds the poller). Restored unchanged.
+
+**Net:** 7 insertions / 130 deletions = **−123 lines** across 7 files
+(6 code files + the budget contract; zero justification lines added —
+evidence lives in this ledger).
+
+**Commits:** acf2b9b0f (checkpoint_execution + trainer import), 0d35b479c
+(tensor_support + tests/mod reword), 9abfecec2 (opd imports), 4197d0cb1
+(cd_types + tests/mod allow), 482970f31 (trainer 20-name block),
+plus the mechanical reflow + `0c5ec75a5` budget sync.
+
+**Verification (subagent, own runs):**
+- `cargo clippy -p kiln-train --all-targets`: 0 kiln-train warnings
+  (remaining output is the documented kiln-core/kiln-tensor dependency
+  set).
+- `cargo test -p kiln-train`: all suites green — 533 passed / 0 failed /
+  1 ignored (lib) + integration suites passing.
+- `cargo fmt -p kiln-train --check`: clean (one mechanical import repack
+  in trainer.rs was required after the import-name drops and is committed
+  as part of the round).
+- `check_production_file_budget.py`: pass after exact-ceiling sync for
+  `crates/kiln-train/src/opd.rs` (8493 → 8483 = actual 8483 lines, per the
+  2da875018 exact-ceiling precedent).
+- `check_repository_artifacts.py`: pass (6695 tracked paths).
+- `git status`: clean; all round work committed.
+
+**Pub/owner-decision items:** none. Every deleted item was
+`pub(crate)`/`pub(super)`/function-local with zero consumers in any build;
+no `pub` API was touched, so no sign-off was required this round.
+
+**Campaign state:** kiln-train's 51-site `allow(dead_code|unused_*)`
+surface is now fully adjudicated: 42 sites carry verified live-cfg
+evidence (GPU-feature tape paths or cfg(test) oracles), 9 stale sites were
+deleted with their 6 dead items (2 checkpoint-execution fns, 2 tensor
+helpers, 2 redundant function-scoped imports, the `TensorId` alias, the
+20-name forward import block). Combined with rounds 104a/104b/108, the
+`allow(dead_code|unused_*)` re-adjudication campaign has no known
+remaining un-adjudicated surface outside owner-held net-additive classes.
+
+**Signature:** kiln cleanup agent (round 109, bounded single round) —
+headline net **−123** lines; zero justification lines added.
