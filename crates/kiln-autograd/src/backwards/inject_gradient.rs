@@ -3,20 +3,21 @@
 //!
 //! # What this exists for
 //!
-//! `kiln-train`'s `InjectTensorGradient` is a `candle_core::CustomOp1`
-//! used in the tiled-training paths to splice a *precomputed* gradient
-//! into candle's backward walker. The forward returns a scalar zero
-//! (placeholder) and the backward, regardless of upstream `grad_res`,
-//! emits `self.upstream` as the gradient for the single arg.
+//! `kiln-train`'s `InjectTensorGradient` — the `candle_core::CustomOp1`
+//! deleted in the candle drop (#1082) that this op replaced — spliced a
+//! *precomputed* gradient into candle's backward walker: the forward
+//! returned a scalar zero (placeholder) and the backward, regardless of
+//! upstream `grad_res`, emitted `self.upstream` as the gradient for the
+//! single arg.
 //!
 //! This is the kt-tape equivalent. As a `BackwardOp`:
 //!
-//! - **arity 1** — one input (the candle/kt tensor whose gradient gets
+//! - **arity 1** — one input (the kt tensor whose gradient gets
 //!   replaced).
 //! - **`apply(grad_output)`** — ignores `grad_output` and returns
 //!   `vec![Some(self.injected.clone())]`. The tape walker then
-//!   accumulates `self.injected` against the input's id, exactly as
-//!   `InjectTensorGradient::bwd` does on candle's side.
+//!   accumulates `self.injected` against the input's id, exactly as the
+//!   deleted candle `InjectTensorGradient::bwd` did.
 //!
 //! `requires_input(0)` returns `false` because we never read the forward
 //! input — the injected grad is precomputed. This frees Phase 6.5's
@@ -25,22 +26,16 @@
 //!
 //! # Lifecycle
 //!
-//! `kiln_kt_bridge::tape_bridge::inject_gradient_kt` records one of
-//! these onto the active tape during the kt-tape-bridge-wrapped forward
-//! pass. When the bridge walks the tape (driven by candle's
-//! `loss.backward()` produced GradStore via
-//! `backward_with_seeds`), the seed for the InjectGradient output node
-//! is whatever candle handed us for its scalar zero. We ignore it and
-//! emit `self.injected` for the arg.
+//! A recording site records one of these onto the active tape (the
+//! usual `with_active_tape` path). When the kt-native tape walk reaches
+//! the node, the seed for its output is whatever the walk accumulated
+//! from above; we ignore it and emit `self.injected` for the arg. The
+//! walker then deposits that grad under the input's registered leaf id
+//! (the bridge's `register_input_mapping_kt` mapping).
 //!
-//! The output node's input — the kt borrow of the candle `arg` — has its
-//! `kt_id` registered as an input mapping via the bridge, so the
-//! resulting kt grad for that input id flows back into the candle
-//! `GradStore` keyed on `arg.id()`.
+//! # Bit-equivalence to the (deleted) candle path
 //!
-//! # Bit-equivalence to the candle path
-//!
-//! The candle `InjectTensorGradient::bwd` does:
+//! The candle `InjectTensorGradient::bwd` did:
 //!
 //! ```ignore
 //! let upstream = self.upstream.to_device(arg.device())?;
@@ -52,11 +47,10 @@
 //! Ok(Some(grad))
 //! ```
 //!
-//! The kt path expects the bridge adapter (`inject_gradient_kt`) to
-//! pre-convert the candle `upstream` to a kt tensor matching the kt
-//! borrow of `arg`'s dtype/device before constructing
-//! `InjectGradientBackward`. The BackwardOp itself is dtype-agnostic —
-//! it just clones whatever it was handed. This keeps the apply path
+//! The caller is expected to pass an `injected` that already matches
+//! `arg`'s dtype and device ([`new_validated`] enforces shape + dtype at
+//! record time). The BackwardOp itself is dtype-agnostic — it just
+//! clones whatever it was handed. This keeps the apply path
 //! allocation-free (one Arc bump on the kt storage).
 
 use kiln_tensor::{Result, Tensor, bail};
@@ -66,10 +60,10 @@ use crate::BackwardOp;
 /// Backward op that ignores the upstream gradient and emits a
 /// pre-computed `injected` gradient for its single input.
 ///
-/// Mirrors the semantics of `kiln-train::trainer::InjectTensorGradient`
-/// (a candle `CustomOp1`): both produce a scalar-zero "output" whose
-/// backward yields `injected` for the input regardless of the upstream
-/// seed.
+/// Mirrors the semantics of the deleted `kiln-train::trainer::
+/// InjectTensorGradient` candle `CustomOp1`: both produce a scalar-zero
+/// "output" whose backward yields `injected` for the input regardless
+/// of the upstream seed.
 #[derive(Debug)]
 pub struct InjectGradientBackward {
     /// The pre-computed gradient to emit for the arg. Must already
@@ -88,13 +82,13 @@ impl BackwardOp for InjectGradientBackward {
     }
 
     fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
-        // `grad_output` is the seed candle handed us for the scalar
-        // placeholder output. It's intentionally ignored — the contract
-        // (matching the candle CustomOp1 path) is "emit `injected`
-        // regardless of what flows in from above". We still take it
-        // because the BackwardOp trait requires the parameter; a debug
-        // check on its rank keeps the wiring honest. (The candle path
-        // doesn't validate `_grad_res` either — it just discards it.)
+        // `grad_output` is the seed the tape walk accumulated for this
+        // node's output. It's intentionally ignored — the contract
+        // (matching the deleted candle `CustomOp1` it replaced) is
+        // "emit `injected` regardless of what flows in from above". We
+        // still take it because the BackwardOp trait requires the
+        // parameter. (The candle path didn't validate `_grad_res`
+        // either — it just discarded it.)
         let _ = grad_output;
         Ok(vec![Some(self.injected.clone())])
     }
@@ -170,7 +164,7 @@ mod tests {
     #[test]
     fn inject_gradient_different_upstream_still_returns_injected() {
         // Sanity: a different `grad_output` produces the same result.
-        // Mirrors candle's `InjectTensorGradient::bwd` ignoring `_grad_res`.
+        // Mirrors the deleted candle `InjectTensorGradient::bwd` ignoring `_grad_res`.
         let injected = Tensor::from_slice(&[7.5f32, -1.5], vec![2]).unwrap();
         let bo = InjectGradientBackward {
             injected: injected.clone(),
