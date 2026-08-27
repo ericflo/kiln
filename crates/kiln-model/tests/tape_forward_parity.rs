@@ -318,7 +318,7 @@ fn tape_forward_matmul_bit_exact_parity_with_baseline() {
         .expect("tape-forward returned Some(out)");
     let tape_out = &tape_out_kt.clone();
 
-    let diff = max_abs_diff(&baseline_out, &tape_out);
+    let diff = max_abs_diff(baseline_out, tape_out);
     assert_eq!(
         diff, 0.0,
         "matmul tape-forward path must be bit-exact with the baseline \
@@ -431,7 +431,7 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
         .expect("tape-forward returned Some(out)");
     let tape_out = &tape_out_kt.clone();
 
-    let diff = max_abs_diff(&baseline_out, &tape_out);
+    let diff = max_abs_diff(baseline_out, tape_out);
     assert_eq!(
         diff, 0.0,
         "silu tape-forward path must be bit-exact with the baseline \
@@ -562,7 +562,7 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
         .expect("tape-forward returned Some(out)");
     let tape_out = &tape_out_kt.clone();
 
-    let diff = max_abs_diff(&baseline_out, &tape_out);
+    let diff = max_abs_diff(baseline_out, tape_out);
     assert_eq!(
         diff, 0.0,
         "embedding tape-forward path must be bit-exact with the baseline \
@@ -693,7 +693,7 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
         .expect("tape-forward returned Some(out)");
     let tape_out = &tape_out_kt.clone();
 
-    let diff = max_abs_diff(&baseline_out, &tape_out);
+    let diff = max_abs_diff(baseline_out, tape_out);
     assert_eq!(
         diff, 0.0,
         "swiglu tape-forward path must be bit-exact with the baseline \
