@@ -4491,6 +4491,8 @@ fn ensure_resident_decode_embedding_ids(token_ids: &[u32], vocab: usize) -> Resu
     Ok(())
 }
 
+// Flat record-into ABI: batch + rope table buffer handles + shape scalars are distinct kernel inputs.
+#[allow(clippy::too_many_arguments)]
 fn record_resident_decode_rope_tables_into(
     backend: &VulkanBackend,
     batch: &mut CommandBatch,

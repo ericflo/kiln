@@ -118,6 +118,8 @@ fn read_current<B: ResidencyBackend>(
         .map_err(Into::into)
 }
 
+// Test helper: assertion context fields plus tolerances; not an API surface.
+#[allow(clippy::too_many_arguments)]
 fn assert_f32_close(
     backend: &str,
     case: &str,
@@ -174,6 +176,8 @@ fn assert_bf16_close(
     }
 }
 
+// Test helper: assertion context fields plus dtype/tolerances/ULP tracker; not an API surface.
+#[allow(clippy::too_many_arguments)]
 fn assert_values(
     backend: &str,
     case: &str,

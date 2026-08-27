@@ -685,6 +685,8 @@ pub(super) fn supports_linear_decode_sample(backend: &VulkanBackend, top_k: u32)
         && top_k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX
 }
 
+// Flat per-row sampling ABI: penalties/temperature/top_k/top_p/min_p/seed are separate kernel parameters.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn linear_decode_sample(
     backend: &VulkanBackend,
     x: &kiln_tensor::Tensor,
@@ -774,6 +776,8 @@ pub(super) fn supports_linear_decode_sample_batch(
         })
 }
 
+// Flat per-row sampling ABI (batched): per-row slices of the same kernel parameters as linear_decode_sample.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn linear_decode_sample_batch(
     backend: &VulkanBackend,
     x: &kiln_tensor::Tensor,

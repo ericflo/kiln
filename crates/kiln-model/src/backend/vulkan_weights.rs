@@ -239,6 +239,8 @@ pub(super) fn prewarm_gdn_in_proj_weight_kt(
     }
 }
 
+// Flat prewarm ABI: one tensor per weight plus the f32/bf16 count/byte accumulators.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prewarm_full_attn_qkv_weights_kt(
     backend: &VulkanBackend,
     layer_idx: usize,
@@ -279,6 +281,8 @@ pub(super) fn prewarm_full_attn_qkv_weights_kt(
     Ok(())
 }
 
+// Flat prewarm ABI: one tensor per weight plus the f32/bf16 count/byte accumulators.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prewarm_mlp_decode_weights_kt(
     backend: &VulkanBackend,
     layer_idx: usize,

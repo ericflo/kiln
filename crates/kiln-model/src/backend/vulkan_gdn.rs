@@ -246,6 +246,8 @@ pub(super) fn gdn_solve_tri_transpose(
     Ok(out.pop())
 }
 
+// Flat kernel ABI: each argument maps 1:1 to a vk_gdn_chunkwise_forward kernel parameter.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_chunkwise_forward(
     backend: &VulkanBackend,
     q: &kiln_tensor::Tensor,
@@ -549,6 +551,8 @@ pub(super) fn gdn_chunk_scan(
     Ok(Some((out_tensor, p_out_tensor)))
 }
 
+// Flat kernel ABI: each argument maps 1:1 to a vk_gdn_full_chunk_forward kernel parameter.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_full_chunk_forward(
     backend: &VulkanBackend,
     g: &kiln_tensor::Tensor,
@@ -616,6 +620,8 @@ pub(super) fn gdn_full_chunk_forward(
     Ok(Some(out))
 }
 
+// Flat kernel ABI: 12 arguments map 1:1 to the fused gates/recurrent/rmsnorm kernel parameters.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_decode_gates_recurrent_rmsnorm(
     backend: &VulkanBackend,
     q: &kiln_tensor::Tensor,
@@ -1028,6 +1034,8 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
     Ok(Some(out))
 }
 
+// Flat kernel ABI: each argument maps 1:1 to a vk_gdn_recurrent_qk_norm kernel parameter.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_recurrent_qk_norm_prefill_native_head_last(
     backend: &VulkanBackend,
     q: &kiln_tensor::Tensor,
