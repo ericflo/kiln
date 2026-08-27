@@ -912,7 +912,7 @@ fn enforce_training_preflight(
         1
     };
     // Until the resident registry (Phase 1.2-1.4) lands, weights on
-    // Vulkan APUs live in BOTH candle CPU storage and VulkanBuffer
+    // Vulkan APUs live in BOTH kt CPU storage and VulkanBuffer
     // caches — same physical RAM on unified memory. The estimator
     // must reflect that or the preflight will accept payloads that
     // ultimately exhaust the host. Once Phase 1.2 is deployed,
