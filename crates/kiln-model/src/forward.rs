@@ -66,7 +66,7 @@ fn kt_contiguous(t: &Tensor, context: &'static str) -> Result<KtTensor> {
 /// `narrow` / `Tensor::cat` / `unsqueeze` in this file. Consolidates
 /// `D::Minus1` (~58 sites pre-consolidation) under a single
 /// short name, mirroring the same pattern in `kiln-train/src/trainer.rs`
-/// (#1082). Drops 58 candle prefixes from `forward.rs` without
+/// (#1082). Drops 58 `D::Minus1` prefixes from `forward.rs` without
 /// any behavioral change.
 const LAST_DIM: D = D::Minus1;
 
@@ -119,14 +119,11 @@ fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
 
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
 ///
-/// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
-/// basic tensor operations that all have CUDA support.
-///
 /// Phase 7 whole-composite migration (#1082): contiguous non-autograd CUDA
 /// tensors take the kt composite path by default. The entire four-step
 /// `neg -> exp -> add_scalar(1) -> recip` composite is replaced with a
-/// single `kiln_tensor::cuda_activation_unary(kind=1)` call via the kt-bridge
-/// borrow adapter. Autograd-tracked tensors route through the per-step kt
+/// single `kiln_tensor::cuda_activation_unary(kind=1)` call.
+/// Autograd-tracked tensors route through the per-step kt
 /// composite (each step is tape-recorded).
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
     #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -375,46 +372,32 @@ fn gdn_chunk_pre_permute_policy_enabled(device: &Device) -> bool {
 /// Returns `Ok(Some(cache))` when the startup policy enables experimental
 /// routes and `device` is CUDA. Returns `Ok(None)` otherwise.
 ///
-/// # Why this exists
+/// # Why this exists (#1082 step 2)
 ///
-/// The 11 `PagedKvCache::new` call sites in `forward.rs` are each
-/// tightly coupled to candle-typed writers/readers and to the candle
-/// [`PagedKvCache::new(..., device: &Device)`] signature. The kt twin
-/// [`crate::paged_kv_cache_kt::PagedKvCacheKt::new`] needs an
-/// [`Arc<CudaDevice>`] + `device_index` (see
-/// `crates/kiln-model/src/paged_kv_cache_kt.rs:72`) plus a
-/// [`kiln_tensor::DType`] in place of candle's `DType`. Wiring
-/// the gate first (commit `eab7f795`) was step 1; this helper is step 2
-/// and gives the next call-site migration a single, well-tested
-/// constructor surface to call instead of repeating the device-arc
-/// extraction + dtype mapping in every branch.
+/// The `PagedKvCache::new` call sites in `forward.rs` were historically
+/// coupled to the (now deleted) candle cache's `new` signature. The kt
+/// cache [`crate::paged_kv_cache_kt::PagedKvCacheKt::new`] takes a
+/// [`kiln_tensor::DType`] + runtime `Device`. Wiring the gate first
+/// (commit `eab7f795`) was step 1; this helper is step 2 and gives the
+/// call-site migration a single, well-tested constructor surface to call
+/// instead of repeating the device extraction in every branch.
 ///
 /// # What it does
 ///
 /// 1. Returns `None` immediately when the gate is off — zero overhead
-///    on the default (candle-cache) path.
-/// 2. Returns `None` when `device` is not CUDA — the kt twin only
+///    on the default (kt-cache) path.
+/// 2. Returns `None` when `device` is not CUDA — the kt cache only
 ///    supports CUDA today, and migrating to non-CUDA backends is out
 ///    of scope for #1082.
-/// 3. Extracts the underlying [`Arc<CudaDevice>`] and `device_index`
-///    from `device` using the same pattern as
-///    [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`]:
-///    `Device::as_cuda_device()` + `Device::location()`.
-/// 4. Maps the candle [`DType`] to the kt
-///    [`kiln_tensor::DType`] via [`kiln_kt_bridge::candle_dtype_to_kt`]
-///    (the same conversion every other kt-bridge entry point uses).
-/// 5. Allocates via [`PagedKvCacheKt::new`] — zero-filled pool tensors
-///    with the kt-tensor backing store; identical pool shape and
-///    byte layout to the candle version. FP8 is not yet plumbed
-///    through this stub (the FP8 path is a follow-up; the gate
-///    callers exercising it should keep using
-///    [`PagedKvCache::new_with_fp8`] on the candle side until the kt
-///    FP8 writer lands).
+/// 3. Allocates via [`PagedKvCacheKt::new`] — zero-filled pool tensors
+///    with the kt-tensor backing store. `dtype` is already a kt
+///    [`kiln_tensor::DType`], so no dtype mapping is needed. FP8 is
+///    covered by [`PagedKvCache::new_with_fp8`].
 ///
 /// # Why no call site uses this yet
 ///
 /// Even with this constructor, the surrounding call sites still need
-/// to keep a `PagedKvCache` around to satisfy the candle-typed writer
+/// to keep a `PagedKvCache` around to satisfy the paged-cache writer
 /// signatures (e.g. `write_token_major_native`, `read`, etc.) that
 /// are reached after the cache is constructed. Migrating one full
 /// call site is a separate PR: it has to either (a) hold both
@@ -469,11 +452,11 @@ pub fn try_kt_paged_kv_cache_new(
 /// the same for the production *writer* path on `forward.rs`. It
 /// wraps [`crate::paged_kv_cache_kt::PagedKvCacheKt::write_token_major_native_graph_slot`]
 /// so a call site can hold both caches in parallel and dispatch the
-/// write to *both* without re-deriving the candle→kt tensor bridge in
+/// write to *both* without re-deriving the device plumbing in
 /// every call site.
 ///
 /// Returns `Ok(false)` when `kt_cache` is `None` (gate off / non-CUDA
-/// device) so callers can fall through to the candle path unchanged.
+/// device) so callers can fall through to the non-kt path unchanged.
 /// Returns `Ok(true)` only when the kt write was actually issued.
 ///
 /// # Why a stub before the first call-site migration
@@ -481,13 +464,13 @@ pub fn try_kt_paged_kv_cache_new(
 /// The single production-path call to
 /// `paged_cache.write_token_major_native_graph_slot(...)` in this
 /// file (the CUDA-graph fast path inside
-/// `gqa_attention_paged_decode`) borrows candle-typed `&Tensor`
-/// inputs (`k`, `v`, `slot`). The kt twin signature takes
+/// `gqa_attention_paged_decode`) historically borrowed candle-typed
+/// `&Tensor` inputs (`k`, `v`, `slot`). The kt twin signature takes
 /// `&KtTensor` inputs (see `paged_kv_cache_kt.rs:222`). Wiring the
 /// gate first (commit `eab7f795`) was step 1; landing the
 /// constructor stub (commit `638bc441`) was step 2; this helper is
-/// step 3 and gives the next call-site migration a single,
-/// well-tested writer surface to call alongside the candle writer.
+/// step 3 and gives the call-site migration a single,
+/// well-tested writer surface.
 ///
 /// # What it does
 ///
@@ -495,23 +478,21 @@ pub fn try_kt_paged_kv_cache_new(
 ///    the "gate off OR non-CUDA device" case — the constructor stub
 ///    returns `None` in both, and this helper preserves the same
 ///    zero-overhead fall-through contract.
-/// 2. Borrows `k`, `v`, `slot` as [`kiln_tensor::Tensor`] views via
-///    [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`] — the
-///    same idiom every other kt-bridge entry point uses. Borrowing
-///    (not copying) means the kt and candle caches read from the
-///    same source K/V/slot device storage, so any divergence between
-///    the two writers is a property of the *writer* path, not of
-///    the inputs.
+/// 2. Passes `k`, `v`, `slot` straight to the kt cache writer — they
+///    are already kt [`kiln_tensor::Tensor`]s at the call site (the
+///    forward flip), so no borrow/bridge is needed. The write and the
+///    surrounding path read from the same source K/V/slot device
+///    storage, so any divergence is a property of the *writer* path,
+///    not of the inputs.
 /// 3. Delegates to
 ///    [`PagedKvCacheKt::write_token_major_native_graph_slot`] which
 ///    returns `Ok(false)` for shape/dtype-incompatible inputs (FP8,
-///    non-BF16, K not in token-major-single layout) — preserving
-///    the candle writer's same-named contract.
+///    non-BF16, K not in token-major-single layout).
 ///
 /// FP8 is intentionally not yet plumbed through this stub. Call
 /// sites exercising FP8 should keep using
-/// [`PagedKvCache::write_token_major_native_graph_slot`] on the
-/// candle side until the kt FP8 writer lands; this helper will
+/// [`PagedKvCache::write_token_major_native_graph_slot`] until the
+/// kt FP8 writer lands; this helper will
 /// return `Ok(false)` in that case because
 /// `PagedKvCacheKt::write_token_major_native_graph_slot` short-
 /// circuits on `self.fp8`.
@@ -562,19 +543,20 @@ pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
 ///
 /// When `kt_cache` is `Some` and `accelerator.kt_api_mode = "all"`, this
 /// returns the kt cache's
-/// `block_size()` and panics if it disagrees with the candle value
-/// passed in. When the gate is off OR `kt_cache` is `None`, the
-/// candle value is returned unchanged — zero overhead, zero
+/// `block_size()` and panics if it disagrees with the primary
+/// cache value passed in. When the gate is off OR `kt_cache` is
+/// `None`, the
+/// primary value is returned unchanged — zero overhead, zero
 /// behavior change on the default path.
 ///
 /// This is the read-side counterpart to
 /// [`try_kt_paged_kv_write_token_major_native_graph_slot`]. Accessors
 /// are migrated first because they don't touch device storage —
-/// any divergence between the candle and kt caches surfaces
+/// any divergence between the primary and kt caches surfaces
 /// immediately at construction time (`try_kt_paged_kv_cache_new`
-/// is wired through with the same shape args as the candle path),
+/// is wired through with the same shape args as the primary path),
 /// so a wired accessor that returns `kt.block_size()` is bit-for-bit
-/// identical to the candle `paged_cache.block_size()` whenever the
+/// identical to the primary `paged_cache.block_size()` whenever the
 /// gate is on.
 ///
 /// NVTX-ranged so the migration is visible in nsys traces — when
@@ -607,13 +589,13 @@ pub(crate) fn try_kt_paged_kv_block_size(
 /// through the kt twin `PagedKvCacheKt::is_fp8()` (#1082).
 ///
 /// Sibling to [`try_kt_paged_kv_block_size`]. Returns the kt cache
-/// value (with parity assertion against the candle value) when
+/// value (with parity assertion against the primary value) when
 /// `kt_cache` is `Some` and `accelerator.kt_api_mode = "all"`.
-/// Otherwise returns the candle value unchanged.
+/// Otherwise returns the primary value unchanged.
 ///
 /// `is_fp8()` is a pure-read accessor backed by a private `bool`
-/// field on both cache types — the kt twin sets it in
-/// `PagedKvCacheKt::new_with_fp8` with the same arg the candle
+/// field on both cache instances — the kt twin sets it in
+/// `PagedKvCacheKt::new_with_fp8` with the same arg the primary
 /// `PagedKvCache::new_with_fp8` does, so the assertion must pass
 /// by construction.
 #[cfg(feature = "cuda")]
@@ -643,15 +625,16 @@ pub(crate) fn try_kt_paged_kv_is_fp8(
 /// presence read against the kt twin (#1082).
 ///
 /// Unlike [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`], this
-/// helper does NOT return the kt tensors — they're a different type
-/// (`&KtTensor` vs `&Tensor`) and threading them through the existing
-/// flash-attn callers would be a much bigger change than an accessor
-/// migration. Instead, this just asserts that the kt cache has a layer
-/// for `layer_idx` iff the candle cache does, so that any kt allocator
+/// helper does NOT return the kt tensors — threading them through the
+/// existing flash-attn callers would be a much bigger change than an
+/// accessor migration. Instead, this just asserts that the kt cache has
+/// a layer
+/// for `layer_idx` iff the primary cache does, so that any kt allocator
 /// drift (e.g. a future change to how kt counts layers from
 /// `num_full_attn_layers`) surfaces immediately under the startup policy.
 ///
-/// The return is `()`. Callers continue to use the candle `pool_tensors`
+/// The return is `()`. Callers continue to use the primary
+/// `pool_tensors`
 /// return for the actual K/V pool tensors.
 ///
 /// Active only when `accelerator.kt_api_mode = "all"`; otherwise a no-op.
@@ -686,10 +669,10 @@ pub(crate) fn try_kt_paged_kv_pool_tensors_present(
 /// Active only when `accelerator.kt_api_mode = "all"`.
 ///
 /// `num_layers()` is `Vec<(KtTensor,KtTensor)>::len()` on the kt side
-/// and the equivalent on candle — both are populated from
+/// and the equivalent on the primary cache — both are populated from
 /// `num_full_attn_layers` in their respective `new_with_fp8`
 /// constructors, so divergence requires the kt allocator to disagree
-/// with the candle one. Assertion is defense-in-depth.
+/// with the primary one. Assertion is defense-in-depth.
 #[cfg(feature = "cuda")]
 #[allow(dead_code)]
 #[inline]
@@ -717,13 +700,13 @@ pub(crate) fn try_kt_paged_kv_num_layers(
 /// Phase 7 (#1082): kt-typed paged-cache K/V read for the now-kt
 /// full-attention prefill path. When the kt twin cache is present, read
 /// directly from it (`PagedKvCacheKt::read` returns kt tensors — the
-/// contiguous fast path is a zero-copy `narrow`, so this avoids the
-/// candle→kt device copy entirely). Otherwise read from the candle cache
-/// and bridge the result to kt (CUDA copy).
+/// contiguous fast path is a zero-copy `narrow`). Otherwise read from
+/// the primary cache, which is the same kt type post candle-drop (#1082),
+/// so the result is already kt.
 ///
 /// Unlike the accessor helpers above, the surrounding consumers are now
 /// kt-typed (`Tensor::cat`, head-major transposes), so this returns kt
-/// tensors rather than asserting parity against a candle value.
+/// tensors rather than asserting parity against a primary value.
 #[cfg(feature = "cuda")]
 fn try_kt_paged_kv_read(
     candle_cache: &PagedKvCache,
@@ -1231,7 +1214,7 @@ fn add_lora_delta_to_base(
 //   `cuda_lora_add_training_bf16` + `CudaLoraLinearBf16` / `CudaLoraAddF32` /
 //   `CudaLoraAddBf16` (CustomOp3) and their candle-autograd helpers
 //   (`to_dtype_if_needed`, `cuda_lora_bwd_tile_rows`, the *_disabled flags).
-//   The kt tape (`try_tape_lora_linear_cuda` / `try_tape_lora_add_cuda`) is the
+//   The kt tape (`try_tape_lora_linear_kt` / `try_tape_lora_add_kt`) is the
 //   sole LoRA autograd producer now.
 
 fn linear_with_lora_t_decode_if(
@@ -1497,15 +1480,13 @@ fn full_attn_qkv_proj_decode_if(
     Ok((q_raw, k, v))
 }
 
-/// CUDA-compatible softmax on last dimension.
-///
-/// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
-/// manually: `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))`.
+/// CUDA-compatible softmax on last dimension:
+/// `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))`.
 ///
 /// Phase 7 (#1082): by default, when the input is a contiguous CUDA
 /// tensor of {F32, BF16, F16}, route through
-/// `kiln_tensor::cuda_softmax_last_axis` via the kt-bridge borrow
-/// adapter. Falls through to the portable kt composite when the
+/// `kiln_tensor::cuda_softmax_last_axis`. Falls through to the portable
+/// kt composite when the
 /// default-on kt route is disabled or any precondition fails.
 fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
@@ -1519,7 +1500,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         // full-attention block was disconnected from the loss, but CP-4 Inc 7
         // wired the SDPA-fallback attention chain onto the kt `Tape`: the
         // tape-authoritative backward now propagates the full attention
-        // contribution to `dL/dx`, while the candle baseline (which drives the
+        // contribution to `dL/dx`, while the candle baseline (which drove the
         // parity gate via `loss.backward()`) was still dropping it here — so the
         // two diverged on every layer BELOW the full-attn layer (the BF16 gate's
         // lower-layer MLP grads jumped 0.13 → 0.63). Gate the kt-API fast path on
@@ -1656,8 +1637,8 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 /// Phase 7 (#1082) — kt-API `sum(axis)` (non-keepdim, arbitrary
 /// axis) migration helper. Routes a contiguous CUDA kt tensor
 /// through `kiln_tensor::cuda_sum_axis` (which reduces an arbitrary
-/// axis with the axis dim removed, matching candle's
-/// `Tensor::sum(axis)` semantics directly — no `unsqueeze(-1)`
+/// axis with the axis dim removed — the same semantics as
+/// `Tensor::sum(axis)` — no `unsqueeze(-1)`
 /// fixup required).
 ///
 /// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
@@ -1811,7 +1792,7 @@ fn flash_attention_forward(
 
 // (#1082) Deleted the candle-CustomOp3 `cuda_flash_attention_training_bf16`
 //   + `CudaFlashAttentionTrainingBf16` + `cuda_flash_attention_training_disabled`:
-//   `crate::tape_forward::try_tape_flash_attn_cuda` is the sole flash-attention
+//   `crate::tape_forward::try_tape_flash_attn_kt` is the sole flash-attention
 //   autograd producer now.
 
 /// Compute attention using a backend fast path when Q/K/V are already in
