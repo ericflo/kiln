@@ -351,6 +351,9 @@ impl ToolCallGate {
         r
     }
 
+    // Test-only: lets the tool-gate tests (completions/tests/mod.rs) assert
+    // the gate fired exactly once; the streaming loop only reads the field.
+    #[allow(dead_code)]
     pub(super) fn confirmed(&self) -> bool {
         self.confirmed
     }

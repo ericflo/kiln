@@ -15,12 +15,12 @@
     {
       "path": "crates/kiln-model/src/generate.rs",
       "max_lines": 12219,
-      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The 31-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The 31-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
       "max_lines": 10803,
-      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The 29-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The 29-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/vk_decode_resident.rs",
@@ -29,33 +29,33 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6612,
-      "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth."
+      "max_lines": 6616,
+      "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
-      "max_lines": 8625,
-      "rationale": "The sole production scheduler intentionally owns one state machine. Six explicit lines size its model-execution thread for native graph call stacks, and this exact ceiling prevents unrelated growth."
+      "max_lines": 8637,
+      "rationale": "The sole production scheduler intentionally owns one state machine. Six explicit lines size its model-execution thread for native graph call stacks, and this exact ceiling prevents unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/cli.rs",
-      "max_lines": 6329,
-      "rationale": "OpenEnv command schemas, dispatch, and tests live in their owned module; this exact ceiling adds only the central top-level registration and user-facing navigation."
+      "max_lines": 6350,
+      "rationale": "OpenEnv command schemas, dispatch, and tests live in their owned module; this exact ceiling adds only the central top-level registration and user-facing navigation. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11252,
-      "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth."
+      "max_lines": 11275,
+      "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8387,
-      "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth."
+      "max_lines": 8397,
+      "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7962,
-      "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth."
+      "max_lines": 7968,
+      "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth. The delta is the 2026-08-26 kiln-server clippy sweep's #[allow]-with-evidence annotations (4b636aea8 too_many_arguments and the dead-code triage), per the 2da875018 exact-ceiling precedent."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
@@ -65,7 +65,7 @@
     {
       "path": "crates/kiln-train/src/opd.rs",
       "max_lines": 8496,
-      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap. The 49-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap. The 49-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",

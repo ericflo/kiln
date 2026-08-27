@@ -33,6 +33,10 @@ use kiln_server::state::{AppState, ModelBackend};
 
 const ROLLOUT_CHAT_TEMPLATE: &str = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n";
 
+// Test-only: every caller is behind `#[cfg(feature = "rocm")]` /
+// `#[cfg(feature = "vulkan")]` qualification tests below, so the default
+// (featureless) build never references it.
+#[allow(dead_code)]
 fn qualification_enabled() -> bool {
     std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1")
 }

@@ -499,6 +499,10 @@ pub struct PromptLogprobEntry {
     pub decoded_token: String,
 }
 
+// Test-only: pins the EOS-inclusive usage convention in `mod tests`
+// (completions/tests/mod.rs `completion_usage_counts_terminal_eos_token`);
+// the live streaming path uses `batching_engine::completion_usage_tokens`.
+#[allow(dead_code)]
 pub(super) fn completion_usage_tokens(
     visible_token_count: usize,
     finish_reason: &kiln_model::FinishReason,

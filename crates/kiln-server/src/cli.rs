@@ -1938,6 +1938,9 @@ fn format_actor_prefill_backend_preview(preview: &ConfigCheckBackendPreview) -> 
     output
 }
 
+// Test-only: the `config check` tests in this file's `mod tests` pin the
+// actor-prefill contract rendering (rocm happy/legacy/streaming-disabled).
+#[allow(dead_code)]
 fn format_actor_prefill_backend_config(
     config: &crate::config::KilnConfig,
     backend: ConfigCheckBackend,

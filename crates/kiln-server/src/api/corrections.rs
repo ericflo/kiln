@@ -102,6 +102,10 @@ impl CorrectionsStore {
             .collect()
     }
 
+    // Test-only: `trained_rows_survive_clear_and_are_hidden_from_active_list`
+    // uses it to simulate the training worker marking rows trained; live
+    // mutations all go through `locked_mutate`.
+    #[allow(dead_code)]
     fn write_all(&self, rows: &[CorrectionRow]) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{e}"))?;
         let mut body = String::new();

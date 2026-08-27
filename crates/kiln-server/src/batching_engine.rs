@@ -1974,6 +1974,10 @@ impl BatchingEngineHandle {
 
     // The flat argument list mirrors the pipeline inputs 1:1; a parameter struct would obscure that correspondence.
     #[allow(clippy::too_many_arguments)]
+    // Test-only: the `mod tests` below exercise the engine through this exact
+    // policy-injected constructor (5 call sites); production starts via
+    // `start_with_actor_runtime_config` / `start_with_policy_and_cycle_idle`.
+    #[allow(dead_code)]
     fn start_with_policy(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,

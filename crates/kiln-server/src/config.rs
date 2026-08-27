@@ -248,6 +248,8 @@ impl DeterministicInference {
         Ok(Self::new(enabled, ConfigValueSource::Environment))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value(DETERMINISTIC_ENV, raw)
     }
@@ -338,6 +340,8 @@ impl MaxDecodeBatch {
             .with_context(|| format!("invalid {name} value {raw:?}"))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value(MAX_DECODE_BATCH_ENV, raw)
     }
@@ -929,6 +933,8 @@ impl ServingProfileSetting {
         })
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value(SERVING_PROFILE_ENV, raw)
     }
@@ -2599,6 +2605,8 @@ impl StreamStallGrace {
         Self::new(millis, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value("KILN_SERVER_STREAM_STALL_GRACE_MS", raw)
     }
@@ -2667,6 +2675,8 @@ impl BatchTokenBudget {
         Self::new(tokens, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value("KILN_SERVER_MAX_BATCH_TOKENS", raw)
     }
@@ -2731,6 +2741,8 @@ impl PrefillTokenBudget {
         Self::new(tokens, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value("KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE", raw)
     }
@@ -2795,6 +2807,8 @@ impl PrefillLayerBudget {
         Self::new(layers, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
     }
 
+    // Test-only: `mod tests` below pins this parse-error contract.
+    #[allow(dead_code)]
     fn from_environment_value(raw: &str) -> Result<Self> {
         Self::from_named_environment_value("KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE", raw)
     }
@@ -5739,6 +5753,9 @@ impl KilnConfig {
         })
     }
 
+    // Test-only: `mod tests` below pins the whitespace-tolerant env-override
+    // paths for each server field (the live path is `apply_env_overrides`).
+    #[allow(dead_code)]
     fn apply_serving_profile_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.serving_profile = ServingProfileSetting::from_environment_value(raw)?;
@@ -5746,6 +5763,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_deterministic_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.deterministic = DeterministicInference::from_environment_value(raw)?;
@@ -5764,6 +5782,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_stream_stall_grace_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.stream_stall_grace_ms = StreamStallGrace::from_environment_value(raw)?;
@@ -5771,6 +5790,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_max_batch_tokens_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_batch_tokens = BatchTokenBudget::from_environment_value(raw)?;
@@ -5778,6 +5798,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_max_prefill_tokens_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_prefill_tokens_per_cycle =
@@ -5786,6 +5807,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_max_prefill_layers_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_prefill_layers_per_cycle =
@@ -5794,6 +5816,7 @@ impl KilnConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_max_decode_batch_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_decode_batch = MaxDecodeBatch::from_environment_value(raw)?;

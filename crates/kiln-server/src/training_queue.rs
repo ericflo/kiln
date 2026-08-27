@@ -1327,6 +1327,10 @@ fn normalize_opd_resume_checkpoint(
     )
 }
 
+// Test-only: the resume-seed tests in `mod tests` below drive all three
+// materializers (the live admission path calls `materialize_*_training_resume`
+// directly and reads the full admission, not just the seed).
+#[allow(dead_code)]
 pub(crate) fn materialize_sft_effective_seed(
     config: &mut kiln_train::SftConfig,
     adapter_dir: &std::path::Path,
@@ -1336,6 +1340,7 @@ pub(crate) fn materialize_sft_effective_seed(
         .map(|admission| admission.effective_seed)
 }
 
+#[allow(dead_code)]
 pub(crate) fn materialize_grpo_effective_seed(
     config: &mut kiln_train::GrpoConfig,
     adapter_dir: &std::path::Path,
@@ -1345,6 +1350,7 @@ pub(crate) fn materialize_grpo_effective_seed(
         .map(|admission| admission.effective_seed)
 }
 
+#[allow(dead_code)]
 pub(crate) fn materialize_opd_effective_seed(
     config: &mut kiln_train::OpdConfig,
     adapter_dir: &std::path::Path,

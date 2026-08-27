@@ -37,6 +37,10 @@ use kiln_train::TrainingDataProvenance;
 struct GrpoSubmissionStats {
     num_groups: Option<usize>,
     total_completions: Option<usize>,
+    // Test-only read: `grpo_jsonl_tests::grpo_dataset_path_submission_scans_
+    // every_row_for_the_maximum_shape` pins it (stats==receipt max_seq_len);
+    // the handler reads the sibling `source_receipt` for admission state.
+    #[allow(dead_code)]
     max_seq_len: usize,
     streaming_dataset: bool,
     source_receipt: Option<crate::training_queue::GrpoJsonlAdmissionReceipt>,
