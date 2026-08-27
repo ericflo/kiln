@@ -69,8 +69,8 @@
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
-      "max_lines": 11277,
-      "rationale": "Capability policy tests now live with the policy owner; this file retains only the generated-style Vulkan kernel registry and embedded shader source authority at its lower exact ceiling. The 22-line increase is this round's clippy judgment-keep annotations (8x #[allow(clippy::too_many_arguments)] + 4x #[allow(clippy::type_complexity)] with one-line WGSL-ABI/SoA-output justifications on the flat dispatch functions); the exact ceiling sync follows the 2da875018 precedent."
+      "max_lines": 11276,
+      "rationale": "Capability policy tests now live with the policy owner; this file retains only the generated-style Vulkan kernel registry and embedded shader source authority at its lower exact ceiling. The 22-line increase is this round's clippy judgment-keep annotations (8x #[allow(clippy::too_many_arguments)] + 4x #[allow(clippy::type_complexity)] with one-line WGSL-ABI/SoA-output justifications on the flat dispatch functions); the exact ceiling sync follows the 2da875018 precedent. The round-94 delta is the stale-candle-comment sweep (net -1 comment line, zero code lines), synced to the exact ceiling per the 2da875018 precedent."
     }
   ]
 }
