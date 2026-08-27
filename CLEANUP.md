@@ -5812,3 +5812,43 @@ Commits: `e054f96e2` (97a, Part A) + `fc9b10b81` (97b, flash-attn) +
 `69dcd574a` (97c, gdn) + this ledger commit.
 
 -Cleanup Agent (round 97)
+
+## Cleanup Agent (round 98 — kiln-gdn-kernel test-lane lint finish)
+
+**Date:** 2026-08-27
+
+**Context:** round 97 brought kiln-gdn-kernel to 0 own warnings in the
+`--no-default-features` lane and documented 7 pre-existing
+`tests/` warnings as untouched. This finish closes 6 of them and
+judgments the last.
+
+**Work (2 test files, value-preserving literal regrouping):**
+- `unusual_byte_groupings` ×6 — applied clippy's own byte-aligned
+  suggestions (zero-padded to 8 digits, bit-identical values):
+  - `tests/gates_parity.rs:187` `0xFACE_0FF` → `0x0FAC_E0FF`
+  - `tests/gated_rms_norm_parity.rs:215/316/462` `0xA11C_E5` →
+    `0x00A1_1CE5`
+  - `tests/gated_rms_norm_parity.rs:517` `0xC0FF_EE` →
+    `0x00C0_FFEE`
+  - `tests/gated_rms_norm_parity.rs:535` `0xBAD5_EED` →
+    `0x0BAD_5EED`
+- `needless_range_loop` ×1 (`gated_rms_norm_parity.rs:152`, the
+  parity-test reference loop `for h in 0..hidden { … weight_host[h]
+  }`) — **KEPT, documented judgment**: same lint class as 10 of the
+  14 items in kiln-tensor's documented judgment set (preserved as
+  such in rounds 64-97); the index loop is the intentional oracle
+  structure (idx = row_off + h used for three arrays in lockstep);
+  reshaping per campaign precedent (flat/locked patterns kept with
+  evidence, signatures and structures never reshaped).
+
+**Verification (orchestrator, own runs):** kiln-gdn-kernel default
+clippy (CUDARC_CUDA_VERSION=12080) own-code warnings **7 → 1** (the
+documented judgment above); `--no-default-features` **0**; tests
+**2/0/0** (the parity oracles re-ran green on the regrouped literals
+— the value-preservation proof); `cargo fmt --check` clean; both
+Python gates pass; git status clean.
+
+**Signature:** kiln cleanup agent (orchestrator inline finish),
+round 98 — the last actionable own-code warning in kiln-gdn-kernel's
+test lane is now a documented judgment, consistent with the
+campaign's established lint-judgment protocol.

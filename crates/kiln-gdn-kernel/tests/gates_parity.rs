@@ -184,6 +184,6 @@ fn gdn_gates_parity_vs_host_reference() {
     // use nv in the 32-128 range, so we exercise both ends.
     run_case(1, 1, 32, 0xDEAD_BEEF, "decode/nv=32");
     run_case(1, 1, 128, 0xCAFE_F00D, "decode/nv=128");
-    run_case(2, 32, 64, 0xFACE_0FF, "prefill/B=2,T=32,nv=64");
+    run_case(2, 32, 64, 0x0FAC_E0FF, "prefill/B=2,T=32,nv=64");
     run_case(1, 128, 128, 0x5EED_BEEF, "prefill/T=128,nv=128");
 }

@@ -212,7 +212,7 @@ fn run_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64
     let rows = batch * seq_len * heads;
     let elems = rows * hidden;
 
-    let x_host = fill(seed ^ 0xA11C_E5, elems, 2.0);
+    let x_host = fill(seed ^ 0x00A1_1CE5, elems, 2.0);
     let z_host = fill(seed ^ 0x6A7E, elems, 4.0);
     let w_host: Vec<f32> = fill(seed ^ 0xBEEF, hidden, 0.5)
         .into_iter()
@@ -313,7 +313,7 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     let rows = batch * seq_len * heads;
     let elems = rows * hidden;
 
-    let x_host = fill(seed ^ 0xA11C_E5, elems, 2.0);
+    let x_host = fill(seed ^ 0x00A1_1CE5, elems, 2.0);
     let z_host = fill(seed ^ 0x6A7E, elems, 4.0);
     let dout_host = fill(seed ^ 0xD06, elems, 1.5);
     let w_host: Vec<f32> = fill(seed ^ 0xBEEF, hidden, 0.5)
@@ -459,7 +459,7 @@ fn run_l2_bwd_case(
     let rows = batch * seq_len * heads;
     let elems = rows * hidden;
 
-    let x_host = fill(seed ^ 0xA11C_E5, elems, 2.0);
+    let x_host = fill(seed ^ 0x00A1_1CE5, elems, 2.0);
     let dout_host = fill(seed ^ 0xD06, elems, 1.5);
 
     let x_bf16 = to_bf16_vec(&x_host);
@@ -514,7 +514,7 @@ fn gdn_gated_rms_norm_backward_parity_vs_host_reference() {
         return;
     }
 
-    run_bwd_case(1, 1, 32, 128, 0xC0FF_EE, "decode");
+    run_bwd_case(1, 1, 32, 128, 0x00C0_FFEE, "decode");
     run_bwd_case(1, 16, 32, 128, 0xF00D_BAAD, "prefill/T=16");
 }
 
@@ -532,7 +532,7 @@ fn gdn_l2_norm_scale_backward_parity_vs_host_reference() {
         32,
         128,
         1.0 / (128.0f32).sqrt(),
-        0xBAD5_EED,
+        0x0BAD_5EED,
         "prefill/q",
     );
 }
