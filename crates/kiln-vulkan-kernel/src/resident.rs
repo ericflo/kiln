@@ -1340,7 +1340,7 @@ pub fn dispatch_causal_conv1d_update_resident(
 
 /// Resident-form element-wise vector add: `out[i] = a[i] + b[i]`.
 /// Used to materialise the residual connections inside the resident
-/// decode block without going through a candle `(x + y)?` (which
+/// decode block without going through a CPU `(x + y)?` (which
 /// allocates a fresh CPU Tensor every layer).
 pub fn dispatch_add_resident(
     vk_device: &VulkanDevice,
@@ -1371,7 +1371,7 @@ pub fn dispatch_add_resident(
 
 /// Resident-form attention output gate: `out[i] = a[i] * sigmoid(gate[i])`.
 /// Used inside the full-attention layer when `attn_output_gate = true`
-/// (Qwen3.5-4B always does). Lifts the gate computation off the candle
+/// (Qwen3.5-4B always does). Lifts the gate computation off the CPU
 /// path which would otherwise materialise sigmoid + multiply Tensors.
 pub fn dispatch_mul_sigmoid_gate_resident(
     vk_device: &VulkanDevice,
@@ -1413,9 +1413,8 @@ pub fn dispatch_mul_sigmoid_gate_resident(
 /// training-side autograd stack — same shader, same push constants,
 /// so the rotation arithmetic stays bit-identical with that path.
 /// Wraps it for decode hot path use without going through the
-/// candle-based `apply_rope` (which materialises ~6 intermediate
-/// Tensors per RoPE call and is currently the only Vulkan-decode RoPE
-/// path — this lifts that cost off the CPU).
+/// CPU-side `apply_rope` (which materialises ~6 intermediate Tensors
+/// per RoPE call — this lifts that cost off the CPU).
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_rotary_one_resident(
     vk_device: &VulkanDevice,
@@ -2053,7 +2052,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_resident(
 
 /// Split the combined QKV-with-gate buffer into four distinct output
 /// buffers (q, gate, k, v) on the GPU, without crossing back to the
-/// candle Tensor layer. This is the device-side equivalent of the
+/// CPU Tensor layer. This is the device-side equivalent of the
 /// CPU-side `q_raw.narrow(3, 0, head_dim)` + sibling narrows the
 /// legacy block uses after the fused full-attn QKV projection.
 ///
@@ -2271,7 +2270,7 @@ pub fn dispatch_qkv_gate_split_batched_resident(
 /// Split the combined GDN in_proj output buffer into four distinct
 /// output buffers (mixed_qkv, z, a, b). Companion to the GDN
 /// resident wire-up: the legacy path does this with four
-/// `.narrow().contiguous()` candle ops; this lands them on the GPU
+/// `.narrow().contiguous()` CPU ops; this lands them on the GPU
 /// in one dispatch.
 ///
 /// Combined layout per decode row:
@@ -2442,7 +2441,7 @@ pub fn dispatch_gdn_in_proj_split_batched_resident(
 
 /// Split the GDN mixed_qkv buffer into three distinct output buffers
 /// (q, k, v). Companion to the GDN resident wire-up: the legacy path
-/// does this with three `.narrow().contiguous()` candle ops; this
+/// does this with three `.narrow().contiguous()` CPU ops; this
 /// lands them on the GPU in one dispatch.
 pub fn dispatch_gdn_qkv_split_resident(
     vk_device: &VulkanDevice,
