@@ -453,9 +453,9 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
 
     // (#1082) `embed_tokens.device()` is a kt Device; the SFT path is now
     // kt-native end-to-end (kt `Parameter`s, kt AdamW state, kt tape
-    // forward/backward), so keep `device` kt downstream. The only candle
-    // touch left is the safetensors adapter I/O, which bridges the kt device
-    // to candle locally inside `load_from_safetensors`/`save_peft`.
+    // forward/backward), so keep `device` kt downstream. No candle touch
+    // remains — the safetensors adapter I/O is kt-native
+    // (`kiln_tensor::safetensors::{load_cpu, save_cpu}`).
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device)?;
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
@@ -1077,7 +1077,7 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
                     )))]
                     {
                         // Non-GPU build: the kt tape adapters don't record on a
-                        // CPU candle device, so checkpointed kt-tape backward is a
+                        // CPU device, so checkpointed kt-tape backward is a
                         // GPU-only path (CUDA/Metal/Vulkan). The CPU smoke test uses
                         // the non-checkpointed `standard_forward_backward` path;
                         // reaching here means a CPU run requested checkpointing, which
@@ -1346,9 +1346,9 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
             }
         }
 
-        // Pull current Var values from registry into candle CPU
+        // Pull current param values from the registry into kt master
         // storage before final save_peft (the on-device optimizer
-        // path leaves candle storage stale between steps).
+        // path leaves the kt master stale between steps).
         let final_snapshot_wait_started = Instant::now();
         let final_snapshot_gpu = gpu_step_coordination
             .as_ref()

@@ -267,8 +267,9 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
         });
     // (#1082) `embed_tokens.device()` is a kt Device; the GRPO body is now
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
-    // so keep `device` kt downstream. The only candle touch is safetensors
-    // adapter I/O, which bridges kt->candle locally inside save/load.
+    // so keep `device` kt downstream. No candle touch remains — the
+    // safetensors adapter I/O is kt-native
+    // (`kiln_tensor::safetensors::{load_cpu, save_cpu}`).
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device)?;
     ensure_tape_forward_backward_supported("GRPO", weights, backend.as_ref())?;
@@ -1198,7 +1199,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
             pb.finish_and_clear();
         }
 
-        // Pull current Var values from registry into candle CPU
+        // Pull current param values from the registry into kt master
         // storage before final save_peft.
         let synced = run_coordinated_grpo_gpu_phase(
             gpu_step_coordination.as_ref(),

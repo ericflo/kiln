@@ -399,16 +399,17 @@ pub(super) fn compute_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f6
 /// Uses the next-token prediction convention: logits[i] predicts token[i+1].
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
 // (`crate::grpo_tape_shim`) can recompute the EXACT same policy log-probs
-// inside its candle-autograd backward composite (#1082 CP-4).
+// inside its kt-tape backward composite (#1082 CP-4).
 // keep: the shared next-token policy log-prob computation behind the GRPO
 // tape-authoritative loss roots — `grpo_pg_loss_from_logits_grad_kt`
 // (grpo_tape_shim.rs:1959) and `try_tape_grpo_pg_loss_from_logits_kt`
 // (grpo_tape_shim.rs:2152) both call it to recompute the EXACT same
 // policy log-probs their oracles assert against, and the plain-test
 // oracles use it directly (tests/mod.rs:2699, grpo_tape_shim.rs tests).
-// It is dead in BOTH the default and the GPU-feature builds (those tape
-// roots are themselves not yet wired to a live tape registration); deleting
-// it would rip out the shared tape oracle and the test suite that pins it.
+// In GPU-feature builds it is wired into the live fused GRPO tape root
+// (the kt-analytic C2 backward); in CPU-only builds those callers are
+// cfg-gated out, so `#[allow(dead_code)]` stays for the test-oracle
+// retention.
 #[allow(dead_code)]
 pub(crate) fn token_log_probs(
     logits: &Tensor,

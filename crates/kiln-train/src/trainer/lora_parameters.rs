@@ -107,8 +107,8 @@ impl TrainableLoraParams {
     /// Like [`Self::initialize`], but uses a deterministic RNG seeded with `seed`
     /// to draw A. Used by the SFT/GRPO training loops so an adapter
     /// initialized with the same seed against the same base weights produces
-    /// byte-identical LoRA-A tensors on every run, even on backends like the
-    /// candle CPU device whose `set_seed` is a no-op.
+    /// byte-identical LoRA-A tensors on every run, even on the CPU device,
+    /// where kt `Device` has no `set_seed` (candle's was a no-op there anyway).
     ///
     /// `seed: None` falls back to the device-global RNG (preserves the
     /// pre-replay behavior).
@@ -411,9 +411,10 @@ impl TrainableLoraParams {
     /// non-resident-supporting backends (CPU/Metal/CUDA today) the
     /// hook is a no-op.
     ///
-    /// Lifecycle: each `apply_sgd_update` keeps the registry buffer
-    /// in sync with the candle Var storage (or vice versa, depending
-    /// on whether the on-device or CPU SGD path fired). The
+    /// Lifecycle: each optimizer update keeps the registry buffer
+    /// in sync with the kt param master (or vice versa, depending
+    /// on whether the on-device or CPU optimizer path fired; see
+    /// [`Self::sync_to_master`]). The
     /// matching [`Self::evict_from_backend`] runs at training
     /// completion to release registry entries before the trainer
     /// returns.
@@ -835,11 +836,11 @@ impl TrainableLoraParams {
         Ok(())
     }
 
-    /// Load a previously-saved PEFT adapter into the existing Vars,
-    /// replacing the seeded-init values.
+    /// Load a previously-saved PEFT adapter into the existing LoRA
+    /// `Parameter`s, replacing the seeded-init values.
     ///
-    /// Reads `<adapter_dir>/adapter_model.safetensors` and copies each
-    /// tensor into the matching Var via `Var::set`. The adapter's rank,
+    /// Reads `<adapter_dir>/adapter_model.safetensors` and installs each
+    /// tensor into the matching LoRA `Parameter`. The adapter's rank,
     /// alpha, and target_modules must match this `TrainableLoraParams`
     /// instance — those are passed at `initialize_seeded` time and not
     /// reconfigurable here.
@@ -855,10 +856,9 @@ impl TrainableLoraParams {
     /// optimizer setup instead of leaving seeded-init gaps.
     // (#1082) `&mut self` now: loading replaces each `Parameter`'s
     // forward + backward storage (preserving `tensor_id`) rather than
-    // calling candle `Var::set`. Safetensors load stays a candle island
-    // (the `safetensors_load_file` shim is candle); the loaded candle
-    // tensor is bridged to kt and installed.
-    // // (#1082) bridge — safetensors I/O is still a candle island.
+    // calling the (deleted) candle `Var::set`. Safetensors load is
+    // kt-native (`kiln_tensor::safetensors::load_cpu`); each loaded kt
+    // tensor is moved to the training device and installed directly.
     pub fn load_from_safetensors(&mut self, adapter_dir: &Path, device: &Device) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
         // (#1082) kt-native safetensors load — `kiln_tensor::safetensors::load_cpu`

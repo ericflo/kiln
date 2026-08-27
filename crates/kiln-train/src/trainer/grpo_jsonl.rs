@@ -1632,8 +1632,8 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
 
     // (#1082) `embed_tokens.device()` is a kt Device; the OPD/GRPO body is now
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward), so
-    // keep `device` kt downstream. The only candle touch is safetensors adapter
-    // I/O, which bridges kt->candle locally inside save/load.
+    // keep `device` kt downstream. No candle touch remains — the safetensors
+    // adapter I/O is kt-native (`kiln_tensor::safetensors::{load_cpu, save_cpu}`).
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device)?;
     ensure_tape_forward_backward_supported("streamed GRPO", weights, backend.as_ref())?;

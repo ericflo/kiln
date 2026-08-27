@@ -774,8 +774,8 @@ fn training_optimizer_support_rejects_before_allocation() {
     );
 }
 
-// (#1082) kt CPU test-tensor constructors. The candle `tensor_new` /
-// `tensor_from_vec` cd_types shims build candle tensors, but the
+// (#1082) kt CPU test-tensor constructors. The (deleted) candle `tensor_new` /
+// `tensor_from_vec` cd_types shims built candle tensors, but the
 // production loss/log-prob helpers under test (`grpo_loss`,
 // `ema_blend_tensor`, `token_log_probs`, `cross_entropy_loss`, …) are now
 // kt-typed. These build the same fixtures kt-native on CPU.
@@ -3003,11 +3003,11 @@ const TINY_WEIGHTS_DEFAULT_SEED: u64 = 0xC0FFEE_u64;
 /// remaining deterministic for a given `rng` state.
 // #1082: `GpuWeights`/`GpuFfnWeights`/`GpuAttentionWeights` fields are all
 // kt tensors, so the tiny-fixture builders below must produce kt. These
-// test-only kt helpers replace the production candle helpers
-// (`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`, which return
-// `cd_types::Tensor` = candle) at the kt-field assignment sites. They build
-// on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to a kt
-// device bridged from the candle `Device` param.
+// test-only kt helpers sit alongside the production helpers
+// (`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`, which now return
+// `cd_types::Tensor` = kt) at the kt-field assignment sites. They build
+// on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to the
+// kt `Device` param.
 fn kt_zeros_f32_on(shape: &[usize], device: &Device) -> Result<kiln_tensor::Tensor> {
     kiln_tensor::Tensor::zeros(shape.to_vec(), kiln_tensor::DType::F32, device).map_err(Into::into)
 }
@@ -3309,7 +3309,7 @@ pub(crate) fn tiny_config_full_attn_bf16() -> ModelConfig {
 
 /// BF16 twin of [`tiny_weights`]. Builds the F32 fixture via
 /// `tiny_weights_with_seed` (so the seeded init / shape logic stays in one
-/// place) then casts every candle `Tensor` in the `GpuWeights` to BF16 —
+/// place) then casts every kt `Tensor` in the `GpuWeights` to BF16 —
 /// matching how a real BF16 Qwen3.5-4B checkpoint uploads its weights
 /// (norms, projections, and `_t` transposes are all BF16 on disk).
 ///

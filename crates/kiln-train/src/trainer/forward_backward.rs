@@ -3,15 +3,15 @@ use super::*;
 /// (#1082 Increment-0 PR2) kt-native sibling of
 /// [`standard_forward_backward_tape_authoritative`]: delivers the
 /// tape-authoritative LoRA gradients into a kt-native
-/// [`kiln_autograd::GradStore`] keyed by [`KtTensorId`], WITHOUT the candle
-/// `loss.backward()` GradStore-container hack and WITHOUT the per-grad
+/// [`kiln_autograd::GradStore`] keyed by [`KtTensorId`], WITHOUT the (deleted)
+/// candle `loss.backward()` GradStore-container hack and WITHOUT the per-grad
 /// `kt -> candle` copy.
 ///
 /// The kt grads produced by `with_tape_authoritative_scope` are the
-/// authoritative output; they are inserted as-is (the candle `loss` is used
-/// only for the `loss_val` scalar readback). The optimizer bridges each grad
-/// to candle at its per-Var boundary (`optimizer_step_from_kt_grad_store`,
-/// Inc-0 PR3) until the optimizer itself goes kt-native via `kiln-optim`.
+/// authoritative output; they are inserted as-is (the kt `loss` is read only
+/// for the `loss_val` scalar). The optimizer consumes them kt-native
+/// (`optimizer_step_from_kt_grad_store`, Inc-0 PR3) — the candle per-Var
+/// bridge was retired when the optimizer went kt-native via `kiln-optim`.
 ///
 /// This is the perf-correct grad-delivery path AND the structural gate for the
 /// forward.rs type-flip: it removes the dependency on a candle `loss` existing
@@ -166,12 +166,12 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
 
     // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
-    // LoRA `Parameter::tensor_id()`. The tape's `out` map mixes candle-keyed
-    // deposits (frozen base/activation/norm tensors via `register_input_mapping`)
-    // and kt-param deposits (LoRA leaves via `register_input_mapping_kt`, which
+    // LoRA `Parameter::tensor_id()`. The tape's `out` map mixes untagged
+    // deposits (frozen base/activation/norm inputs) and kt-param deposits
+    // (LoRA leaves via `register_input_mapping_kt`, which
     // namespace-tags the key with `KT_PARAM_DEPOSIT_TAG`). Decode each key: only
     // tagged entries are genuine LoRA-param grads — `decode_kt_param_deposit`
-    // strips the tag and yields the param's kt id, so a candle id that happens to
+    // strips the tag and yields the param's kt id, so an untagged id that happens to
     // equal a param id (independent counters, both start at 1) is rejected. This
     // is the read side of the #1082 collision fix (a frozen RMSNorm `[hidden]`
     // grad was aliasing the `in_proj_z` LoRA-B `[out, rank]` slot → AdamW shape
@@ -204,12 +204,12 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
 ///     the final pre-final-norm hidden). No tape recording (memory-bounded).
 ///  2. Loss at the final boundary + the analytic tail seed `d(loss)/d(hidden)`
 ///     through final-RMSNorm + tied LM-head + masked next-token cross-entropy
-///     (a candle island; bridged to kt to seed the tape).
+///     (kt-native; seeds the tape).
 ///  3. Walk segments in reverse: re-run each segment's forward UNDER A FRESH
 ///     thread-local tape (recording only that segment), seed the tape backward
-///     at the segment output with the upstream grad, read out (a) the LoRA `Var`
-///     grads for that segment and (b) the segment-INPUT grad to chain into the
-///     previous segment. The fresh-tape-per-segment design bounds memory.
+///     at the segment output with the upstream grad, read out (a) the LoRA
+///     `Parameter` grads for that segment and (b) the segment-INPUT grad to chain
+///     into the previous segment. The fresh-tape-per-segment design bounds memory.
 ///
 /// Returns the LoRA grads as a kt-native `kiln_autograd::GradStore` (keyed by
 /// `KtTensorId`), consumed directly by `optimizer_step_from_kt_grad_store` — no
@@ -864,12 +864,12 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
 
     // Build a kt-native GradStore DIRECTLY from the tape grads. No
     // `loss.backward()` container hack (`GradStore::new()` on kiln_autograd is
-    // public, unlike candle's) and no `kt -> candle` grad copy: the kt grads are
-    // inserted as-is, keyed by each LoRA Var's id bridged into the kt id space
+    // public; the candle counterpart is gone) and no `kt -> candle` grad copy: the
+    // kt grads are inserted as-is, keyed by each LoRA `Parameter`'s kt id
     // (matching the PR1 `KtTensorId`-keyed moments). Identical shape to the SFT
     // kt producer.
     // (#1082) keyed by `Parameter::tensor_id()` (== the LoRA primary kt
-    // tensor id the tape adapter registered as the candle-input key).
+    // tensor id the tape adapter registered as the kt-input key).
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
         let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
@@ -1312,7 +1312,7 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 ///     so every token contributes a gradient without a lower weight floor.
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
 // (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
-// loss inside its candle-autograd backward composite (#1082 CP-4).
+// loss inside its kt-tape backward composite (#1082 CP-4).
 // keep: test-only callers — the plain tests in tests/mod.rs (TRL-pinned
 // oracle + finite-difference gradient checks) and the `grpo_tape_shim` tests;
 // the HostComposite wrapper form the GPU tape roots bypass in favor of

@@ -1,15 +1,15 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// (#1082) Small candle helpers that consolidate the most frequently-repeated
+// (#1082) Small kt helpers that consolidate the most frequently-repeated
 // inline-qualified `*` patterns in this file. Each helper takes
-// and returns candle types (autograd-tracked); the win is purely textual:
+// and returns kt types (post candle-drop); the win is purely textual:
 // one helper-side `*` reference replaces N caller-side ones.
 //
 // These are NOT a `use candle_*` import — they are free functions /
 // extension traits in the trainer module, so the audit invariant
-// "trainer.rs has zero `use candle_*` imports at module top" still holds.
-// Every candle prefix here is inline-qualified inside the helper body.
+// "trainer.rs has zero `use candle_*` imports at module top" still holds
+// (the module is candle-free to begin with).
 //
 // Reduction accounting (post-bb1210dc, baseline 598 lines containing
 // `*`):
@@ -50,7 +50,7 @@ pub(super) fn zeros_f32_on<S: Into<Shape>>(shape: S, device: &Device) -> Result<
     Ok(Tensor::zeros(shape, DType::F32, device)?)
 }
 
-/// Return a candle CPU device. Consolidates `Device::Cpu`
+/// Return a kt CPU device. Consolidates `Device::Cpu`
 /// (~70 sites pre-consolidation, mostly `let device = Device::Cpu;`
 /// in `#[cfg(test)]` blocks).
 #[inline]
@@ -64,8 +64,9 @@ pub(super) fn cpu_device() -> Device {
 /// pre-consolidation).
 pub(super) const LAST_DIM: D = D::Minus1;
 
-// `tensor_new` and `tensor_from_vec` (which require candle `NdArray`
-// and `WithDType` generic bounds) have moved to `crate::cd_types` so
+// `tensor_new` and `tensor_from_vec` (which required candle `NdArray`
+// and `WithDType` generic bounds) moved to `crate::cd_types` and were later
+// deleted with the candle drop, so
 // this file holds zero direct candle paths for the generic constructor
 // helpers. (#1082)
 
@@ -75,14 +76,14 @@ pub(super) const LAST_DIM: D = D::Minus1;
 // (no candle autograd `Var` tracking).
 
 // ---------------------------------------------------------------------------
-// (#1082) Type aliases for the most-repeated candle generic-parameter
+// (#1082) Type aliases for the most-repeated kt generic-parameter
 // patterns in this file. These are NOT `use candle_*` imports — they are
 // `type` aliases local to this module, so the audit invariant "trainer.rs
 // has zero `use candle_*` imports at module top" still holds. The aliases
-// keep all candle types fully spelled out at the alias definition site;
+// keep all kt types fully spelled out at the alias definition site;
 // every callsite that previously embedded two `*` references
 // (e.g. `HashMap<TensorId, Tensor>`) collapses to
-// one alias name (`GradMap`), netting out one candle reference per site.
+// one alias name (`GradMap`), netting out one reference per site.
 // ---------------------------------------------------------------------------
 
 /// (#1082) Map from a LoRA `Parameter`'s kt `TensorId` to its accumulated
