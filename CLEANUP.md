@@ -7277,3 +7277,37 @@ grep the lint NAME table, not just spans.
 campaign (117a kiln-model mechanical → 118 kiln-train → 119 tail
 crates → 120 dead-code adjudication → 121 judgment class). CI remains
 blind to all of it (no rocm/cuda lane) — local gates only.
+
+## Cleanup Agent (round 117a — kiln-model mechanical lint closure, cuda+rocm lanes; timeout-salvaged)
+
+**Date:** 2026-08-27
+
+**Scope:** kiln-model warn-by-default clippy debt in the cuda + rocm
+lanes (corrected measurement from round 116b: 119 + 60 sites).
+Sub-agent timed out at 45 min mid-class; salvage protocol applied
+(9th time): 8 incremental class commits + uncommitted collapsible_if
+work verified hunk-by-hunk (let-chains, edition 2024; evaluation order
+and `?` propagation unchanged) and committed by the orchestrator.
+
+**Classes closed (9 commits, 266a8314c..103245ec7):** drop_non_drop
+(4), redundant identity map (2), map_or (1), identity_op (1),
+explicit into_iter (1), needless_range_loop (2, rocm), map_entry (1),
+unnecessary_unwrap (1), collapsible_if (~24 nested-if sites, 13
+files). Net across the round: **364 insertions / 432 deletions
+(net −68 lines)** in 19 files.
+
+**Report-only remainder (post-round re-measurement, fixed
+`^\s{2,6}-->` span filter): default 0 / cuda 12 / rocm 3 in-crate
+sites — all judgment or owner classes:**
+- dead-code cluster: `captured_graph_count` (cuda_graph.rs:671),
+  `lm_head_argmax_from_hidden_eager` (model_dispatch.rs:2978),
+  `lm_head_argmax_from_batched_hidden_eager` (model_dispatch.rs:3186)
+  — zero-callers but pub(crate)-reachable; keep-by-default policy
+  applies (cross-lane liveness proof required before any deletion).
+- `max_seqlen_k` never read (full_attention.rs:2220, both lanes) —
+  owner design queue since round 113.
+cuda lane verified set (lib 5 + tests target 5): dead-code cluster (`captured_graph_count` cuda_graph.rs:671, `max_seqlen_k` full_attention.rs:2224 — owner queue since round 113, `lm_head_argmax_from_hidden_eager` model_dispatch.rs:2978, `lm_head_argmax_from_batched_hidden_eager` model_dispatch.rs:3186), too_many_arguments cuda_graph.rs:1477 (`replay_state_for_capture`), and unnecessary_mut_passed ×5 (tests/mod.rs:3159/3192/3885/8530/8547, callers of lib APIs → signature change = owner-level). All report-only.
+New finding: **kiln-core has 3 warn-by-default sites** (type_complexity tokenizer.rs:449/602, too_many_arguments tokenizer.rs:785) — kiln-core was not in the 116b audit; queue for round 121.
+**Gates:** kiln-model default 394/0 (after capability-report regen); 3-lane clippy: default 0, cuda 10 (5 lib + 5 tests, all report-only above), rocm 3 (report-only); fmt clean; budget pass (2 exact-ceiling syncs: rocm_graph.rs 10862→10854, generate.rs 12236→12233); artifacts pass; capability report regenerated (line numbers).
+**Salvage note (9th):** timeout at 45 min mid-class; 8 sub-agent class commits + 1 orchestrator-committed class (collapsible_if). All commits incremental; no uncommitted pile at handoff.
+**Queue:** 118 kiln-train (29/27 per 116b) → 119 tail crates (kiln-server 6/9, kiln-rmsnorm-kernel 6/6 = the six  sites above, kiln-tensor 1/6, kiln-rocblas 1/1, **kiln-core 3 — new**) → 120 dead-code adjudication (cuda_graph.rs:671, model_dispatch.rs:2978/3186,  owner question, kiln-tensor , kiln-flash-attn rocm-only fns) → 121 judgment classes (incl. kiln-core type_complexity).
