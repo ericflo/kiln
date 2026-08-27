@@ -12,7 +12,7 @@
 //! Any follow-up planning task titled "vendor chunk_gla_fwd" should
 //! re-verify current `PROFILING.md` before opening a new PR — the core
 //! vendor is here, and the per-token Rust forward-sub loop it replaced
-//! is gone from the CUDA path. The remaining candle ops in
+//! is gone from the CUDA path. The remaining ops in
 //! `kiln-model::forward::gdn_chunkwise_recurrence` (cumsum + exp decay
 //! matrix, KKT/QKT matmuls, intra-chunk `B_mask @ W`, final state
 //! update) are *not* inside this vendor's scope; they are distinct

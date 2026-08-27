@@ -478,8 +478,7 @@ pub fn gdn_solve_tri_transpose_f32_kt(
 /// `[B, H, dk, dv]` (mutated in place). Returns BF16 `[B, H, dv]`.
 ///
 /// `state` is borrowed `&KtTensor`; the FFI mutates its underlying
-/// CUDA buffer through the raw device pointer (same idiom as the
-/// candle-typed wrapper which takes `&mut Tensor`).
+/// CUDA buffer through the raw device pointer.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_recurrent_forward_kt(
     q: &KtTensor,
@@ -3064,10 +3063,6 @@ pub fn gdn_chunk_scan_kt(
 // kt-typed envelope predicates
 // ============================================================================
 //
-// These mirror the candle-typed `gdn_*_supports` predicates in `lib.rs`
-// one-for-one: same dtype + device + shape envelope checks. Inputs are
-// kt-tensors instead of candle-tensors so callers can dispatch on a
-// pre-borrowed kt-Tensor without round-tripping back through candle.
 // All four are pure — no CUDA dispatch, no FFI — and therefore safe to
 // call from any thread / under graph capture.
 
@@ -3298,15 +3293,15 @@ pub fn gdn_full_chunk_forward_multiblock_supports_kt(
     dv >= dv_tile && dv % dv_tile == 0
 }
 
-/// kt-typed mirror of [`crate::gdn_decode_gates_recurrent_supports`].
-///
-/// Same dtype + device + shape envelope as the candle predicate
-/// (`q/k/a/b/a_log/dt_bias/state` BF16; `v` BF16 or F32; `weight` F32;
+/// Envelope predicate for the kt-typed `gdn_decode_gates_recurrent_bf16_kt`
+/// family (kt replacement of the candle-typed
+/// `gdn_decode_gates_recurrent_supports`, deleted in #1082):
+/// `q/k/a/b/a_log/dt_bias/state` BF16; `v` BF16 or F32; `weight` F32;
 /// 4D `[B, 1, q_heads, dk=128]` for q/k; `[B, 1, value_heads, dv=128]`
 /// for v/z; 3D `[B, 1, value_heads]` for a/b; `[value_heads]` for
 /// a_log/dt_bias; `[dv]` for weight; 4D `[B, value_heads, dk, dv]` for
 /// state; state must be contiguous; `value_heads >= q_heads` and
-/// `value_heads % q_heads == 0`).
+/// `value_heads % q_heads == 0`.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_decode_gates_recurrent_supports_kt(
     q: &KtTensor,
@@ -3379,10 +3374,8 @@ pub fn gdn_decode_gates_recurrent_supports_kt(
         && state.is_contiguous()
 }
 
-/// kt-typed mirror of [`crate::gdn_decode_qk_norm_gates_recurrent_supports`].
-///
-/// Same dtype + device + shape envelope as the candle predicate. Unlike
-/// [`gdn_decode_gates_recurrent_supports_kt`], q and k may be either
+/// Like the kt-typed gates predicate
+/// ([`gdn_decode_gates_recurrent_supports_kt`]), q and k may be either
 /// BF16 or F32 (matching the four production variants: bf16/bf16,
 /// qf32/vbf16, qf32/vf32, vf32/bf16).
 #[allow(clippy::too_many_arguments)]
@@ -3526,9 +3519,8 @@ pub fn gdn_gates_supports_kt(
     true
 }
 
-/// kt-typed mirror of [`crate::gdn_gated_rms_norm_supports`].
-///
-/// Same dtype + device + shape envelope as the candle predicate:
+/// Envelope predicate for the kt-typed gated RMSNorm forward
+/// ([`gdn_gated_rms_norm_bf16_kt`]):
 ///   - CUDA + BF16 for x, z, weight
 ///   - `x.shape == z.shape`
 ///   - last dim `hidden == 128`
@@ -3602,9 +3594,7 @@ mod predicate_tests {
     use super::*;
 
     // These tests confirm the predicates compile + return `false` for the
-    // trivial CPU-tensor case (no GPU required). Byte-exact parity vs the
-    // candle predicates is implicit: both functions implement the same
-    // pure shape/dtype/device check chain on the same inputs.
+    // trivial CPU-tensor case (no GPU required).
 
     #[test]
     fn predicates_decline_on_cpu() {
