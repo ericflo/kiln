@@ -1790,7 +1790,7 @@ pub fn try_tape_flash_attn_kt(
             || !v.is_contiguous()
             || !matches!(head_dim, 128 | 256)
             || num_kv_heads == 0
-            || num_heads % num_kv_heads != 0
+            || !num_heads.is_multiple_of(num_kv_heads)
         {
             return Ok(None);
         }

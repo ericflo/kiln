@@ -87,7 +87,7 @@ fn a8_sample_enabled() -> bool {
 
 #[cfg(feature = "rocm")]
 pub fn swiglu_bf16_enabled(w: &RocmW8Proj) -> bool {
-    crate::rocm_policy::current_rocm_kernel_policy().w8_swiglu && w.n % 2 == 0
+    crate::rocm_policy::current_rocm_kernel_policy().w8_swiglu && w.n.is_multiple_of(2)
 }
 
 pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8Proj>> {
