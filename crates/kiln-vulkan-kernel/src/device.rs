@@ -646,10 +646,6 @@ impl VulkanDevice {
     }
 
     /// Get the maximum shared memory available per compute workgroup.
-    ///
-    /// Used to guard kernels (e.g. solve_tri) whose shared-memory footprint
-    /// must fit within the device limit. PR2 will use this to decline dispatch
-    /// when the kernel won't fit, falling back to the candle CPU path.
     pub fn max_compute_shared_memory_size(&self) -> vk::DeviceSize {
         self.max_compute_shared_memory_size
     }
