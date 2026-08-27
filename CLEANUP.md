@@ -4357,3 +4357,172 @@ only that dep; +4/−4 on the four feature lines where only the
 **Signature:** kiln cleanup agent, round 90 of the CLEANUP.md campaign —
 HEADLINE NET LINES **−13**; 250 deps adjudicated (248 LIVE / 2 DEAD);
 commits `c9cc96b96`, `72b59abab`, `c2803b908`, `567f30cbb`.
+## Cleanup Agent (round 91)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** execute the round-89 stale-comment triage
+in `crates/kiln-tensor` (round 89 reported 107 stale candle-era refs
+across 26 files). Deletion-first policy: a block is deleted only after
+each factual claim was re-verified against the current tree
+(`git log -S` for retired symbols, `grep` for live ones, manifest +
+Cargo.lock as authority). Where a block mixed true and false content,
+the true half was kept with minimal rewording. Comment-only: zero
+code lines touched.
+
+**HEADLINE NET LINES: −76** (98 insertions / 174 deletions across 7
+files; every deletion is a re-verified false or dead-symbol claim).
+
+**DELETION TABLE (net per file, all comment-only):**
+
+| file | net | what was deleted (each claim re-verified against current code) |
+|---|---|---|
+| src/metal_allocator.rs | **−28** | "wraps `Arc<candle_core::metal_backend::MetalDevice>`" (struct holds only `Arc<objc2_metal::MTLDevice>`-derived handles — verified field list); "links `metal` against `candle-core`" CI-lane claim (manifest is candle-free); the "callers needing a candle wrapper can derive one via `primary_metal_device` / `MetalStorage::candle_device()`" instruction blocks (both symbols deleted in d8d43c6dc — `git log -S` verified); "MetalStorage no longer holds a candle wrapper" forward-looking lift framing (the lift already landed). Kept: the `primary_metal_device`/`candle_device()` *deletion* statements (true past-tense history). |
+| src/metal_storage.rs | **−10** | "these still reach the GPU through the MetalCompanion's candle-derived `Device`/command pool — that substrate is the last candle dependency" (false: `metal_rt` is vendored objc2, kiln-owned); the `candle_metal_kernels::call_*` FFI derivation instructions (crate replaced in 04ca6f3dc); "candle-cached MSL pipeline collection" framing (kernels are kiln-owned MSL in `metal_kernels.rs`). Kept: "replacing `candle_metal_kernels::call_last_softmax`/`call_rms_norm`" provenance (true). |
+| src/metal_kernels.rs | **−3** | "is candle-core-free at the field level AND at the op level — the …" dangling half-claim and the `&Device`/`&Kernels` candle-FFI tail (verified against the kiln-owned MSL entry points). Kept: the kiln-owned-MSL provenance lines. |
+| src/cuda_allocator.rs | **−19** | "wraps `Arc<candle_core::cuda_backend::CudaDevice>`" (struct holds only `ctx: Arc<CudaContext>` + `device` + `mode` — verified field list); "links `cuda` against `candle-core`" CI-lane claim (manifest candle-free); "the `CudaStorage` still carries a candle device … the next CP-1 lift step" paragraph (the storage-side flip already landed — `CudaStorage` field list verified: no candle field); five call-site instructions to the absent `primary_cuda_device` / `CudaStorage::candle_device()` (both deleted in 7c1209616 — `git log -S` verified). Kept: the whole #1082 "Original audit / Order-of-operations" migration history (L62–128; commit hashes b39f5712/03b8a34c/d3caf46b/e2bddd72/a1f1c5bb all exist). |
+| src/cuda_storage.rs | **−15** | "wraps … `Arc<candle_core::cuda_backend::CudaDevice>` for stream affinity" (holds `Arc<CudaContext>`); "the candle `CudaDevice` is held only for its `cuda_stream()` accessor" (present-tense, false); the "derived on-demand from `device_index` via `primary_cuda_device`" clauses (symbol absent); "the free function `cuda_zeros` still accepts a candle device" (absent — only `cuda_zeros_ctx` exists, grep-verified); "primary_cuda_device stays around only as long as `kiln-kt-bridge::to_candle` needs a candle CudaDevice" (both absent; kt-bridge is kt-native — `to_candle`/`from_candle` grep-verified absent); the candle→kt adapter framing on `SliceOwner`/`from_borrowed_ctx`/`slice()`/`is_borrowed` (the canonical in-tree Borrowed caller is the CUDA capture arena — `capture_alloc.rs:272` `borrow_view` verified; the "dtype/owner-aware raw-pointer accessor that lands alongside the adapter" already exists as `device_ptr_raw` at L361). Kept: "the `device_index()` helper was retired alongside the `candle_device()` accessor" (L379–383, true past-tense) and "retires another `.candle_device()` read" (L2809–2811, true past-tense) — round 89 mis-flagged both as stale; the #1082 lift provenance lines. |
+| src/ops/eye.rs | **0** | Reword, not deletion: `eye_on_device` doc said the `CudaContext` is derived "via `primary_cuda_device` inside `host_to_cuda_copy_ctx`" — that function was deleted in 7c1209616; the current impl (L2983+) derives via `primary_cuda_context` (verified in code). Reworded to the live symbol. |
+| Cargo.toml | **−1** | [features] comment "(candle-core stays an optional dep below for the `metal` feature only, until CP-2 closes that path)" — contradicted by the manifest itself ([dependencies]: "candle-core / candle-nn optional deps removed (#1082): kiln-tensor is now fully candle-free under every feature") and by the dep table (zero candle entries). Deleted the stale parenthetical. |
+| contracts/production-file-budget-v1.json | **0** | Exact-ceiling sync per the 2da875018 precedent: `cuda_storage.rs` 6736 → 6721 (the file's new exact size after the −15 net); rationale extended to record the round-91 delta, matching the house style of the opd.rs entry. |
+
+**ADJUDICATED-KEEP GROUPS (round-89 stale flags that do NOT
+re-verify — corrected):**
+
+Round 89's remaining stale set (device.rs 5, dtype.rs 3, tensor.rs 20,
+storage.rs 4, vulkan_allocator.rs 8, vulkan_storage.rs 12,
+rocm_storage.rs 20, method_api.rs 5, context.rs 8, ops.rs 10,
+operator.rs 2 — 107 refs) could not be re-verified against the current
+tree, and none of the flagged content is false today:
+
+- `context.rs`, `ops.rs`, `operator.rs` **do not exist** under
+  `crates/kiln-tensor/src/` (ls-verified). The ops surface lives under
+  `src/ops/`; the only stale ref found there in the entire directory
+  tree was `ops/eye.rs:53` (fixed above).
+- The cited line numbers point at code lines with no candle text:
+  spot-checked tensor.rs L265/L271/L275/L283/L293/L298/L306/L466/
+  L520/L632/L636/L751/L755/L765/L769/L1222/L1226/L1392/L1396/L1658 —
+  all are Rust code, zero candle mentions.
+- Every candle line that DOES exist in those files is a true parity
+  note, provenance line, or verifiable present-tense fact:
+  - tensor.rs: 25 candle lines, all parity/provenance (candle-free
+    constructor docs verified against the `host_to_cuda_copy_ctx` /
+    `cuda_zeros_ctx` code; "candle's `Tensor::from_raw_buffer` twin"
+    provenance; `AsRef<Tensor>` mirrors-candle note; reshape parity).
+  - device.rs: 10 candle lines — all phase provenance ("Created via
+    cudarc / candle's CUDA backend in Phase 1.5" — true as a phase-1.5
+    statement), `DeviceLocation` field-for-field parity, and true
+    negatives ("kt-only — candle has no Vulkan/ROCm backend").
+  - dtype.rs: 4 candle lines — protected dtype-coverage fact
+    ("no candle-style superset" per bench-results/dtype-usage.md),
+    "bf16 candle CPU path today" (kiln-model STILL carries candle CPU
+    paths — kiln-model/src has 46 candle-referencing files, e.g.
+    generate.rs:2862 "candle CPU LoRA delta path"), "inside
+    kiln-marlin-gemm" (F16 usage verified in kt_api.rs:157+), and a
+    past-tense `parse()` migration note.
+  - storage.rs: 4 candle lines — one past-tense provenance block
+    ("Replaces the candle storage layer … 1,799 candle call sites the
+    Phase 0.1 audit captured").
+  - method_api.rs: 149 candle lines — ALL of them the file's purpose:
+    the candle-API-compat façade parity notes ("candle: `pub fn …`",
+    deviation notes, `Dim`/`D` mirror, API-compat contract for
+    `empty`/`zeros`/`arange` call shapes). Round 89's 5 "stale" flags
+    found no false claim.
+  - vulkan/rocm: 8 candle lines total — all true negatives
+    ("No candle dependency — kiln-vulkan-kernel is candle-free today"
+    verified: kiln-vulkan-kernel manifest has zero candle deps and its
+    only candle_core mention is a comment in resident.rs:2794;
+    "candle-free ROCm analog" true).
+
+**CORRECTIONS TO ROUND 89 (mandatory per round-90 mandate):**
+
+1. Three files in round 89's 26-file table do not exist in
+   `crates/kiln-tensor/src/`: `context.rs` (claimed 1,151 lines / 8
+   stale), `ops.rs` (claimed 4,545 lines / 10 stale), `operator.rs`
+   (claimed 594 lines / 2 stale). Their 20 "stale" refs are ledger
+   error, not code.
+2. Round 89's per-file reference counts do not match the tree
+   (e.g. tensor.rs "30 total / 20 stale" vs actual 25 total / 0 stale;
+   rocm_storage.rs "40 / 20" vs actual 1 / 0; vulkan_storage.rs
+   "36 / 12" vs actual 6 / 0; vulkan_allocator.rs "8 / 8" vs actual
+   1 / 0). The line numbers in the stale list point at non-candle code
+   lines (spot-check table above).
+3. Two cuda_storage.rs lines round 89 marked STALE are TRUE
+   past-tense history and were kept: L379–383 ("the `device_index()`
+   helper was retired alongside the `candle_device()` accessor") and
+   L2809–2811 ("retires another `.candle_device()` read").
+4. Round 89's actual stale set was concentrated in the metal + cuda
+   substrate clusters — exactly where round 91 found every one of its
+   76 deleted lines.
+
+**GATES (all run after the last code commit):**
+
+- `cargo fmt --check -p kiln-tensor` — clean (after each group AND
+  final).
+- `cargo check -p kiln-tensor` — clean after each group AND final.
+  (The `cuda` feature lane is unbuildable on this Linux host —
+  cudarc's build script requires `nvcc`, no CUDA toolkit installed;
+  pre-existing environment limit. Metal lane likewise host-blocked by
+  objc2. Edits are comment-only, zero compilation surface; the two
+  edited cuda files parse+typecheck in the default build.)
+- `cargo test -p kiln-tensor --lib` — run exactly once: **994
+  passed; 0 failed; 0 ignored** (exact gate hit).
+- `cargo clippy -p kiln-tensor --all-targets` — **baseline-identical**:
+  the 4 deny-by-default `approx_constant` errors (element.rs:216,
+  element.rs:235, ops/like.rs:151, ops/like.rs:153 — test literals
+  `3.14` from pre-existing commit 9371035bf) and the 25 warnings (14
+  duplicates) reproduce identically on the round-90 baseline HEAD
+  `c09c8b73a` in a throwaway worktree — zero new warnings/errors from
+  this round. (Fixing the 4 requires a code change — out of scope for
+  a comment-only round; recommended for round 92 below.)
+- `python3 scripts/check_repository_artifacts.py` — PASSED (6,697
+  tracked paths).
+- `python3 scripts/check_production_file_budget.py` — PASSED after
+  the exact-ceiling sync (647 files, 5000-line default, 14 reviewed
+  exceptions). Initially failed on the 6736 ceiling headroom; fixed in
+  `1179aec10`.
+- `git status` — clean at session end.
+
+**COMMITS:** `7b26e498a` (metal cluster, net −41), `7fa99c3d8` (cuda
+cluster, net −34), `5b9cf4bc7` (auxiliaries: ops/eye.rs reword +
+Cargo.toml stale parenthetical, net −1), `1179aec10` (budget
+exact-ceiling sync 6736→6721), plus this ledger commit.
+
+**ROUND-92 RECOMMENDATION (steered by evidence):**
+
+1. **Close the clippy gap** — the 4 pre-existing `approx_constant`
+   denies (element.rs:216/235, ops/like.rs:151/153) are the only
+   thing standing between kiln-tensor and a fully green
+   `cargo clippy --all-targets`. Trivial code change (use
+   `std::f32::consts::PI` or rename the fixture values off the
+   0.001 band) but requires a code-change round, not a comment round.
+   Evidence: baseline worktree repro at c09c8b73a.
+2. **Sweep the unswept crates** per round 88's inventory, same
+   re-verify-first protocol: kiln-opd-loss-kernel (76 candle refs),
+   kiln-vulkan-kernel (62), kiln-autograd (31), kiln-flash-attn (14),
+   kiln-gdn-kernel (12), kiln-conv1d-kernel (8), kiln-core (6).
+   Round 91's finding that round-89-style line-level tables are
+   unreliable argues for a content-based sweep (grep every candle line,
+   adjudicate each, no line numbers).
+3. **kiln-model** still carries 46 candle-referencing files (the
+   "candle CPU path" that dtype.rs:49 correctly cites) — the largest
+   remaining candle surface in the workspace; a dedicated campaign,
+   not a single round.
+
+**Signature:** kiln cleanup agent, round 91 of the CLEANUP.md campaign
+— the round-89 triage executed deletion-first with per-claim
+re-verification against the live tree (retired symbols confirmed via
+`git log -S`: primary_cuda_device 7c1209616, primary_metal_device /
+MetalStorage::candle_device d8d43c6dc, candle_metal_kernels 04ca6f3dc;
+live symbols grep-verified); HEADLINE NET LINES **−76** (98 ins / 174
+del, zero code lines) across metal_storage.rs −10,
+metal_allocator.rs −28, metal_kernels.rs −3, cuda_allocator.rs −19,
+cuda_storage.rs −15, ops/eye.rs 0 (reword), Cargo.toml −1; 107 of
+round 89's flagged stale refs proven to be ledger error (3 non-existent
+files, wrong line numbers, 2 mis-flagged true history lines) and
+documented per the round-90 correction mandate; gates: fmt clean,
+cargo check clean, **994/0** lib tests (exact gate), clippy
+baseline-identical (4 pre-existing approx_constant denies, evidence in
+baseline worktree), both Python gates passing after the 6736→6721
+exact-ceiling sync, git status clean; commits `7b26e498a`,
+`7fa99c3d8`, `5b9cf4bc7`, `1179aec10` + this ledger commit.
