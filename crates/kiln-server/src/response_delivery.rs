@@ -700,6 +700,10 @@ impl DeliveryWorker {
     }
 
     /// Queue a command, returning it intact if the worker has stopped.
+    // Judgment keep (round 74): the Err carries the rejected command back to the
+    // caller (ownership hand-back, not a failure payload); boxing would ripple
+    // Box::new/deref through every delivery call site for a cold path.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn command(&self, command: DeliveryCommand) -> Result<(), DeliveryCommand> {
         let Some(command_tx) = &self.command_tx else {
             return Err(command);
