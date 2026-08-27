@@ -169,7 +169,7 @@ fn maybe_vulkan() -> Option<VulkanDevice> {
     VulkanDevice::new().ok()
 }
 
-/// Test-only candle wrapper for
+/// Test-only kt wrapper for
 /// `dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes`.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
@@ -218,7 +218,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
     Ok((out, resident_state))
 }
 
-/// Test-only candle wrapper for `dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes`.
+/// Test-only kt wrapper for `dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes`.
 /// Falls back to `state.clone()` for the no-readback path to match the
 /// pre-inversion `(Tensor, Tensor)` return shape used by the parity tests.
 #[allow(clippy::too_many_arguments)]
@@ -267,9 +267,9 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
     Ok((out, new_state))
 }
 
-/// Test-only candle wrapper for the bytes-only
-/// `dispatch_gdn_recurrent_step_with_options_bytes`. Keeps the candle-typed
-/// parity tests readable without re-exposing candle types in the kernel
+/// Test-only kt wrapper for the bytes-only
+/// `dispatch_gdn_recurrent_step_with_options_bytes`. Keeps the kt-typed
+/// parity tests readable without re-exposing kt types in the kernel
 /// crate's public API.
 // Mirrors the flat ABI of the GPU dispatch under parity test (round-67 GDN-ABI precedent).
 #[allow(clippy::too_many_arguments)]
@@ -318,8 +318,8 @@ fn dispatch_gdn_recurrent_step_with_options_tensor(
     Ok((out, new_state))
 }
 
-/// Test-only candle wrapper for the `_bytes` recurrent dispatch — keeps the
-/// candle-typed parity tests readable without reintroducing a candle-typed
+/// Test-only kt wrapper for the `_bytes` recurrent dispatch — keeps the
+/// kt-typed parity tests readable without reintroducing a kt-typed
 /// pub fn on the kernel crate.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
