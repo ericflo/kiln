@@ -332,8 +332,8 @@ pub(super) fn checkpointed_forward_backward_tape_authoritative_kt(
     // (its output IS that hidden). The loss value here is ONLY consumed as a
     // scalar `loss_val`; the gradient comes entirely from this tail seed,
     // outside the per-segment tape scopes.
-    let mut normed_for_tail = None;
-    let mut flce_active_metadata_for_tail = None;
+    let mut normed_for_tail: Option<Tensor>;
+    let mut flce_active_metadata_for_tail: Option<kiln_flce_kernel::kt_api::FlceActiveMetadata>;
     let tail_grad_override: Option<Tensor>;
     let loss_val = match sft_loss_route {
         SftFlceLossRoute::KtTapeFlce => {
