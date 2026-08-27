@@ -4,8 +4,8 @@
   "exceptions": [
     {
       "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "max_lines": 5328,
-      "rationale": "ROCm SDPA kernel dispatch and capability fencing are still colocated; this exact cap prevents growth pending a backend-owned split."
+      "max_lines": 5327,
+      "rationale": "ROCm SDPA kernel dispatch and capability fencing are still colocated; this exact cap prevents growth pending a backend-owned split. The round-116 delta is the warn-by-default clippy closure (checked_div rewrite net -1 line; bare too_many_arguments allows matching this file's existing convention), synced to the exact ceiling per the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/backend/metal_msl.rs",
@@ -59,8 +59,8 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6705,
-      "rationale": "CUDA storage now includes the reviewed host-upload capture-arena interception required to keep CUDA graph inputs device-resident; this exact ceiling prevents unrelated backend growth. The round-91 delta is the stale candle-era comment sweep in the CUDA cluster (net -15 comment lines, zero code lines), synced to the exact ceiling per the 2da875018 precedent."
+      "max_lines": 6701,
+      "rationale": "CUDA storage now includes the reviewed host-upload capture-arena interception required to keep CUDA graph inputs device-resident; this exact ceiling prevents unrelated backend growth. The round-91 delta is the stale candle-era comment sweep in the CUDA cluster (net -15 comment lines, zero code lines), synced to the exact ceiling per the 2da875018 precedent. The round-116 delta is the warn-by-default clippy closure (doc_lazy_continuation net -2, manual_checked_ops net -2), synced to the exact ceiling per the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-train/src/opd.rs",
