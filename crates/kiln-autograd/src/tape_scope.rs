@@ -35,9 +35,8 @@
 //! 1. [`with_thread_local_tape`] installs a fresh `Tape` on the current
 //!    thread for the duration of `f`. Returns `(f_result, finalised_tape)`.
 //! 2. [`with_active_tape`] runs `f` with `&mut Tape` if a scope is
-//!    active; returns `None` otherwise. The recording site then
-//!    decides whether to fall back to a non-tape path (e.g. the
-//!    candle-autograd `CustomOp` shim).
+//!    active; returns `None` otherwise, and the recording site uses
+//!    its non-tape path.
 //! 3. Nesting `with_thread_local_tape` panics — gradient accumulation
 //!    semantics across nested scopes are undefined until CP-4 figures
 //!    that out.
@@ -142,10 +141,9 @@ pub fn with_thread_local_tape_options<R>(options: TapeOptions, f: impl FnOnce() 
 /// callers must treat that as "no tape recording requested" and use
 /// the non-tape path instead.
 ///
-/// This is the canonical hook for kt-tape adapters living outside
-/// `kiln-model`: the `kt-tape forward + record` happens inside the
-/// closure, then the caller copies the kt result back into whatever
-/// container the production caller expects (e.g. a candle Tensor).
+/// This is the canonical hook for kt-tape adapters: the `kt-tape
+/// forward + record` happens inside the closure, and the caller
+/// consumes the kt result directly.
 pub fn with_active_tape<R>(f: impl FnOnce(&mut Tape) -> R) -> Option<R> {
     ACTIVE_TAPE.with(|cell| {
         let mut borrow = cell.borrow_mut();
