@@ -499,6 +499,8 @@ impl RocmCaptureRollbackState {
         }
     }
 
+    // Live under `feature = "rocm"`: memory-governor disarm after a successful capture; no
+    // default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn disarm_after_success(&mut self) {
         self.armed = false;
@@ -942,6 +944,9 @@ struct RocmGraphCounters {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Live under `feature = "rocm"`: capture/replay outcome accounting
+// (`record_capture_outcome`, `record_batched_capture_outcome`); no default-build caller,
+// so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 enum RocmGraphCaptureOutcome {
     SucceededRetained,
@@ -951,6 +956,8 @@ enum RocmGraphCaptureOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Live under `feature = "rocm"`: parity-check accounting (`record_capture_parity`); no
+// default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 enum RocmGraphCaptureParityOutcome {
     Passed,
@@ -1004,6 +1011,8 @@ fn non_evicting_pressure_decision(
     }
 }
 
+// Live under `feature = "rocm"`: memory-governor admission check on the capture path; no
+// default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 fn memory_governor_selector_matches(
     expected: kiln_memory::VramProbeSelector,
@@ -1091,6 +1100,8 @@ fn fair_active_geometry_eviction_order<'a>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Live under `feature = "rocm"`: fallback accounting + telemetry (`as_str`,
+// `record_fallback`); no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 enum RocmGraphFallbackReason {
     MultiRowBatchUnsupported,
@@ -1110,6 +1121,8 @@ enum RocmGraphFallbackReason {
 }
 
 impl RocmGraphFallbackReason {
+    // Live under `feature = "rocm"`: fallback telemetry strings; no default-build caller, so
+    // the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     const fn as_str(self) -> &'static str {
         match self {
@@ -1155,9 +1168,13 @@ pub struct RocmGraphFallbackStats {
 }
 
 impl RocmGraphFallbackStats {
+    // Live under `feature = "rocm"`: slow-fallback threshold read by `record`; no default-
+    // build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     const SLOW_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
 
+    // Live under `feature = "rocm"`: fallback counter increment on decode fallback; no
+    // default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record(&mut self, reason: RocmGraphFallbackReason, duration: std::time::Duration) -> u64 {
         self.total = self.total.saturating_add(1);
@@ -1208,9 +1225,13 @@ pub struct RocmGraphPhaseStats {
 }
 
 impl RocmGraphPhaseStats {
+    // Live under `feature = "rocm"`: slow-phase threshold read by `record`; no default-build
+    // caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     const SLOW_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
 
+    // Live under `feature = "rocm"`: phase-timing counter during capture/replay; no default-
+    // build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record(&mut self, duration: std::time::Duration) {
         self.calls = self.calls.saturating_add(1);
@@ -1276,6 +1297,8 @@ impl std::error::Error for RocmGraphStatsUnavailable {}
 #[derive(Clone, Copy, Debug)]
 struct RocmGraphActivePhase {
     phase: RocmGraphPhase,
+    // Live under `feature = "rocm"`: graph-slot generation counter (adapter-swap
+    // invalidation); no default-build reader, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     generation: u64,
     started: std::time::Instant,
@@ -1285,6 +1308,8 @@ struct RocmGraphActivePhase {
 struct RocmGraphTelemetryState {
     completed: RocmGraphLiveTelemetry,
     active: Option<RocmGraphActivePhase>,
+    // Live under `feature = "rocm"`: graph-slot generation counter (adapter-swap
+    // invalidation); no default-build reader, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     next_generation: u64,
 }
@@ -1294,6 +1319,8 @@ struct RocmGraphTelemetryState {
 pub struct RocmGraphTelemetryHandle(std::sync::Arc<std::sync::Mutex<RocmGraphTelemetryState>>);
 
 impl RocmGraphTelemetryHandle {
+    // Live under `feature = "rocm"`: phase timer for capture/replay accounting; no default-
+    // build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn timer(&self, phase: RocmGraphPhase) -> RocmGraphPhaseTimer {
         let started = std::time::Instant::now();
@@ -1316,6 +1343,8 @@ impl RocmGraphTelemetryHandle {
         }
     }
 
+    // Live under `feature = "rocm"`: transient VRAM probe accounting at capture; no default-
+    // build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_transient_candidate_bytes(&self, bytes: u64) {
         let mut telemetry = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -1338,6 +1367,8 @@ impl RocmGraphTelemetryHandle {
     }
 }
 
+// Live under `feature = "rocm"`: phase-timing handle for capture/replay; no default-build
+// construction, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 struct RocmGraphPhaseTimer {
     telemetry: RocmGraphTelemetryHandle,
@@ -1364,6 +1395,8 @@ impl Drop for RocmGraphPhaseTimer {
     }
 }
 
+// Live under `feature = "rocm"`: phase-stats access used by the timer's completion path;
+// no default-build caller, so the allow is required.
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 fn phase_stats_mut(
     telemetry: &mut RocmGraphLiveTelemetry,
@@ -1420,6 +1453,8 @@ fn profiled_phase_duration(
 }
 
 impl RocmGraphCounters {
+    // Live under `feature = "rocm"`: capture-outcome counters on the decode path; no default-
+    // build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_capture_outcome(&mut self, outcome: RocmGraphCaptureOutcome) {
         self.capture_attempts = self.capture_attempts.saturating_add(1);
@@ -1437,6 +1472,8 @@ impl RocmGraphCounters {
         }
     }
 
+    // Live under `feature = "rocm"`: batched capture-outcome counters; no default-build
+    // caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_batched_capture_outcome(&mut self, outcome: RocmGraphCaptureOutcome) {
         self.batched_capture_attempts = self.batched_capture_attempts.saturating_add(1);
@@ -1454,6 +1491,8 @@ impl RocmGraphCounters {
         }
     }
 
+    // Live under `feature = "rocm"`: capture-parity counters; no default-build caller, so the
+    // allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_capture_parity(
         &mut self,
@@ -1481,6 +1520,8 @@ impl RocmGraphCounters {
             .saturating_add(duration.as_micros().try_into().unwrap_or(u64::MAX));
     }
 
+    // Live under `feature = "rocm"`: replay-outcome counters; no default-build caller, so the
+    // allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_replay_outcome(&mut self, succeeded: bool) {
         self.replay_attempts = self.replay_attempts.saturating_add(1);
@@ -1491,6 +1532,8 @@ impl RocmGraphCounters {
         }
     }
 
+    // Live under `feature = "rocm"`: decode-owner release accounting; no default-build caller,
+    // so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_decode_owner_release(&mut self, released_graphs: usize) {
         self.decode_owner_release_count = self.decode_owner_release_count.saturating_add(1);
@@ -1499,16 +1542,22 @@ impl RocmGraphCounters {
             .saturating_add(released_graphs as u64);
     }
 
+    // Live under `feature = "rocm"`: graph-slot cache create counter; no default-build caller,
+    // so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_graph_slot_create(&mut self) {
         self.graph_slot_create_count = self.graph_slot_create_count.saturating_add(1);
     }
 
+    // Live under `feature = "rocm"`: graph-slot cache reuse counter; no default-build caller,
+    // so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_graph_slot_reuse(&mut self) {
         self.graph_slot_reuse_count = self.graph_slot_reuse_count.saturating_add(1);
     }
 
+    // Live under `feature = "rocm"`: cache-admission counter; no default-build caller, so the
+    // allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_cache_admission(&mut self) {
         self.cache_admission_successes = self.cache_admission_successes.saturating_add(1);
@@ -1577,6 +1626,8 @@ impl RocmGraphCounters {
         }
     }
 
+    // Live under `feature = "rocm"`: fallback counter increment on decode fallback; no
+    // default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn record_fallback(
         &mut self,
@@ -1767,6 +1818,8 @@ pub struct RocmGraphRunner {
     enabled: bool,
     counters: RocmGraphCounters,
     phase_telemetry: RocmGraphTelemetryHandle,
+    // Live under `feature = "rocm"`: VRAM probe selector for the graph-cache budget; no
+    // default-build reader, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     memory_probe_selector: kiln_memory::VramProbeSelector,
     peak_retained_bytes: u64,
@@ -5094,6 +5147,8 @@ impl RocmGraphRunner {
     /// Eager decode with a graph-shaped position buffer (warms the allocator
     /// with the capture-shaped allocation sequence).
     #[allow(clippy::too_many_arguments)]
+    // Live under `feature = "rocm"`: eager-fallback forward with an explicit position buffer;
+    // no default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn eager_forward_with_position_buffer(
         backend: &dyn BackendRuntime,
@@ -5125,6 +5180,8 @@ impl RocmGraphRunner {
 
     /// Eager greedy decode with a graph-shaped position buffer.
     #[allow(clippy::too_many_arguments)]
+    // Live under `feature = "rocm"`: greedy eager-fallback forward with an explicit position
+    // buffer; no default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn eager_forward_greedy_with_position_buffer(
         backend: &dyn BackendRuntime,
@@ -5188,6 +5245,8 @@ impl RocmGraphRunner {
         .context("graph-shaped eager hidden-only decode forward pass failed (rocm)")
     }
 
+    // Live under `feature = "rocm"`: position-buffer construction for the eager-fallback path;
+    // no default-build caller, so the allow is required.
     #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
     fn new_position_buffer(device: Device, position: usize) -> Result<Tensor> {
         Tensor::from_vec_on(device, vec![position as f32], vec![1])
