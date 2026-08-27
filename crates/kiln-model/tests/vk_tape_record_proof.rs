@@ -160,7 +160,7 @@ fn vk_tape_add_records_and_backprops() {
     )
     .expect("build seed on Vulkan");
     let grads = tape
-        .backward(y.id(), seed, |x, z| ops::add(x, z))
+        .backward(y.id(), seed, ops::add)
         .expect("Tape::backward errored on Vulkan storage");
 
     let da = grads.get(a_id).expect("no grad keyed on a.id()");
@@ -259,7 +259,7 @@ fn vk_tape_matmul_bf16w_records_and_backprops() {
     let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n])
         .expect("seed on Vulkan");
     let grads = tape
-        .backward(y.id(), seed, |g, z| ops::add(g, z))
+        .backward(y.id(), seed, ops::add)
         .expect("Tape::backward errored on bf16w Vulkan graph");
 
     // dx is keyed on x.id(); the FROZEN weight has NO grad key (not a tape input).
@@ -429,7 +429,7 @@ fn vk_tape_rms_norm_backprops_on_vulkan() {
     )
     .expect("seed on Vulkan");
     let grads = tape
-        .backward(y.id(), seed, |g, z| ops::add(g, z))
+        .backward(y.id(), seed, ops::add)
         .expect("Tape::backward errored on the rms_norm Vulkan graph");
 
     let dx = grads.get(x_id).expect("no grad keyed on x.id()");

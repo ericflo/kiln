@@ -1235,10 +1235,10 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     let post_norm = backend.cached_f32_weight_buffer_kt(&layer.post_attention_layernorm)?;
 
     // --- persistent state buffers --------------------------------
-    let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
+    let recurrent_bytes = (nv * dk * dv * 4) as u64;
     let recurrent_buf =
         backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
-    let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_state_bytes = (qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
     let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
     if !backend.linear_attn_layer_seeded_kt(state_key) {
@@ -1572,12 +1572,12 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
     let dt_bias = backend.cached_f32_weight_buffer_kt(&weights.dt_bias)?;
 
     // --- persistent state buffers --------------------------------
-    let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
+    let recurrent_bytes = (nv * dk * dv * 4) as u64;
     let recurrent_buf =
         backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
     // conv_state shape: [batch, conv_dim, kernel_size - 1] f32 where
     // conv_dim = qkv_dim (the conv1d operates on the full mixed_qkv).
-    let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_state_bytes = (qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
     let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
     // --- seed state from kt tensors on first use ------------------
@@ -2180,7 +2180,7 @@ pub fn record_full_attn_block_into(
     // because chunks beyond `seq_len` write neutral identities.
     let num_chunks = paged_attn_splitk_chunks(1, max_blocks_per_seq);
     let partials_stride = 2 + head_dim;
-    let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
+    let partials_bytes = (num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials = backend.acquire_resident_scratch("nfa_attn_partials", partials_bytes)?;
     kiln_vulkan_kernel::resident::record_paged_attn_decode_batch_paged_splitk_resident(
         batch,
@@ -2569,10 +2569,10 @@ pub fn record_gdn_block_into(
     let post_norm = backend.cached_f32_weight_buffer_kt(&layer.post_attention_layernorm)?;
 
     // Persistent state (per-state-key on backend)
-    let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
+    let recurrent_bytes = (nv * dk * dv * 4) as u64;
     let recurrent_buf =
         backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
-    let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_state_bytes = (qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
     let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
     // Seed states on first call per layer per session (must happen
@@ -4501,7 +4501,7 @@ fn record_resident_decode_rope_tables_into(
     batch_size: usize,
     rotary_dim: usize,
 ) -> Result<bool> {
-    if rotary_dim == 0 || rotary_dim % 2 != 0 {
+    if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
         return Ok(false);
     }
     let half_rotary = rotary_dim / 2;
@@ -4549,7 +4549,7 @@ pub fn prepare_batched_resident_decode_step_buffers(
         "batched resident decode step buffers: hidden row length mismatch"
     );
     anyhow::ensure!(
-        rotary_dim % 2 == 0,
+        rotary_dim.is_multiple_of(2),
         "batched resident decode step buffers: rotary_dim must be even"
     );
     let half_rotary = rotary_dim / 2;
@@ -4601,7 +4601,7 @@ pub fn prepare_batched_resident_decode_token_step_buffers(
         "batched resident decode token step buffers: batch_size must be > 0"
     );
     anyhow::ensure!(
-        rotary_dim > 0 && rotary_dim % 2 == 0,
+        rotary_dim > 0 && rotary_dim.is_multiple_of(2),
         "batched resident decode token step buffers: rotary_dim must be positive and even"
     );
     let half_rotary = rotary_dim / 2;

@@ -1639,9 +1639,7 @@ impl ResidencyBackend for VulkanBackend {
         }
 
         let mut staged_rows = Vec::with_capacity(destinations.len());
-        for (row_idx, (dst, row_buffer)) in
-            destinations.iter().zip(row_buffers.into_iter()).enumerate()
-        {
+        for (row_idx, (dst, row_buffer)) in destinations.iter().zip(row_buffers).enumerate() {
             // kt id of the current destination keys the cache eviction.
             let old_id = dst.id();
             let placeholder = batch.narrow(0, row_idx, 1)?.contiguous()?;
@@ -1657,7 +1655,7 @@ impl ResidencyBackend for VulkanBackend {
         }
 
         for (dst, (old_id, new_id, placeholder, row_buffer)) in
-            destinations.iter_mut().zip(staged_rows.into_iter())
+            destinations.iter_mut().zip(staged_rows)
         {
             **dst = placeholder;
             replace_recurrent_state_resident_buffer(

@@ -450,8 +450,8 @@ pub(super) fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         .to_dtype(kiln_tensor::DType::I64)?
         .to_vec1::<i64>()?;
     let mut seq_lens = Vec::with_capacity(batch);
-    for row in 0..batch {
-        let row_len = usize::try_from(seq_i64[row])
+    for &seq in &seq_i64 {
+        let row_len = usize::try_from(seq)
             .context("Vulkan paged decode seqused_k contains negative length")?;
         if row_len == 0 || row_len > max_seqlen_k {
             return Ok(None);

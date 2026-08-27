@@ -2065,7 +2065,7 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
                     Arc::new(vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu)),
                 )?;
                 mark_vulkan_active();
-                return Ok(backend);
+                Ok(backend)
             }
             #[cfg(not(feature = "vulkan"))]
             anyhow::bail!(

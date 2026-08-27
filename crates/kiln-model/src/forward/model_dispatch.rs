@@ -237,7 +237,7 @@ pub fn model_forward_paged_decode_contiguous_batch_sample_with_ids(
 ) -> Result<Option<Vec<u32>>> {
     #[cfg(feature = "vulkan")]
     {
-        return try_vulkan_resident_batched_decode_sample(
+        try_vulkan_resident_batched_decode_sample(
             backend,
             token_ids,
             weights,
@@ -259,7 +259,7 @@ pub fn model_forward_paged_decode_contiguous_batch_sample_with_ids(
             top_p,
             min_p,
             seeds,
-        );
+        )
     }
     #[cfg(not(feature = "vulkan"))]
     {
@@ -710,7 +710,7 @@ pub(super) fn try_vulkan_resident_batched_decode_argmax(
         || block_tables.len() != batch
         || start_positions.len() != batch
         || row_ids.is_some_and(|ids| ids.len() != batch)
-        || start_positions.iter().any(|&p| p == 0)
+        || start_positions.contains(&0)
         || lora.is_some()
         || !config.attn_output_gate
         || !vulkan_resident_decode_enabled()
@@ -838,7 +838,7 @@ pub(super) fn try_vulkan_resident_batched_decode_hidden(
         || block_tables.len() != batch
         || start_positions.len() != batch
         || row_ids.is_some_and(|ids| ids.len() != batch)
-        || start_positions.iter().any(|&p| p == 0)
+        || start_positions.contains(&0)
         || lora.is_some()
         || !config.attn_output_gate
         || !vulkan_resident_decode_enabled()
@@ -984,7 +984,7 @@ pub(super) fn try_vulkan_resident_batched_decode_sample(
         || block_tables.len() != batch
         || start_positions.len() != batch
         || row_ids.is_some_and(|ids| ids.len() != batch)
-        || start_positions.iter().any(|&p| p == 0)
+        || start_positions.contains(&0)
         || lora.is_some()
         || !config.attn_output_gate
         || !vulkan_resident_decode_enabled()

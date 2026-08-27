@@ -156,7 +156,7 @@ fn vk_sft_lora_linear_backprops() {
     let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; SEQ * OUT], vec![SEQ, OUT])
         .expect("seed on Vulkan");
     let grads = tape
-        .backward(out.id(), seed, |g, z| ops::add(g, z))
+        .backward(out.id(), seed, ops::add)
         .expect("Tape::backward errored on the LoRA-linear Vulkan graph");
 
     let da = grads.get(a_id).expect("no grad keyed on lora.a.id()");
@@ -224,7 +224,7 @@ fn run_sft_forward_loss_backward() -> (f32, Vec<f32>, Vec<f32>, LoraProjectionWe
     let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32], vec![1])
         .expect("scalar seed on Vulkan");
     let grads = tape
-        .backward(loss.id(), seed, |g, z| ops::add(g, z))
+        .backward(loss.id(), seed, ops::add)
         .expect("Tape::backward errored on the CE+LoRA Vulkan graph");
 
     let da = grads.get(a_id).expect("no grad keyed on lora.a.id()");
@@ -331,7 +331,7 @@ fn vk_sft_one_adamw_step_changes_params() {
 
     let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32], vec![1]).expect("seed");
     let grads = tape
-        .backward(loss.id(), seed, |g, z| ops::add(g, z))
+        .backward(loss.id(), seed, ops::add)
         .expect("Tape::backward errored");
     let da = grads.get(a_id).expect("no dA").clone();
     let db = grads.get(b_id).expect("no dB").clone();

@@ -1515,7 +1515,7 @@ pub(super) fn gdn_gated_rms_norm(
         .vulkan_device()
         .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
     let hidden = weight.elem_count();
-    if hidden == 0 || x.elem_count() % hidden != 0 {
+    if hidden == 0 || !x.elem_count().is_multiple_of(hidden) {
         return Ok(None);
     }
     let weight_buf = backend.cached_f32_weight_buffer_kt(weight)?;

@@ -1775,7 +1775,7 @@ pub fn try_tape_flash_attn_kt(
     #[cfg(not(any(feature = "cuda", feature = "rocm")))]
     {
         let _ = (q, k, v, num_heads, num_kv_heads, head_dim);
-        return Ok(None);
+        Ok(None)
     }
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
@@ -3588,17 +3588,17 @@ impl BackwardOp for NarrowCompositeBackward {
         right_sh[self.axis] = right;
         let dx = match (self.offset > 0, right > 0) {
             (true, true) => {
-                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, &dev)?;
-                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, &dev)?;
-                kiln_tensor::Tensor::cat(&[&lz, &grad, &rz], self.axis)?
+                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, dev)?;
+                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, dev)?;
+                kiln_tensor::Tensor::cat(&[lz, grad, rz], self.axis)?
             }
             (true, false) => {
-                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, &dev)?;
-                kiln_tensor::Tensor::cat(&[&lz, &grad], self.axis)?
+                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, dev)?;
+                kiln_tensor::Tensor::cat(&[lz, grad], self.axis)?
             }
             (false, true) => {
-                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, &dev)?;
-                kiln_tensor::Tensor::cat(&[&grad, &rz], self.axis)?
+                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, dev)?;
+                kiln_tensor::Tensor::cat(&[grad, rz], self.axis)?
             }
             (false, false) => grad,
         };
@@ -4080,7 +4080,7 @@ mod lora_output_slice_backward_tests {
         seeds.insert(out0.id(), dy0.clone());
         seeds.insert(out1.id(), dy1.clone());
         let grads = tape
-            .backward_with_seeds(seeds, |left, right| kiln_tensor::ops::add(left, right))
+            .backward_with_seeds(seeds, kiln_tensor::ops::add)
             .unwrap();
 
         let dy_full = Tensor::cat(&[&dy0, &dy1], 1).unwrap();
