@@ -606,7 +606,9 @@ impl CudaGraphRunner {
             batch_size > 0,
             "persistent batched state requires batch_size > 0"
         );
-        if !self.batched_state_pool.contains_key(&batch_size) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.batched_state_pool.entry(batch_size)
+        {
             // (#1082) kt-native — the device is already kt.
             let state = crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
                 config,
