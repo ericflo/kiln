@@ -706,7 +706,7 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
     comp_env_count: usize,
     streaming_tile_tokens: usize,
     checkpoint_segments: usize,
-    mut timings: Option<&mut GrpoBenchmarkTimings>,
+    timings: Option<&mut GrpoBenchmarkTimings>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
     detect_anomaly: bool,
@@ -879,7 +879,7 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
     }
 
     let step_elapsed = step_started.elapsed();
-    if let Some(t) = timings.as_deref_mut() {
+    if let Some(t) = timings {
         // The tape walk owns the backward internally so we can't break the step
         // into policy_forward / backward here; bucket the full wall-clock against
         // the backward timer so the GRPO benchmark accounting still totals
