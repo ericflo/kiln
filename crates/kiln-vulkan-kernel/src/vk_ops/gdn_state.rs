@@ -1,8 +1,8 @@
 //! Per-layer Gated DeltaNet (GDN) recurrent + conv state.
 //!
-//! Mirrors candle's `LinearAttentionState` (forward.rs:1207) but holds
-//! raw `Arc<VulkanBuffer>` so the GDN forward path can read/write
-//! state in place without bouncing through candle Tensors.
+//! Mirrors kiln-model's `LinearAttentionState` (`forward/linear_state.rs`)
+//! but holds raw `Arc<VulkanBuffer>` so the GDN forward path can read/write
+//! state in place without bouncing through CPU Tensors.
 //!
 //! For training:
 //!   - Each example starts from zero state.
@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// One layer's recurrent + conv state buffers.
 pub struct VkGdnLayerState {
     /// Recurrent state S, shape [batch, num_value_heads, head_dim_k, head_dim_v].
-    /// Stored as F32 (matches candle training-time recurrent dtype).
+    /// Stored as F32 (matches the training-time recurrent dtype).
     pub recurrent_state: Arc<VulkanBuffer>,
     pub recurrent_n_elements: usize,
 
