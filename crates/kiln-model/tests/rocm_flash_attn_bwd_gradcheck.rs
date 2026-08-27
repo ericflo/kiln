@@ -178,7 +178,7 @@ fn run_gradcheck(sq: usize, sk: usize, hq: usize, hkv: usize, hd: usize) {
         "flash-attn must record exactly one tape node"
     );
     let grads = tape
-        .backward(out.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
+        .backward(out.id(), seed, kiln_tensor::ops::add)
         .expect("tape backward on ROCm flash-attn graph");
     let got_dq = host_f32(grads.get(q.id()).expect("dq"));
     let got_dk = host_f32(grads.get(k.id()).expect("dk"));

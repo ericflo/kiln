@@ -838,7 +838,7 @@ fn tape_backward_silu_matches_analytic_reference() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("silu backward walk");
 
     let dx_kt = grads.get(input_ids[0]).expect("dx grad present");
@@ -900,7 +900,7 @@ fn tape_backward_swiglu_matches_analytic_reference() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("swiglu backward walk");
 
     // Input order is [gate, up]; MulSigmoidGateBackward returns
@@ -979,7 +979,7 @@ fn tape_backward_matmul_matches_analytic_reference() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("matmul backward walk");
 
     // Input order is [a, b]; MatmulBackward returns [d_a, d_b].
@@ -1049,7 +1049,7 @@ fn tape_backward_embedding_table_is_a_frozen_leaf() {
     seeds.insert(out.id(), seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("frozen embedding leaf backward walk");
     assert!(
         grads.get(w_kt.id()).is_none(),
@@ -1111,7 +1111,7 @@ fn tape_backward_rms_norm_produces_input_grads() {
     // shape/dtype/device. Value parity for the fused kernel is covered by
     // the kernel crate's own parity tests.
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("rms_norm backward walk");
 
     let dx_kt = grads.get(input_ids[0]).expect("dx grad present");
@@ -1348,7 +1348,7 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("rope backward walk");
 
     let dx_kt = grads.get(input_ids[0]).expect("dx present");
@@ -1534,7 +1534,7 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("add backward walk");
 
     // da = dc and db = dc: both inputs receive the upstream grad unchanged.
@@ -1635,7 +1635,7 @@ fn tape_connected_chain_backward_walk_parity() {
     seeds.insert(s_kt.id(), seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("connected chain backward walk");
 
     let to_candle = |id| {
@@ -1747,7 +1747,7 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
     seeds.insert(s_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("connected adapter chain backward walk");
 
     let to_candle = |id| {
@@ -1863,7 +1863,7 @@ fn tape_bridge_connected_three_op_adapter_chain() {
     seeds.insert(s_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("connected 3-op chain backward walk");
 
     let da = grads.get(a_id).expect("d_a present");
@@ -2030,7 +2030,7 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("lora_add tape backward walk");
 
     // Input order on the fused node is [base_2d, x_2d, A, B]. base_2d/x_2d
@@ -2474,7 +2474,7 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("flash-attn tape backward walk");
 
     // Input order is [q, k, v]; FlashAttnBackward returns [dq, dk, dv].
@@ -2647,7 +2647,7 @@ fn tape_reshape_records_node_and_passes_grad_through() {
     seeds.insert(out_id, seed_kt);
 
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("reshape tape backward walk");
     let dx_kt = grads.get(input_ids[0]).expect("dx present");
     let dx = dx_kt.clone();
@@ -2767,7 +2767,7 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("gdn tape backward walk");
 
     // Input order [q, k, v, beta, g] -> [dq, dk, dv, dbeta, dg].
@@ -2910,7 +2910,7 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("head-last gdn tape backward walk");
 
     // Input order [q, k, v, beta, g] -> [dq, dk, dv, dbeta, dg]. The grads
@@ -3067,7 +3067,7 @@ fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("l2-qk-norm tape backward walk");
 
     let g_x = {
@@ -3141,7 +3141,7 @@ fn tape_gdn_gated_rms_norm_records_only_activation_inputs() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("gated-rms-norm tape backward walk");
 
     // Input order [x, z] -> [dx, dz].
@@ -3214,7 +3214,7 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("transpose tape backward walk");
 
     let g_x = {
@@ -3320,7 +3320,7 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .backward_with_seeds(seeds, kiln_tensor::ops::add)
         .expect("sdpa fallback tape backward walk");
 
     // Input order is [q, k, v]; SdpaBackward returns [dq, dk, dv].
