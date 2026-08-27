@@ -620,7 +620,12 @@ mod tests {
     #[test]
     fn vk_tensor_from_bytes_f32_matches_from_f32_slice() {
         let Some(dev) = vk_dev() else { return };
-        let data: Vec<f32> = vec![3.14, -1.0, 2.718, 0.0];
+        // Arbitrary round-trip data — values deliberately avoid
+        // clippy::approx_constant (3.14 ~ π and 2.718 ~ e would trip
+        // the deny-by-default lint; the test only checks
+        // from_bytes/from_f32_slice equivalence, so the values are
+        // unconstrained).
+        let data: Vec<f32> = vec![1.5, -1.0, 2.25, 0.0];
         let mut bytes = Vec::with_capacity(data.len() * 4);
         for v in &data {
             bytes.extend_from_slice(&v.to_le_bytes());
