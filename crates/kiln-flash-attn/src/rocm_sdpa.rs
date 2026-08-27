@@ -633,11 +633,10 @@ fn query_tile_len_for_budget_with_scratch(
     }
     let budget_limited = (budget_bytes / denom).max(1);
     let score_element_denom = b.saturating_mul(h).saturating_mul(key_len);
-    let element_limited = if score_element_denom == 0 {
-        remaining.max(1)
-    } else {
-        (materialized_score_tile_max_elements() / score_element_denom).max(1)
-    };
+    let element_limited = materialized_score_tile_max_elements()
+        .checked_div(score_element_denom)
+        .unwrap_or(remaining)
+        .max(1);
     let raw = budget_limited.min(element_limited).max(1);
     let tile = if raw >= MATERIALIZED_SCORE_TILE_GRANULARITY {
         (raw / MATERIALIZED_SCORE_TILE_GRANULARITY) * MATERIALIZED_SCORE_TILE_GRANULARITY
@@ -1783,15 +1782,13 @@ pub fn flash_attn_fwd_rocm(
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
     let policy = rocm_flash_attention_policy(q)?;
-    if native_scalar_fwd_enabled(policy, sq, sk)
+    if (native_scalar_fwd_enabled(policy, sq, sk)
         || native_tiled_fwd_enabled(policy, sq, sk)
-        || native_streaming_fwd_enabled(policy, sq, sk)
-    {
-        if let Some(result) =
+        || native_streaming_fwd_enabled(policy, sq, sk))
+        && let Some(result) =
             try_native_fwd_bf16(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal, policy)?
-        {
-            return Ok(result);
-        }
+    {
+        return Ok(result);
     }
 
     let budget_bytes = materialized_score_budget_bytes();
@@ -2059,8 +2056,9 @@ fn try_native_fwd_bf16(
         }
     }
 
-    if sq > q_tile && native_tiled_fwd_enabled(policy, sq, sk) {
-        if let Some(result) = try_native_fwd_bf16_query_tiled(
+    if sq > q_tile
+        && native_tiled_fwd_enabled(policy, sq, sk)
+        && let Some(result) = try_native_fwd_bf16_query_tiled(
             q,
             k,
             v,
@@ -2074,16 +2072,16 @@ fn try_native_fwd_bf16(
             causal,
             q_tile,
             policy,
-        )? {
-            return Ok(Some(result));
-        }
+        )?
+    {
+        return Ok(Some(result));
     }
 
     let q_c = rocm_contig(q)?;
     let k_c = rocm_contig(k)?;
     let v_c = rocm_contig(v)?;
-    if native_single_allowed {
-        if let Some(result) = try_ffi_fwd_bf16(
+    if native_single_allowed
+        && let Some(result) = try_ffi_fwd_bf16(
             &q_c,
             &k_c,
             &v_c,
@@ -2096,9 +2094,9 @@ fn try_native_fwd_bf16(
             softmax_scale,
             causal,
             policy,
-        )? {
-            return Ok(Some(result));
-        }
+        )?
+    {
+        return Ok(Some(result));
     }
 
     if native_streaming_fwd_enabled(policy, sq, sk) {
@@ -2136,7 +2134,7 @@ fn native_fwd_shape_supported(
         && matches!(d, 128 | 256)
         && h != 0
         && hk != 0
-        && h % hk == 0
+        && h.is_multiple_of(hk)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2337,7 +2335,7 @@ fn try_ffi_fwd_bf16(
         || !matches!(d, 128 | 256)
         || h == 0
         || hk == 0
-        || h % hk != 0
+        || !h.is_multiple_of(hk)
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
@@ -2419,7 +2417,7 @@ fn try_ffi_fwd_bf16_abs_tile(
         || !matches!(d, 128 | 256)
         || h == 0
         || hk == 0
-        || h % hk != 0
+        || !h.is_multiple_of(hk)
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
@@ -2507,7 +2505,7 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
         || !matches!(d, 128 | 256)
         || h == 0
         || hk == 0
-        || h % hk != 0
+        || !h.is_multiple_of(hk)
         || q.shape() != [b, sq_total, h, d]
         || k.shape() != [b, sk, hk, d]
         || v.shape() != [b, sk, hk, d]
@@ -2800,6 +2798,7 @@ fn native_streaming_fwd_finalize_bf16(
 ///
 /// Physical slot for logical position `t` of sequence `b`:
 ///   `block_table[b, t / page_block_size] * page_block_size + t % page_block_size`.
+#[allow(clippy::too_many_arguments)]
 fn paged_gather(
     pool: &KtTensor,        // [total_slots, hk, d]
     block_table: &KtTensor, // device U32 [b, max_blocks_per_seq]
@@ -3200,6 +3199,7 @@ pub fn paged_kv_write_token_major_bf16_slot_rocm(
 /// ROCm composite of `paged_kv_write_token_major_bf16_batch_slot_kt` (batched
 /// device-`[batch]`-U32 slots). `k`/`v` are `[batch * num_kv_heads * head_dim]`
 /// BF16; row `r` is written to physical pool row `slots[r]`.
+#[allow(clippy::too_many_arguments)]
 pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
     k_pool: &KtTensor,
     v_pool: &KtTensor,
@@ -3263,8 +3263,8 @@ pub fn flash_attn_bwd_rocm(
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
     let policy = rocm_flash_attention_policy(q)?;
 
-    if rocm_native_bwd_preferred(policy, b, h, sq, sk, d) {
-        if let Some(result) = try_native_bwd_bf16(
+    if rocm_native_bwd_preferred(policy, b, h, sq, sk, d)
+        && let Some(result) = try_native_bwd_bf16(
             dout,
             q,
             k,
@@ -3279,9 +3279,9 @@ pub fn flash_attn_bwd_rocm(
             d,
             softmax_scale,
             causal,
-        )? {
-            return Ok(result);
-        }
+        )?
+    {
+        return Ok(result);
     }
 
     // The native HIP backward is memory-bounded and exact, but scalar. For
@@ -3373,7 +3373,7 @@ pub fn flash_attn_bwd_rocm(
         hk,
         d,
     ) {
-        Ok(result) => return Ok(result),
+        Ok(result) => Ok(result),
         Err(tiled_err) => {
             if rocm_execution_quarantined(q)? {
                 return Err(tiled_err);
@@ -3399,7 +3399,7 @@ pub fn flash_attn_bwd_rocm(
             if let Some(online_err) = online_err {
                 return Err(online_err);
             }
-            return Err(tiled_err);
+            Err(tiled_err)
         }
     }
 }
@@ -3429,7 +3429,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
     if hk == h {
         return flash_attn_bwd_rocm(dout, q, k, v, out, softmax_lse, softmax_scale, causal);
     }
-    if hk == 0 || h % hk != 0 {
+    if hk == 0 || !h.is_multiple_of(hk) {
         return Err(FlashAttnError::Msg(format!(
             "rocm-sdpa collapsed bwd: invalid GQA heads h={h} hk={hk}"
         )));
@@ -3438,8 +3438,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
     if rocm_collapsed_gqa_bwd_enabled(policy)
         && rocm_native_direct_collapsed_gqa_bwd_enabled(policy)
         && rocm_native_bwd_preferred(policy, b, h, sq, sk, d)
-    {
-        if let Some(result) = try_native_bwd_bf16_collapsed_gqa(
+        && let Some(result) = try_native_bwd_bf16_collapsed_gqa(
             dout,
             q,
             k,
@@ -3454,9 +3453,9 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
             d,
             softmax_scale,
             causal,
-        )? {
-            return Ok(result);
-        }
+        )?
+    {
+        return Ok(result);
     }
 
     if !rocm_native_bwd_preferred(policy, b, h, sq, sk, d)
@@ -4083,7 +4082,7 @@ fn try_native_bwd_bf16(
         || !matches!(d, 128 | 256)
         || h == 0
         || hk == 0
-        || h % hk != 0
+        || !h.is_multiple_of(hk)
     {
         return Ok(None);
     }
@@ -4182,7 +4181,7 @@ fn try_native_bwd_bf16_collapsed_gqa(
         || !matches!(d, 128 | 256)
         || h == 0
         || hk == 0
-        || h % hk != 0
+        || !h.is_multiple_of(hk)
     {
         return Ok(None);
     }
@@ -4283,7 +4282,7 @@ fn collapse_bhsd3_gqa_grad_to_bshd_bf16(
     if hk == h {
         return bhsd3_to_bshd_bf16(t3, b, h, s, d);
     }
-    if hk == 0 || h % hk != 0 {
+    if hk == 0 || !h.is_multiple_of(hk) {
         return Err(FlashAttnError::Msg(format!(
             "collapse_bhsd3_gqa_grad_to_bshd_bf16: invalid GQA heads h={h} hk={hk}"
         )));
@@ -4318,7 +4317,7 @@ fn collapse_expanded_bshd_gqa_grad_bf16(
     if hk == h {
         return Ok(expanded.clone());
     }
-    if hk == 0 || h % hk != 0 {
+    if hk == 0 || !h.is_multiple_of(hk) {
         return Err(FlashAttnError::Msg(format!(
             "collapse_expanded_bshd_gqa_grad_bf16: invalid GQA heads h={h} hk={hk}"
         )));

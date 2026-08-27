@@ -106,7 +106,7 @@ fn cpu_sdpa(
                 let mut scores = vec![f32::NEG_INFINITY; sk];
                 let last_allowed = si as isize + offset;
                 let mut maxv = f32::NEG_INFINITY;
-                for sj in 0..sk {
+                for (sj, score_slot) in scores.iter_mut().enumerate().take(sk) {
                     if causal && (sj as isize) > last_allowed {
                         continue; // masked future key
                     }
@@ -115,7 +115,7 @@ fn cpu_sdpa(
                         acc += q_at(bi, si, hi, di) * k_at(bi, sj, hki, di);
                     }
                     let s = acc * scale;
-                    scores[sj] = s;
+                    *score_slot = s;
                     if s > maxv {
                         maxv = s;
                     }
@@ -134,11 +134,11 @@ fn cpu_sdpa(
                 // out = sum_j p_j v_j
                 for di in 0..d {
                     let mut acc = 0.0f32;
-                    for sj in 0..sk {
-                        if exps[sj] == 0.0 {
+                    for (sj, &e) in exps.iter().enumerate().take(sk) {
+                        if e == 0.0 {
                             continue;
                         }
-                        acc += (exps[sj] / denom) * v_at(bi, sj, hki, di);
+                        acc += (e / denom) * v_at(bi, sj, hki, di);
                     }
                     out[((bi * sq + si) * h + hi) * d + di] = acc;
                 }
@@ -213,8 +213,7 @@ fn cpu_sdpa_bwd_expanded_gqa(
                     d_i += dout[idx] * out[idx];
                 }
 
-                for sj in 0..sk {
-                    let p = probs[sj];
+                for (sj, &p) in probs.iter().enumerate().take(sk) {
                     if p == 0.0 {
                         continue;
                     }
@@ -1146,7 +1145,7 @@ fn flash_attn_paged_decode_parity() {
             let kp = fill_bf16(total_slots * hk * d, 101 + seqlen_k + hk);
             let vp = fill_bf16(total_slots * hk * d, 211 + seqlen_k + hk);
             // q [b, 1, h, d].
-            let qd = fill_bf16(b * 1 * h * d, 307 + seqlen_k + hk);
+            let qd = fill_bf16(b * h * d, 307 + seqlen_k + hk);
 
             let q = rocm_bf16(&qd, vec![b, 1, h, d]);
             let k_pool = rocm_bf16(&kp, vec![total_slots, hk, d]);
