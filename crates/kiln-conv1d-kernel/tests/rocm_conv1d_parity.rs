@@ -125,9 +125,7 @@ fn conv1d_update_parity_channel_sweep() {
             for ch in 0..c {
                 let srow = (b * c + ch) * (KW - 1);
                 let mut window = [0.0f32; KW];
-                for i in 0..KW - 1 {
-                    window[i] = cs_h[srow + i];
-                }
+                window[..(KW - 1)].copy_from_slice(&cs_h[srow..srow + (KW - 1)]);
                 window[KW - 1] = rt(x_h[b * c + ch]);
                 let mut acc = 0.0f32;
                 for i in 0..KW {
@@ -206,9 +204,7 @@ fn conv1d_prefill_parity_seqlen_sweep() {
                 let srow = bc * (KW - 1);
                 let entry: [f32; KW - 1] = {
                     let mut e = [0.0f32; KW - 1];
-                    for i in 0..KW - 1 {
-                        e[i] = cs_h[srow + i];
-                    }
+                    e.copy_from_slice(&cs_h[srow..srow + (KW - 1)]);
                     e
                 };
                 let mut wrow = [0.0f32; KW];
@@ -217,14 +213,14 @@ fn conv1d_prefill_parity_seqlen_sweep() {
                 }
                 for ti in 0..t {
                     let mut acc = 0.0f32;
-                    for j in 0..KW {
+                    for (j, &w) in wrow.iter().enumerate().take(KW) {
                         let padded = ti + j;
                         let v = if padded < KW - 1 {
                             entry[padded]
                         } else {
                             rt(x_h[bc * t + (padded - (KW - 1))])
                         };
-                        acc += v * wrow[j];
+                        acc += v * w;
                     }
                     reference.push(silu(acc));
                 }
