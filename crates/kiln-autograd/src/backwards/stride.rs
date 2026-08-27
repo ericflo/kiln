@@ -81,7 +81,7 @@ impl BackwardOp for TransposeBackward {
             );
         }
         // Materialise contiguous: the transpose adjoint is a strided view,
-        // but the kt↔candle bridge and kernel-dispatching consumers (e.g.
+        // but the tape bridge and kernel-dispatching consumers (e.g.
         // GdnRecurrentBackward, the trainer GradStore copy) require
         // contiguous storage. Value-preserving; mirrors ReshapeBackward.
         Ok(vec![Some(
