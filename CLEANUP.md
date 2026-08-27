@@ -4969,3 +4969,217 @@ commits `95ed93df8` + `8063c72cf` + `939af6729` + `415e6d86d` +
 `e4c09967b` + `6d83c0e4f` + `2362d3d2b` + `2d383cd4a` + `1e26949b0` +
 `c367f0128` + `245b038c7` + `c88db7b4f` + `c2ad1adcb` + `eb679ba99` +
 this ledger commit.
+
+## Cleanup Agent (round 95)
+
+**Date:** 2026-08-27
+
+**Scope (steered PRIMARY):** the "small-crate bundle" — sweep the stale
+`candle` references in the four remaining unswept crates in inventory
+order (round 88/94 inventory): `crates/kiln-flash-attn` (14 refs),
+`crates/kiln-gdn-kernel` (12), `crates/kiln-conv1d-kernel` (8),
+`crates/kiln-core` (6) — **40 refs total**. Same re-verify-first
+protocol as rounds 90–94: every claim re-checked against the live tree
+before touching it (retired symbols grep-verified absent in the live
+tree and git-history-verified deleted in #1082; live mirror symbols
+grep-verified present; FFI bodies read to verify allocation/dispatch
+claims; kiln-model callers and NVTX ranges grep-verified live). Comment-
+only: zero code lines touched (verified per commit — every changed line
+is a `//`/`///`/`//!`/`#` comment line; frozen test names, FFI symbols,
+and WGSL/PTX/CUDA payloads untouched). One commit per crate (4 commits),
+per-crate verification before each commit.
+
+**HEADLINE NET LINES: −19** (27 insertions / 46 deletions across 6
+files in 4 crates: kiln-flash-attn 6/12 = −6, kiln-gdn-kernel 12/22 =
+−10, kiln-conv1d-kernel 6/9 = −3, kiln-core 3/3 = 0). Like round 94,
+reword-heavy: most of the 40 refs are true #1082 provenance, true
+"candle-free" absence claims, or past-tense removal history — all kept
+per protocol after re-verification. The honest delta is the 22
+wholly-false or dangling-pointer lines (mirrors/links to symbols
+deleted by #1082, a stale `cuda_zeros` claim, a stale "candle CUDA
+device" attribution, and a pointer to a test that no longer exists).
+
+**ADJUDICATION TABLE (all 40 steered refs, each re-verified against
+the current tree; "KEEP" = zero edit, "REWORD" = minimal reword,
+"DELETE" = false/dangling half removed):**
+
+*crates/kiln-flash-attn (net −6; 14 steered refs):*
+
+| file:ref(s) | verdict | evidence / action |
+|---|---|---|
+| src/kt_api.rs:4–6 | KEEP | "The previous candle-typed parallel API … was removed after all kiln-model production callers migrated" — verified: `git show 981dc1905` ("drop candle-typed surface + Cargo dep (#1082)") removed exactly that surface; live `pub use` list is all `_kt`. |
+| src/kt_api.rs:76–84 | **REWRITE** (net −4) | "Mirrors [crate::flash_attn_fwd]" — target **absent** (grep-verified; deleted in 981dc1905) → dangling link; the "Differences" list cited `cuda_zeros`, which **does not exist in kiln-tensor** (grep-verified: live `flash_attn_fwd_kt` allocates via `kiln_kt_bridge::alloc_cuda_tensor`). Kept the true one-for-one #1082-replacement framing + shape contract (verified against the body's FFI dispatch). |
+| src/kt_api.rs:611–613 | **DELETE** (net −2) | "Companion to the candle-typed [crate::flash_attn_paged_decode_dyn_seqlen]" — target **absent** (grep-verified, deleted in 981dc1905) → dangling link + false present-tense companion claim. Kept "Same shape contract:" + the verified bullet list. |
+| src/kt_api.rs:620–624 | KEEP + REWORD (net 0) | "Substrate addition (#1082) that closes the last candle fallback in kiln-model's `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`" — **true** (caller live in `crates/kiln-model/src/backend/cuda.rs`, kt-only; #1082 past-tense). "bottoms out in the same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol" — **true** (verified in both kt entry bodies). Only "as the candle path" (the candle path no longer exists) → "as the sibling kt entry above". |
+| src/kt_api.rs:990 | KEEP | "The candle version calls `.contiguous()` on k/v/slots internally" — **true against history**: the pre-#1082 `paged_kv_write_token_major_bf16_batch_slot` body (git show) called `k.contiguous()`, `v.contiguous()`, `slots.contiguous()`. Explains the kt caller-side contiguity contract. |
+| src/kt_api.rs:1408–1409 | KEEP | "The candle-typed `flash_attn_fwd` / `flash_attn_bwd` were removed … (Phase 7 / #1082). The kt smoke tests in tests/kt_v2_smoke.rs still verify the FFI against real CUDA inputs via the candle-free `kiln_tensor::Tensor::cuda_from_slice`" — all verified: `kt_flash_attn_regression` absent from the live tree; `kt_v2_smoke.rs` is `#![cfg(feature = "cuda")]` and builds inputs via `cuda_from_slice` (live, candle-free constructor at `crates/kiln-tensor/src/tensor.rs:240`). |
+| src/lib.rs:6, 14, 19, 22 | KEEP (4 refs) | "no candle dependency on the public surface" (manifest candle-free, grep-verified), #1082 removal history (981dc1905), `cuda_from_slice` substrate ref (live symbol), "no longer exposes a candle-typed parallel API" (verified) — all true. |
+| Cargo.toml:32–33 | KEEP | "kt-only crate, no candle dep … candle-typed parallel surface was deleted" — manifest + history verified. |
+| tests/kt_v2_smoke.rs:11,16–18,21,99 | KEEP (4 refs) | "no candle_core import" (true: no dev-deps at all), past-tense parity-removal history (verified against 981dc1905), "deleting the candle shell removes shell-only divergence risk" (true: both paths called the same `kiln_paged_kv_write_token_major_bf16_batch_slot` FFI — verified in both bodies), frozen test names. |
+
+*crates/kiln-gdn-kernel (net −10; 12 steered refs):*
+
+| file:ref(s) | verdict | evidence / action |
+|---|---|---|
+| src/kt_api.rs:7 | KEEP | "Phase 7 prep — same pattern as kiln-flash-attn (#1316/#1317) … Rust shell types switch from candle_core::Tensor to kiln_tensor::Tensor" — past-tense #1082 migration provenance; verified (candle surface deleted in 0d99d4e1a). |
+| src/kt_api.rs:480–482 | **REWORD** (net −1) | "(same idiom as the candle-typed wrapper which takes `&mut Tensor`)" — that wrapper was deleted in 0d99d4e1a (#1082, git-history-verified) → dangling historical aside. Kept the true idiom sentence ("the FFI mutates its underlying CUDA buffer through the raw device pointer" — verified against the body). |
+| src/kt_api.rs:3067–3070 | **DELETE** (net −4) | "These mirror the candle-typed `gdn_*_supports` predicates in lib.rs one-for-one … round-tripping back through candle" — **all non-kt `gdn_*_supports` symbols absent from the live tree** (grep-verified; deleted in 60b7ab072/0d99d4e1a) → wholly stale present-tense mirror claim. Section header + the true "All four are pure — no CUDA dispatch, no FFI" lines kept. |
+| src/kt_api.rs:3301–3310 | **REWRITE** (net −1) | Dangling [crate::gdn_decode_gates_recurrent_supports] link (target absent) + "as the candle predicate" (gone). Reworded to past-tense #1082 replacement framing; the envelope list **verified true line-by-line against the `gdn_decode_gates_recurrent_supports_kt` body** (BF16 q/k/a/b/a_log/dt_bias/state, v BF16\|F32, `[B,1,...]` decode shapes, contiguous state, `value_heads % q_heads == 0`). |
+| src/kt_api.rs:3383–3388 | **REWRITE** (net −2) | Dangling [crate::gdn_decode_qk_norm_gates_recurrent_supports] link + "candle predicate" — targets absent (60b7ab072). Kept the **verified true** "q and k may be either BF16 or F32" claim (body: `matches!(q.dtype(), BF16 \| F32)`, `k.dtype() != q.dtype()`) + the valid [gdn_decode_gates_recurrent_supports_kt] link. |
+| src/kt_api.rs:3530–3534 | **REWRITE** (net −1) | Dangling [crate::gdn_gated_rms_norm_supports] link → reworded to the live [gdn_gated_rms_norm_bf16_kt] (grep-verified at kt_api.rs:2058); bullets **verified true against the body** (CUDA + BF16 x/z/weight, `x.shape == z.shape`, hidden == 128, `weight.shape == [hidden]`). |
+| src/kt_api.rs:3605–3608 | **REWORD** (net −2) | "Byte-exact parity vs the candle predicates is implicit: both functions implement the same …" — the candle predicates are **deleted** (60b7ab072) → no parity subject remains. Kept the true test-purpose sentence. |
+| src/lib.rs:15–19 | REWORD (net 0) | "The remaining candle ops in `kiln-model::forward::gdn_chunkwise_recurrence`" — the function is **live** (`crates/kiln-model/src/forward/linear_attention.rs:1084`, grep-verified) but is now kt-typed (its own body: `Tensor` = `kiln_tensor::Tensor`, #1082 Vulkan notes in-line) → "candle ops" stale. Dropped the attribution word; the scope claim (cumsum + decay matrix, KKT/QKT matmuls, `B_mask @ W`, final state update are outside the vendor's scope) kept — it is the function's documented job. |
+| src/lib.rs:23 | KEEP | "Phase 7 closeout (#1082): the candle-typed surface has been removed. All entry points are now kiln-tensor-typed `*_kt` functions" — verified: `pub fn` census of the crate is all `_kt`. |
+| src/lib.rs:451–460 | KEEP | "the candle-typed GDN decode entries … and the with_decode_gates_recurrent_outputs wrapper have been removed" — verified in 60b7ab072 ("delete … candle decode entries (#1082)"); "production path is now the kt-typed surface" verified (kiln-model cuda.rs/rocm.rs dispatch to `gdn_decode_*_kt`). |
+| tests/gates_parity.rs:4,23,134 | KEEP (3 refs) | "replaces the 8-op candle chain in `kiln-model::forward::gated_deltanet_forward` Step 6" — function **live** (`linear_attention.rs:1842`); the kernel is the production path (`cuda.rs:1578`, `rocm.rs:1570`, grep-verified) → true #1082 history. "#1082 candle-free constructor" for `cuda_from_slice` — live + candle-free (verified). |
+| tests/kt_v2_smoke.rs:3,6,40 | KEEP (3 refs) | "Candle-free smoke test … no candle_core import required" / "on candle-free kt CUDA inputs" — all true (imports verified; no candle dev-deps). |
+| tests/gated_rms_norm_parity.rs:4,7,210 | KEEP (3 refs) | "fuses the candle chain … in the `kiln/gdn/gated_norm` NVTX range" — NVTX range **live** (`linear_attention_streaming.rs:1999`); "the candle path's 4D (B,T,H,hidden) collapses to the same row count" — **verified**: the kt API requires 2D `[rows, hidden]` (body at kt_api.rs:2065) and the production caller does `.reshape((rows, hidden))` (cuda.rs:1629). |
+
+*crates/kiln-conv1d-kernel (net −3; 8 steered refs):*
+
+| file:ref(s) | verdict | evidence / action |
+|---|---|---|
+| src/kt_api.rs:4–5 | KEEP | "The former candle-typed `causal_conv1d_update` / `causal_conv1d_prefill` were deleted once every call site migrated" — verified: 577f8b0cb ("drop candle-core from Cargo.toml — first Tier 1 close (#1082)"); kiln-model dispatches `causal_conv1d_update_kt` (grep-verified). |
+| src/kt_api.rs:241–250 | **REWRITE** (net −2) | Dangling [crate::supports] and [crate::supports_update] links — **both targets absent** (only the `_kt` trio exists live: `supports_kt`/`supports_update_kt`/`supports_prefill_kt`). Kept the **verified** "exact bf16/f32/K=4 envelope" claim (checked against the `supports_update_kt` body: `kernel_size != 4 → false`, Cuda\|Rocm device, BF16 x/weight) and the true "Phase 7 (#1082) complete — … candle dep is gone" statement (manifest candle-free). |
+| src/kt_api.rs:259 (adjacent, same class) | REWORD (net +1) | Dangling [crate::supports_update] link in `supports_update_kt`'s doc → past-tense plain-code reference. (Not in the 40-ref steered count; same staleness class, fixed in the same pass.) |
+| src/lib.rs:7–9 | KEEP | "`kiln-model::forward::causal_conv1d_decode` used to express … as a chain of candle ops — ~6 CUDA launches … 12.2% of decode wall-clock" — past-tense "Why" provenance; `causal_conv1d_decode` **live** (`linear_attention.rs:699`) and the `kiln/gdn/conv` NVTX range **live** (`linear_attention_streaming.rs:631`). |
+| src/lib.rs:38–45 | KEEP | "The previous candle-typed `supports*` / `causal_conv1d_*` functions had zero production callers after 2ebcfb08 (cuda.rs migration) and have been removed" — verified (live crate has only the `_kt` surface + FFI externs); "kt smoke tests … via the candle-free cuda_from_slice" — verified. |
+| src/lib.rs:46 | KEEP | "the crate no longer exposes a candle-typed parallel API" — verified (module census). |
+| Cargo.toml:25 | KEEP | "kt-only crate, no candle dep" — manifest verified. |
+| tests/kt_v2_smoke.rs:4 | KEEP | "no candle_core import required" — true (imports verified). |
+| tests/kt_v2_smoke.rs:9–11 | **REWORD** (net −2) | "The legacy BORROW adapter smoke (zero-copy candle→kt round-trip) moved to `crates/kiln-kt-bridge/tests/`" — **stale pointer**: that dir contains only `host_to_cuda_copy.rs` (H2D/D2H round-trip); no borrow-adapter test exists anywhere in the repo (grep-verified) — the zero-copy candle borrow path was removed with #1082. Kept the true "This file tests the kt API in isolation." |
+
+*crates/kiln-core (net 0; 6 steered refs):*
+
+| file:ref(s) | verdict | evidence / action |
+|---|---|---|
+| src/block.rs:359–363 | KEEP | "Relocated here from `kiln_model::paged_kv_cache` during the #1082 candle-drop … (the candle `paged_kv_cache.rs` that previously hosted it was deleted, and its kt replacement is CUDA-only)" — **all three claims verified**: `crates/kiln-model/src/paged_kv_cache.rs` deleted (acb6df7be "#1082 candle-drop big push"); kt replacement `crates/kiln-model/src/paged_kv_cache_kt.rs` is `#[cfg(feature = "cuda")]` (its own header: "It is `cfg(feature = \"cuda\")` — the only"); function body is pure `BlockTable` bookkeeping (no tensor/device deps — read). |
+| src/block.rs:402–403 | KEEP | Same provenance + valid [contiguous_slot_run_start] link (live). |
+| src/block.rs:623, 648 | KEEP (2 refs) | Test-provenance "Relocated from kiln_model::paged_kv_cache during the #1082 candle-drop" — verified as above; test names frozen. |
+| src/device_buffer.rs:29–32 | **REWORD** (net 0, 3/3) | "which owns a `CudaSlice<u8>` allocated on a candle CUDA device" — **stale**: kiln-tensor's `CudaStorage` is candle-free per its own header ("does **not** hold a `candle_core::Tensor` … Phase 7 of #1082 replaced `Arc<CudaDevice>` with a direct `Arc<cudarc::driver::CudaContext>`"). Dropped the attribution; kept the true "same primitive the kt-API kernel crates pull device pointers from" (the `from_slice` FFI seam, per cuda_storage.rs). |
+| Cargo.toml:35 | KEEP | "without any additional candle leakage at the kiln-core API surface" — true (kiln-core manifest has zero candle deps, grep-verified; the #1082 Phase-1 comment about the `Cuda` variant's candle-free storage boundary). |
+
+**ADJUDICATED TOTALS:** of the 40 steered refs: 26 ref-blocks
+adjudicated KEEP (zero edit) after per-claim re-verification, 7
+ref-blocks REWORDed minimally (true half kept, stale attribution or
+dangling pointer removed), 6 ref-blocks DELETEd as wholly false or
+pointing at symbols that no longer exist. Every retired symbol cited
+as evidence was grep-verified absent from the live tree **and**
+git-history-verified deleted by a #1082 commit (981dc1905,
+0d99d4e1a, 60b7ab072, 577f8b0cb, acb6df7be); every live symbol cited
+was grep-verified present.
+
+**NOTICED (report-only — outside the steered bundle, needs its own
+adjudication):** `crates/kiln-gdn-kernel/csrc/*.cu|.h` (5 candle
+comment lines: gdn_chunk_prep.cu:22, gdn_gates.h:19,
+gdn_gated_rms_norm.cu:4, recurrent_gdn_fwd.cu:26,
+gdn_chunk_prep.h:5) are past-tense provenance / reference-path notes
+in the C/CUDA sources — same class as the refs this round kept in
+`src/`, but csrc was not in the round-88 inventory and the bundle was
+steered to the 40 `.rs`/`.toml` refs, so it was left untouched. Also:
+kiln-core's 3 clippy warnings (tokenizer.rs ×2 complex-type, ×1
+too-many-args) are pre-existing and unrelated to this round's
+comment-only change.
+
+**VERIFICATION (all gates green, per crate before each commit):**
+
+- `cargo fmt -p <crate> --check` — clean for all four crates.
+- `cargo test -p kiln-flash-attn --no-default-features` — **2/0/0** lib,
+  0+0 integration, 0 doc (exact match to the pre-round baseline;
+  default-features build fails on missing nvcc/cudarc both before and
+  after — pre-existing environment limit, unchanged).
+- `cargo test -p kiln-gdn-kernel --no-default-features` — **2/0/0** lib,
+  0 in all 5 integration suites, 0 doc (exact baseline match).
+- `cargo test -p kiln-conv1d-kernel --no-default-features` — **0/0/0**
+  in all suites (exact baseline match).
+- `cargo test -p kiln-core` — **103 passed; 0 failed; 3 ignored**, 0 doc
+  (exact baseline match).
+- clippy (per crate, all-targets) — warning sets unchanged from the
+  pre-round builds (all in pre-existing code: flash-attn 4× unused
+  vars + others under no-default-features, kiln-core 3× tokenizer.rs).
+- `python3 scripts/check_repository_artifacts.py` — **passed** after
+  each commit (6697 tracked paths; size drift only).
+- `python3 scripts/check_production_file_budget.py` — **passed** after
+  each commit (647 files, 14 reviewed exceptions — no ceiling touched;
+  all edits were pure deletions/rewords within files).
+- `git diff --numstat df2d73dbe..5e84df5e2` — 27 ins / 46 del = net −19
+  across exactly 6 files; every changed line a comment (verified per
+  commit).
+
+**COMMITS:** `c29d879f2` (kiln-flash-attn, net −6) + `cd2a022a7`
+(kiln-gdn-kernel, net −10) + `3dcf7f0a7` (kiln-conv1d-kernel, net −3)
++ `5e84df5e2` (kiln-core, net 0) + this ledger commit. One commit per
+steered crate, in inventory order, each with its own exact test
+baseline + fmt + clippy + both Python gates.
+
+**ROUND-96 RECOMMENDATION (steered by evidence):**
+
+`crates/kiln-model` is the only remaining candle surface worth a
+campaign: **618 non-"candle-free" refs across 46 `src/` files**
+(grep-verified this round), distributed as: root files 303 refs / 17
+files (tape_forward.rs 100, forward.rs 83, paged_kv_cache_kt.rs 42,
+generate.rs 19, cuda_graph.rs 14, marlin_proj.rs 13, sampling.rs 10,
+kv_cache.rs 5, …), `forward/` family 169 refs / 12 files (model_
+dispatch.rs 32, full_attention.rs 30, primitives.rs 23, tests/mod.rs
+20, linear_attention_streaming.rs 16, …), `backend/` family 146 refs /
+17 files (cuda.rs 37, rocm.rs 33, mod.rs 22, metal_runtime.rs 13,
+vulkan.rs 11, …). Split it into **4 focused rounds** (2–4 per the
+steer), each an independent comment-only adjudication round with its
+own exact test baseline (kiln-model's default-features suite must be
+established in round 96, since rounds 90–95 baselined the other
+crates), per-ref adjudication tables, and the two standing Python
+gates:
+
+1. **Round 96a — the three densest root files** (225 refs / 3 files):
+   `tape_forward.rs` (100), `forward.rs` (83), `paged_kv_cache_kt.rs`
+   (42). Establishes the kiln-model test baseline + clippy baseline
+   once, reusable by 96b–96d.
+2. **Round 96b — the `forward/` family** (169 refs / 12 files):
+   model_dispatch.rs, full_attention.rs, primitives.rs, tests/mod.rs,
+   linear_attention_streaming.rs, training_primitives.rs,
+   weight_loading.rs, linear_attention.rs, lm_head.rs, ffn.rs, + 2.
+3. **Round 96c — the `backend/` family** (146 refs / 17 files):
+   cuda.rs, rocm.rs, mod.rs, metal_runtime.rs, vulkan.rs,
+   vulkan_linear.rs, vulkan_training.rs, + 10.
+4. **Round 96d — the root tail** (~78 refs / 14 files): generate.rs,
+   cuda_graph.rs, marlin_proj.rs, sampling.rs, kv_cache.rs, + the
+   remaining root files (100+83+42+169+146+78 = 618 ✓).
+
+Rationale for this split: it follows the crate's own module
+boundaries (root / forward / backend), so each round touches
+disjoint file sets (no cross-round rework), each round's ref count is
+in the 78–225 range (comparable to the 40-ref bundle that just
+completed in one session), and round 96a amortizes the kiln-model
+baseline cost. If a 3-round schedule is preferred, merge 96d into
+96b (forward/ + root tail, ~247 refs). The csrc comment lines noted
+above (kiln-gdn-kernel csrc, 5 lines) are a candidate for a
+piggyback sweep inside 96a's session if the orchestrator wants them
+in scope.
+
+**Signature:** kiln cleanup agent, round 95 of the CLEANUP.md campaign
+— the steered 40 `candle` refs across kiln-flash-attn (14),
+kiln-gdn-kernel (12), kiln-conv1d-kernel (8), kiln-core (6)
+adjudicated deletion-first with per-claim re-verification against the
+live tree (retired symbols grep-verified absent + git-history-
+verified deleted by #1082 commits 981dc1905 / 0d99d4e1a / 60b7ab072 /
+577f8b0cb / acb6df7be: `crate::flash_attn_fwd`,
+`crate::flash_attn_paged_decode_dyn_seqlen`,
+`crate::paged_kv_write_token_major_bf16_batch_slot`,
+`gdn_*_supports` non-kt, candle `gdn_recurrent_forward`,
+`supports`/`supports_update`, `kiln_model::paged_kv_cache`,
+`cuda_zeros`, the "BORROW adapter" test; live symbols grep-verified
+present: `cuda_from_slice`, `gdn_gated_rms_norm_bf16_kt`,
+`gdn_decode_gates_recurrent_bf16_kt`, `gdn_chunkwise_recurrence`,
+`gated_deltanet_forward`, `causal_conv1d_decode`,
+`runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_
+graph_outputs`, `CudaStorage`, NVTX ranges `kiln/gdn/gated_norm` +
+`kiln/gdn/conv`, kiln-model kt dispatch at cuda.rs:1578/1629/1570);
+HEADLINE NET LINES **−19** (27 ins / 46 del, zero code lines) across
+kiln-flash-attn −6, kiln-gdn-kernel −10, kiln-conv1d-kernel −3,
+kiln-core 0; 26 ref-blocks KEEP, 7 REWORD, 6 DELETE; gates: fmt clean
+×4, tests exact-baseline ×4 (2/0/0 + 2/0/0 + 0/0/0 + 103/0/3), clippy
+unchanged ×4, both Python gates passed ×4, git status clean; commits
+`c29d879f2` + `cd2a022a7` + `3dcf7f0a7` + `5e84df5e2` + this ledger
+commit; round-96 recommendation: split kiln-model (618 refs / 46
+files) into 4 focused rounds by module boundary (root-dense-trio 225,
+forward/ 169, backend/ 146, root-tail 78).
