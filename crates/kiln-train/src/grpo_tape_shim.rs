@@ -7,13 +7,14 @@
 //! backward ROOT: gradients are
 //! driven by walking the kt `kiln_autograd::Tape` from the scalar loss, NOT by
 //! candle's `loss.backward()`. The SFT path roots the tape at
-//! `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (a fused
+//! `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt` (a fused
 //! "scalar CE from full logits" node); OPD roots it at
-//! `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda` (the OPD reverse-KL
+//! `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` (the OPD reverse-KL
 //! scalar node). GRPO needs the same: a single tape node that takes the FULL
 //! `[1, T, V]` policy logits (the tape-connected lm_head output) and produces
 //! the scalar GRPO policy-gradient (+ optional KL) loss, so one `Tape::backward`
-//! routes `dL/d(logits)` back through the model chain into every LoRA `Var`.
+//! routes `dL/d(logits)` back through the model chain into every LoRA
+//! `Parameter`.
 //!
 //! # Why a single fused node (not a chain of primitive tape adapters)
 //!
@@ -61,11 +62,10 @@
 //! lineage from the leaf to the loss, so `grads.get(leaf)` was always `None` and
 //! GRPO training was fully broken — the analytic kt derivation above replaces it.
 //!
-//! The candle `logits` and detached behavior-policy / KL-reference log-probs
-//! are bridged into kt ONCE per backward, and the final `[1, T, V]` grad is
-//! bridged back to candle for the return type
-//! (eliminating those I/O copies is a separate later #1082 task); the gradient
-//! math is otherwise entirely kt on-device.
+//! The logits and the detached behavior-policy / KL-reference log-probs are
+//! kt tensors passed DIRECTLY into the backward (no candle bridge), and the
+//! final `[1, T, V]` grad is returned kt — the gradient math is entirely kt
+//! on-device.
 //!
 //! # ECHO env-CE (resurrection PR2 — COVERED)
 //!
@@ -131,13 +131,14 @@ use kiln_model::backend::GrpoKlAuxiliaryRoute;
 use kiln_autograd::{BackwardOp, Tape, tape_scope_active, with_active_tape};
 
 /// Fused backward for the GRPO scalar PG (+ KL) loss taken from the full
-/// `[1, T, V]` policy logits. Saves the candle `logits` (an `Arc` bump on the
-/// candle storage), the host-side `input_ids` / `action_mask`, the detached
+/// `[1, T, V]` policy logits. Saves the kt `logits` (an `Arc` bump on the kt
+/// storage), the host-side `input_ids` / `action_mask`, the detached
 /// behavior-policy and KL-reference log-probs, and the `GrpoLossParams`. The backward
 /// (#1082 C2) derives `dL/d(logits)` ANALYTICALLY in kt on-device — the
 /// log-softmax JVP `coeff_a · (onehot − softmax)` with a numeric `coeff` from
 /// `grpo_loss` — producing a single `[1, T, V]` kt grad (input count 1). No
-/// candle `Var` / `loss.backward()`; only the candle I/O bridges remain.
+/// candle anywhere: kt logits in, kt grad out (was candle `Var` /
+/// `loss.backward()` + I/O bridges pre-#1082).
 ///
 /// `requires_input` returns `false`: the backward recomputes the forward gather
 /// from the SAVED `logits`, so the tape walker need not re-materialise the input
@@ -2072,11 +2073,11 @@ fn grpo_pg_loss_from_logits_grad_kt(
 /// Attempt to root the GRPO scalar PG (+ KL) loss at a SINGLE fused kt `Tape`
 /// node taking the FULL `[1, T, V]` policy logits.
 ///
-/// Mirrors `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda`
-/// (SFT) and `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD): the
-/// returned candle scalar is a DETACHED, lineage-free value-copy of the loss
-/// (so the tape-authoritative caller's `loss.backward()` is unconditionally
-/// `{loss: ones}` and the recorded node is the sole backward root); the
+/// Mirrors `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt`
+/// (SFT) and `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` (OPD): the
+/// returned kt scalar is a DETACHED, lineage-free value-copy of the loss
+/// (the tape-authoritative caller uses it only for the `loss_val` readback,
+/// and the recorded node is the sole backward root); the
 /// gradient lives on the tape via the recorded `GrpoPgLossFromLogitsBackward`.
 ///
 /// Returns:
@@ -2087,7 +2088,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
 ///   kt borrow failed. The caller must NOT have selected the tape-authoritative
 ///   path if the envelope is unmet (the dispatch device-/ECHO-gates it); this
 ///   surfaces a clean `None` so a misdispatch is caught.
-/// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
+/// * `Err(...)` — an unexpected forward failure.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -2109,7 +2110,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     }
 
     // Full model logits only: [1, T, V] on a GPU device. Defer any other
-    // shape/device to the caller (the dispatch keeps non-GPU on the candle path
+    // shape/device to the caller (the dispatch device-gates this path
     // anyway). (#1082) Vulkan added: the GRPO backward
     // (`grpo_pg_loss_from_logits_grad_kt`) is a device-agnostic pure-kt
     // composite reachable on Vulkan, so the adapter must not decline Vulkan

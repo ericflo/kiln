@@ -702,22 +702,24 @@ pub(super) fn tiled_training_tile_size(
 //   * `exact_gdn_backward_tile_tokens_for`
 
 // `InjectTensorGradient` (struct + impl candle_core::CustomOp1) was
-// deleted as part of the #1082 CP-4 step 2-3 caller flip. All 6 call
-// sites in `full_attention_single_layer_tiled_mlp_reverse` now use
-// `kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim` which
-// produces a bit-equivalent candle Tensor (the shim's `bwd` returns
-// the precomputed `upstream`, byte-for-byte matching the previous
-// in-trainer impl). With this deletion, `kiln-train::trainer` has
-// zero production `candle_core::CustomOp1` impls and the crate's
-// `candle-core` dep can move to `[dev-dependencies]`. See commits
-// e2f8723c (substrate revision), 07afd64a (IO mapping removal),
+// deleted as part of the #1082 CP-4 step 2-3 caller flip. At the time,
+// all 6 call sites in `full_attention_single_layer_tiled_mlp_reverse`
+// used `kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim`,
+// which produced a bit-equivalent candle Tensor (the shim's `bwd`
+// returned the precomputed `upstream`, byte-for-byte matching the
+// previous in-trainer impl); both that dispatcher and the inject shim
+// were later deleted in the candle drop. With the `InjectTensorGradient`
+// deletion, `kiln-train::trainer` had zero production
+// `candle_core::CustomOp1` impls, which let the `candle-core` dep move
+// to `[dev-dependencies]` and later leave the manifest entirely. See
+// commits e2f8723c (substrate revision), 07afd64a (IO mapping removal),
 // a6531830 (shim hoist), and the InjectTensorGradient flip
 // commit itself. (#1082)
 
 /// (#1082) Whether the kt tape grad-delivery path supports this base model's
 /// dtype on this device. The decisive dtype is the **activation** dtype, which
-/// follows the BASE model weights (`embed_tokens` dtype) — NOT the LoRA Vars,
-/// which now FOLLOW the base dtype (see `initialize_seeded`).
+/// follows the BASE model weights (`embed_tokens` dtype) — NOT the LoRA
+/// parameters, which now FOLLOW the base dtype (see `initialize_seeded`).
 ///
 /// BF16 is supported by the kt tape adapters. F32 is supported only when the
 /// backend-owned precision policy declares F32 activations for mixed base

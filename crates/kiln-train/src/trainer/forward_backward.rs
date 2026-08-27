@@ -7,7 +7,7 @@ use super::*;
 /// candle `loss.backward()` GradStore-container hack and WITHOUT the per-grad
 /// `kt -> candle` copy.
 ///
-/// The kt grads produced by `with_tape_authoritative_scope` are the
+/// The kt grads produced by `with_tape_authoritative_scope_kt` are the
 /// authoritative output; they are inserted as-is (the kt `loss` is read only
 /// for the `loss_val` scalar). The optimizer consumes them kt-native
 /// (`optimizer_step_from_kt_grad_store`, Inc-0 PR3) — the candle per-Var

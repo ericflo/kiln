@@ -63,9 +63,9 @@ use anyhow::{Context, Result};
 /// CONNECTED kt `hidden` (an already-recorded tape node output — the final
 /// RMSNorm), so recording the OPD scalar loss against it roots
 /// `dL/d(hidden)` straight on the model tape with NO candle id-mapping dance.
-/// Only the SCALAR loss crosses back to candle (≈4 bytes) so the
-/// tape-authoritative scope (`with_tape_authoritative_scope`) can resolve
-/// `loss.id()` → `loss_kt` and seed `dL/dL = 1`.
+/// The SCALAR loss stays kt: the tape-authoritative scope
+/// (`with_tape_authoritative_scope_kt`) seeds `dL/dL = 1` directly at
+/// `loss_kt.id()` (no kt→candle copy, no output IO mapping).
 ///
 /// Replaces the candle-shim caller's `normed`→`normed_candle` retain dance and
 /// the per-run `head_t`→`head_t_candle` copy in
@@ -75,11 +75,11 @@ use anyhow::{Context, Result};
 /// inputs, the bridge is gone.
 ///
 /// Returns:
-/// * `Ok(Some(out))` — the scalar tape path ran. The returned candle scalar
-///   `Tensor` is a value-identical copy of the kt-tape loss (no candle autograd
-///   lineage — the gradient lives on the tape); the backward node was recorded
-///   on the active thread-local tape and the output IO mapping + retained
-///   output were registered for the bridge.
+/// * `Ok(Some(out))` — the scalar tape path ran. The returned kt scalar
+///   `Tensor` is a value-identical, lineage-free readback of the kt-tape loss
+///   (the gradient lives on the tape); the backward node was recorded
+///   on the active thread-local tape (no output IO mapping — nothing is
+///   bridged).
 /// * `Ok(None)` — no thread-local tape scope is active, the active set was
 ///   empty, or the kt envelope rejected the inputs.
 ///   The caller surfaces this as a clean error (the dispatch should not have

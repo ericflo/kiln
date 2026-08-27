@@ -1519,7 +1519,7 @@ struct PreparedOpdKernelInputs {
 }
 
 /// Run the per-step teacher fetch + mask/`top_k` resolution shared by the
-/// candle and tape-authoritative OPD paths.
+/// `opd_step_loss`, tape-authoritative, and checkpointed tape OPD paths.
 fn prepare_opd_kernel_inputs(
     tokens: &[u32],
     active_positions: &[usize],
@@ -4760,7 +4760,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                     // Tape-authoritative kt path (the ONLY path post-candle-drop):
                     // drive gradients through the kt `Tape`, never candle
                     // `loss.backward()`. Runs a SINGLE full forward
-                    // (`model_forward_no_head`) inside `with_tape_authoritative_scope`
+                    // (`model_forward_no_head`) inside `with_tape_authoritative_scope_kt`
                     // so the LoRA adapters record their nodes, then roots the tape at
                     // the scalar OPD loss (`try_tape_opd_scalar_mean_cuda_kt`, taking
                     // kt `normed`/`head_t` directly) and walks the connected tape with
@@ -4880,11 +4880,10 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                 )?;
 
                                 // Consume the kt-native grads DIRECTLY (no kt→candle
-                                // copy): `optimizer_step_from_kt_grad_store` bridges each
-                                // LoRA Var's grad at its own per-Var boundary inside the
-                                // optimizer update, the last remaining candle dependency
-                                // in the OPD grad path (dissolves when `kiln-optim` goes
-                                // kt-native).
+                                // copy): `optimizer_step_from_kt_grad_store` is
+                                // kt-native end-to-end (kt master + kt moments), so
+                                // there is no candle dependency left in the OPD grad
+                                // path.
                                 crate::trainer::optimizer_step_from_kt_grad_store(
                                     &*backend_rt,
                                     &mut params,
@@ -5112,7 +5111,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
 ///
 /// Mirrors `trainer::standard_forward_backward_tape_authoritative` (the SFT
 /// precedent): runs the full forward + scalar OPD loss inside
-/// `with_tape_authoritative_scope`, seeds `dL/dL = 1` at the loss, walks the
+/// `with_tape_authoritative_scope_kt`, seeds `dL/dL = 1` at the loss, walks the
 /// connected kt `Tape` (NO candle `loss.backward()`), and extracts the
 /// per-LoRA-param grads into a kt-native `kiln_autograd::GradStore` the
 /// optimizer step consumes DIRECTLY.
@@ -5129,13 +5128,11 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
 /// Returns `(loss_val, active_count, grads)`, where `grads` is a kt-native
 /// `kiln_autograd::GradStore` keyed by `KtTensorId`. (#1082 high-perf) The
 /// per-step kt→candle grad copy was DROPPED: the kt grads are inserted as-is
-/// and consumed by `optimizer_step_from_kt_grad_store`, which bridges each LoRA
-/// Var's grad to candle only at its own per-Var optimizer boundary (the last
-/// candle dependency in the OPD grad path, dissolving when `kiln-optim` goes
-/// kt-native). Mirrors SFT's `standard_forward_backward_tape_authoritative_kt`.
+/// and consumed by `optimizer_step_from_kt_grad_store`, which is kt-native
+/// end-to-end (kt master + kt moments — no candle bridge anywhere in the
+/// OPD grad path). Mirrors SFT's `standard_forward_backward_tape_authoritative_kt`.
 ///
-/// CUDA + Metal: the tape adapters record kt GPU ops + bridge kt<->candle GPU
-/// tensors. The caller device-gates this via
+/// CUDA + Metal: the tape adapters record kt GPU ops. The caller device-gates this via
 /// `#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]`. (#1082 Metal lane) On
 /// Metal the FORWARD + scalar OPD loss record onto the tape; the recorded OPD
 /// backward (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and
@@ -5224,9 +5221,9 @@ fn opd_step_forward_backward_tape_authoritative(
             // is already a recorded tape node id, the loss roots on it and the
             // tape stays connected back through the LoRA chain natively (mirrors
             // the SFT H6 CE-from-logits-kt path, which records against the
-            // connected kt logits id). Returns a detached candle scalar (value
-            // only, registered for the scope to seed); the gradient lives on the
-            // tape.
+            // connected kt logits id). Returns a detached kt scalar (value
+            // only, used for the `loss_val` readback); the gradient lives on
+            // the tape.
             let loss_candidate = match opd_loss_route {
                 #[cfg(feature = "vulkan")]
                 OpdLossRoute::VulkanActiveHidden => {
@@ -5321,24 +5318,24 @@ fn opd_step_forward_backward_tape_authoritative(
 
     // (#1082 high-perf) Build a kt-native `kiln_autograd::GradStore` DIRECTLY
     // from the tape grads — NO per-step kt→candle grad copy. The kt grads are
-    // inserted as-is, keyed by each LoRA Var's id bridged into the kt id space
-    // (`KtTensorId::from_raw(var.id().as_raw() as u64)` == `cd_tensor_id_to_kt`),
-    // matching the `KtTensorId`-keyed `OptimizerState.moments` so
+    // inserted as-is, keyed by each LoRA `Parameter`'s kt id
+    // (`Parameter::tensor_id().as_raw()`),
+    // matching the `TensorId`-keyed `OptimizerState.moments` so
     // `optimizer_step_from_kt_grad_store` looks each grad up under the same key.
-    // The single per-Var kt→candle bridge now happens inside the optimizer step
-    // (its master/moments are still candle until `kiln-optim` goes kt-native),
-    // not here. Mirrors SFT's `standard_forward_backward_tape_authoritative_kt`.
+    // The optimizer step is kt-native end-to-end (kt master + kt moments), so
+    // there is no kt→candle bridge anywhere in this path. Mirrors SFT's
+    // `standard_forward_backward_tape_authoritative_kt`.
     // (#1082) `all_vars()` -> `all_params()` (LoRA params are
     // `kiln_param::Parameter` now, not candle `Var`s); each param's stable kt
     // id is `Parameter::tensor_id().as_raw()` (`u64`). Mirrors SFT's
     // `standard_forward_backward_tape_authoritative_kt`.
     let mut grads = kiln_autograd::GradStore::new();
     for (candle_raw, kt_grad) in grads_by_candle_raw {
-        // The tape `out` map mixes candle-keyed deposits (frozen base /
+        // The tape `out` map mixes untagged deposits (frozen base /
         // activations) with namespace-tagged kt-param deposits (the LoRA leaves,
         // via `register_input_mapping_kt`). Only tagged keys are LoRA-param
         // grads; `decode_kt_param_deposit` strips the tag → the param's kt id,
-        // and rejects candle ids that happen to collide with a param id
+        // and rejects untagged ids that happen to collide with a param id
         // (independent counters, both start at 1 — the #1082 grad-shape bug).
         let Some(param_raw) =
             kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
@@ -5852,11 +5849,10 @@ mod tests {
         FixtureLogitSource, LogitSourceCaps, LogitSourceError, TopKLogprobs,
     };
     // (#1082) Test-mod `Tensor` / `DType` / `Device` references go through
-    // `crate::cd_types::*` rather than naming `candle_core::` directly, so
-    // adding more tests does not regrow the per-file candle ref count. The
-    // candle dep itself is still blocked on the kt-typed OPD forward
-    // surface migrating off candle `Tensor` in the public API — see the
-    // module-level note above.
+    // `crate::cd_types::*` rather than naming a specific tensor crate directly,
+    // so adding more tests does not regrow the per-file ref count. The
+    // crate-level candle deps are gone (see the module-level note above);
+    // the `cd_types` aliases are kt-pinned.
     use kiln_core::tokenizer::KilnTokenizer;
 
     fn opd_test_runtime(
@@ -8006,8 +8002,9 @@ mod tests {
         use crate::trainer::TrainableLoraParams;
         use crate::trainer::tests::{tiny_config_bf16, tiny_weights_bf16};
 
-        // `Device` is the per-crate candle facade alias (= candle_core::Device);
-        // opd.rs keeps its `candle_core::` ref count at 0 by going through it.
+        // `Device` is the per-crate kt facade alias (= kiln_tensor::Device);
+        // going through `cd_types` keeps this test free of direct crate
+        // imports.
         if !kiln_tensor::probe::cuda_is_available() {
             eprintln!("opd tape-authoritative grads (bf16): no CUDA device — skipping");
             return;

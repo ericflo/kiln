@@ -1109,10 +1109,11 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
         // kt tape-authoritative. The candle gradient-checkpointed GRPO reverse
         // (`checkpointed_grpo_forward_backward` + analytic ECHO tail), the
         // candle tape-bridge producer, and the inline candle `loss.backward()`
-        // path are all DELETED. ECHO env-CE has no kt tape root, so an
-        // ECHO-active GRPO step is not supported on the kt-only path (the
-        // candle ECHO term was a candle-authoritative feature dropped in the
-        // candle drop). `grpo_step_forward_backward_tape_authoritative_kt`
+        // path are all DELETED. ECHO env-CE has since been resurrected on the
+        // kt tape (resurrection PR2): when the term is enabled and the
+        // completion has env rows, an `EchoEnvSpec` is folded into the fused
+        // loss root below (λ·env_CE in the value + constant-coefficient env
+        // rows in the gradient). `grpo_step_forward_backward_tape_authoritative_kt`
         // returns `GradSource::Kt`, consumed kt-native by the dispatchers.
         // Assigned/read only inside the GPU-feature branch (and the code after
         // the non-GPU `unreachable!` guard); kept declared here so both builds
