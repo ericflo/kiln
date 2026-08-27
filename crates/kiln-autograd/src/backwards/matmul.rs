@@ -182,7 +182,7 @@ mod tests {
         let row = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let a_data: Vec<f32> = row.iter().chain(row.iter()).copied().collect();
         let b_data: Vec<f32> = row.iter().chain(row.iter()).copied().collect();
-        let dc_data: Vec<f32> = std::iter::repeat(1.0f32).take(8).collect();
+        let dc_data: Vec<f32> = std::iter::repeat_n(1.0f32, 8).collect();
         let a = Tensor::from_slice(&a_data, vec![2, 2, 3]).unwrap();
         let b = Tensor::from_slice(&b_data, vec![2, 3, 2]).unwrap();
         let dc = Tensor::from_slice(&dc_data, vec![2, 2, 2]).unwrap();
@@ -196,16 +196,14 @@ mod tests {
 
         // Per-batch da should equal the 2D answer: [3, 7, 11, 3, 7, 11].
         let da_v = read_f32(da);
-        let expected_da: Vec<f32> = std::iter::repeat([3.0f32, 7.0, 11.0, 3.0, 7.0, 11.0])
-            .take(2)
+        let expected_da: Vec<f32> = std::iter::repeat_n([3.0f32, 7.0, 11.0, 3.0, 7.0, 11.0], 2)
             .flatten()
             .collect();
         assert_eq!(da_v, expected_da);
 
         // Per-batch db should equal: [5, 5, 7, 7, 9, 9].
         let db_v = read_f32(db);
-        let expected_db: Vec<f32> = std::iter::repeat([5.0f32, 5.0, 7.0, 7.0, 9.0, 9.0])
-            .take(2)
+        let expected_db: Vec<f32> = std::iter::repeat_n([5.0f32, 5.0, 7.0, 7.0, 9.0, 9.0], 2)
             .flatten()
             .collect();
         assert_eq!(db_v, expected_db);

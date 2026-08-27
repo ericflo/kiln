@@ -239,7 +239,16 @@ impl BackwardOp for GeluBackward {
         validate_same(&self.x, grad_output, "GeluBackward")?;
         let x = load_f32(&self.x)?;
         let dy = load_f32(grad_output)?;
-        const C: f32 = 0.7978845608_f32; // √(2/π)
+        // √(2/π) — the standard tanh-approximation GELU constant, kept as
+        // the 10-digit decimal literal: it is bit-identical to the
+        // `(2.0_f64 / std::f64::consts::PI).sqrt() as f32` closed form
+        // (verified: both produce f32 bits 0x3F4C422A; the native f32
+        // computation is 1 ULP lower), but that closed form is not
+        // const-evaluable (f64::sqrt is not const) and a `let` binding
+        // would trip non_snake_case. Same constant + handling as the
+        // kiln-tensor round-19 documented precedent.
+        #[allow(clippy::excessive_precision)]
+        const C: f32 = 0.7978845608_f32;
         let dx: Vec<f32> = x
             .iter()
             .zip(dy.iter())

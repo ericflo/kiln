@@ -193,7 +193,6 @@ mod tests {
         let eps = 1e-6f32;
         let x = Tensor::from_slice(&x_data, vec![1, 4]).unwrap();
         let w = Tensor::from_slice(&w_data, vec![4]).unwrap();
-        let b = Tensor::from_slice(&b_data, vec![4]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32; 4], vec![1, 4]).unwrap();
         let bo = LayerNormBackward {
             x: x.clone(),
@@ -229,7 +228,6 @@ mod tests {
         let eps = 1e-6f32;
         let x = Tensor::from_slice(&x_data, vec![1, 4]).unwrap();
         let w = Tensor::from_slice(&w_data, vec![4]).unwrap();
-        let b = Tensor::from_slice(&b_data, vec![4]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32; 4], vec![1, 4]).unwrap();
         let bo = LayerNormBackward {
             x: x.clone(),
@@ -262,7 +260,7 @@ mod tests {
     fn layernorm_backward_db_is_summed_grad() {
         // db[k] = Σ_rows G[r, k]. For dy=ones across a [3, 4] batch,
         // db = [3, 3, 3, 3].
-        let x = Tensor::from_slice(&vec![1.0f32; 12], vec![3, 4]).unwrap();
+        let x = Tensor::from_slice(&[1.0f32; 12], vec![3, 4]).unwrap();
         let w = Tensor::from_slice(&[1.0f32; 4], vec![4]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32; 12], vec![3, 4]).unwrap();
         let bo = LayerNormBackward {

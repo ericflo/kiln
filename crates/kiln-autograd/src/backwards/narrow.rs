@@ -55,21 +55,18 @@ impl BackwardOp for NarrowBackward {
             );
         }
         let g_shape = grad_output.shape();
-        for d in 0..rank {
+        // Both shape vectors have length `rank` (validated above: grad rank ==
+        // source rank), so the zip pairs are exhaustive.
+        for (d, (&g, &s)) in g_shape.iter().zip(self.source_shape.iter()).enumerate() {
             if d == self.axis {
-                if g_shape[d] != self.length {
+                if g != self.length {
                     bail!(
-                        "NarrowBackward: grad shape[{d}] = {} != length {}",
-                        g_shape[d],
+                        "NarrowBackward: grad shape[{d}] = {g} != length {}",
                         self.length
                     );
                 }
-            } else if g_shape[d] != self.source_shape[d] {
-                bail!(
-                    "NarrowBackward: grad shape[{d}] = {} != source shape[{d}] = {}",
-                    g_shape[d],
-                    self.source_shape[d]
-                );
+            } else if g != s {
+                bail!("NarrowBackward: grad shape[{d}] = {g} != source shape[{d}] = {s}");
             }
         }
         let source_axis_len = self.source_shape[self.axis];

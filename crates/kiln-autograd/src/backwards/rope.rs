@@ -70,7 +70,7 @@ impl BackwardOp for RopeBackward {
                 self.rotary_dim
             );
         }
-        if self.rotary_dim % 2 != 0 {
+        if !self.rotary_dim.is_multiple_of(2) {
             bail!(
                 "RopeBackward: rotary_dim must be even, got {}",
                 self.rotary_dim
@@ -264,7 +264,6 @@ mod tests {
         let cos = Tensor::from_slice(&[cos_val], vec![1, 1]).unwrap();
         let sin = Tensor::from_slice(&[sin_val], vec![1, 1]).unwrap();
         let x_data = vec![3.0f32, 5.0];
-        let x = Tensor::from_slice(&x_data, vec![1, 2]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32, 1.0], vec![1, 2]).unwrap();
         let bo = RopeBackward {
             rotary_dim: 2,

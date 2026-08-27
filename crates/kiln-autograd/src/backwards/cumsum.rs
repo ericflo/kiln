@@ -204,7 +204,6 @@ mod tests {
     fn cumsum_backward_finite_difference() {
         use kiln_tensor::ops::cumsum;
         let x_data = vec![1.5f32, -2.0, 3.3, 0.7];
-        let x = Tensor::from_slice(&x_data, vec![4]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32; 4], vec![4]).unwrap();
         let bo = CumsumBackward {
             axis: 0,
