@@ -775,11 +775,10 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
     // cached fused transpose, or its silu*mul kernel declined) and there
     // is no MLP LoRA / Marlin, route the entire gate/up/down + silu*mul
     // region through the kt substrate keeping intermediates as kt storage
-    // (one borrow-in, one copy-out) instead of the per-op candle↔kt
-    // round-trips the legacy `swiglu_ffn_split_gate_up` path pays. Returns
-    // `None` on any incompatibility (tape scope, tracked input, dtype, …)
-    // so the legacy path below runs unchanged. Gated default-on with
-    // escape hatch `accelerator.kt_api_mode = "disabled"`.
+    // (one borrow-in, one copy-out). Returns `None` on any incompatibility
+    // (tape scope, tracked input, dtype, …) so the legacy path below runs
+    // unchanged. Gated default-on with escape hatch
+    // `accelerator.kt_api_mode = "disabled"`.
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !has_mlp_lora && !has_marlin {
