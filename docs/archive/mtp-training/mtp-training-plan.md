@@ -1,5 +1,17 @@
 # MTP Training Plan — keep the draft head aligned with the tuned model
 
+> **Archived 2026-08-26 — plan landed.** PR-A shipped at `dc6b8df44`
+> (#1508) and PR-B is implemented in the live tree: `run_mtp_alignment_phase`
+> (crates/kiln-train/src/trainer/reporting.rs) runs from `sft_train`
+> (crates/kiln-train/src/trainer/sft.rs), per-adapter draft-acceptance
+> counters + `/v1/stats/mtp-acceptance` landed at `195e52122` (#1530), and
+> operator validation drove `406161719` (#1516). The three
+> "Follow-ups after PR-B" items (GRPO/OPD runs getting the same phase;
+> `kiln self-improve` auto-including MTP alignment once the agent-traces
+> bridge resolves prompts; the dashboard view) remain the owner's open
+> workstream and are retained in the document below. See
+> [`README.md`](README.md).
+
 **Status:** PR-A (serving + adapter format) shipped (#1508). PR-B
 (training) IMPLEMENTED: `run_mtp_alignment_phase` in `sft_train` —
 auto-on when the checkpoint ships `mtp.*` tensors (`train_mtp: false`
