@@ -41,14 +41,6 @@ kiln-openenv = { workspace = true }
 kiln-resource = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-tensor = { workspace = true }
-# Pure `candle <-> kt` Device/DType enum-mapping helpers are
-# always-on so the multi-backend src/ code (Linux/default,
-# Linux/Vulkan, macOS/Metal) can call the kt-typed entries on
-# kiln-model's public surface (`for_device_kt`, `device_kt`,
-# `PagedKvCache::new_kt`, `GpuWeights::from_model_weights_kt`)
-# without a CUDA toolchain. The `cuda` feature is forwarded under
-# kiln-server's `cuda` to pull in the CUDA-specific helpers. (#1082)
-kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 kiln-train = { workspace = true }
 axum = { workspace = true }
 socket2 = { workspace = true }
@@ -87,12 +79,12 @@ regex = "1"
 half = "2"
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "kiln-kt-bridge/cuda"]
+cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda"]
 # ROCm backend (R.4) — mirrors `cuda`. Adds Device::Rocm selection in
 # kiln-server's device.rs (R.9 wires the runtime probe).
-rocm = ["kiln-model/rocm", "kiln-tensor/rocm", "kiln-train/rocm", "kiln-kt-bridge/rocm"]
-metal = ["kiln-model/metal", "kiln-tensor/metal", "kiln-kt-bridge/metal", "kiln-train/metal"]
-vulkan = ["kiln-model/vulkan", "kiln-tensor/vulkan", "kiln-train/vulkan", "kiln-kt-bridge/vulkan"]
+rocm = ["kiln-model/rocm", "kiln-tensor/rocm", "kiln-train/rocm"]
+metal = ["kiln-model/metal", "kiln-tensor/metal", "kiln-train/metal"]
+vulkan = ["kiln-model/vulkan", "kiln-tensor/vulkan", "kiln-train/vulkan"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges
 # under nsys for per-call-site attribution. No effect without --features cuda.
 nvtx = ["kiln-model/nvtx"]
