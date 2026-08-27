@@ -6903,7 +6903,7 @@ fn test_causal_conv1d_update_matches_fallback() -> Result<()> {
     let kernel_size = 4usize;
 
     let mut rng = StdRng::seed_from_u64(0xC0_1DBEEF);
-    let n_x = batch * channels * 1;
+    let n_x = batch * channels;
     let n_w = channels * kernel_size;
     let n_s = batch * channels * (kernel_size - 1);
 
