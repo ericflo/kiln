@@ -2796,15 +2796,11 @@ mod tests {
     }
 
     fn upload_f32_slice(vk_device: &VulkanDevice, data: &[f32]) -> anyhow::Result<VulkanBuffer> {
-        Ok(crate::kernels::upload_f32_buffer_from_slice(
-            vk_device, data,
-        )?)
+        crate::kernels::upload_f32_buffer_from_slice(vk_device, data)
     }
 
     fn upload_bf16_slice(vk_device: &VulkanDevice, data: &[bf16]) -> anyhow::Result<VulkanBuffer> {
-        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(
-            vk_device, data,
-        )?)
+        crate::kernels::upload_bf16_packed_buffer_from_slice(vk_device, data)
     }
 
     fn upload_u32_buffer(vk_device: &VulkanDevice, data: &[u32]) -> anyhow::Result<VulkanBuffer> {
@@ -3532,7 +3528,7 @@ mod tests {
         let head_dim = 32;
         let max_seqlen = 8;
         let softmax_scale = (head_dim as f32).sqrt().recip();
-        let q: Vec<f32> = (0..batch * 1 * num_heads * head_dim)
+        let q: Vec<f32> = (0..batch * num_heads * head_dim)
             .map(|i| (i as f32 * 0.013) - 1.0)
             .collect();
         let k: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
@@ -3908,9 +3904,9 @@ mod tests {
         let mut expected_k_pool = vec![0f32; pool_n];
         let mut expected_v_pool = vec![0f32; pool_n];
         let elems_per_slot = num_kv_heads * head_dim;
-        for row in 0..batch {
+        for (row, slot) in slots.iter().take(batch).enumerate() {
             let src = row * elems_per_slot;
-            let dst = slots[row] as usize * elems_per_slot;
+            let dst = *slot as usize * elems_per_slot;
             expected_k_pool[dst..dst + elems_per_slot]
                 .copy_from_slice(&expected_k_rows[src..src + elems_per_slot]);
             expected_v_pool[dst..dst + elems_per_slot]
@@ -4482,28 +4478,25 @@ mod tests {
         for h in 0..num_heads {
             let kv_h = h * num_kv_heads / num_heads;
             // Logits per timestep.
-            let mut logits = vec![0.0f32; seq_len];
-            for t in 0..seq_len {
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    let q_idx = h * head_dim + d;
-                    let k_idx = t * num_kv_heads * head_dim + kv_h * head_dim + d;
-                    dot += q_data[q_idx] * k_data[k_idx];
-                }
-                logits[t] = dot * softmax_scale;
-            }
+            let logits: Vec<f32> = (0..seq_len)
+                .map(|t| {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        let q_idx = h * head_dim + d;
+                        let k_idx = t * num_kv_heads * head_dim + kv_h * head_dim + d;
+                        dot += q_data[q_idx] * k_data[k_idx];
+                    }
+                    dot * softmax_scale
+                })
+                .collect();
             let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut exps = vec![0.0f32; seq_len];
-            let mut z = 0.0f32;
-            for t in 0..seq_len {
-                exps[t] = (logits[t] - max_l).exp();
-                z += exps[t];
-            }
+            let exps: Vec<f32> = logits.iter().map(|l| (l - max_l).exp()).collect();
+            let z: f32 = exps.iter().sum();
             for d in 0..head_dim {
                 let mut acc = 0.0f32;
-                for t in 0..seq_len {
+                for (t, e) in exps.iter().enumerate() {
                     let v_idx = t * num_kv_heads * head_dim + kv_h * head_dim + d;
-                    acc += (exps[t] / z) * v_data[v_idx];
+                    acc += (e / z) * v_data[v_idx];
                 }
                 expected[h * head_dim + d] = acc;
             }

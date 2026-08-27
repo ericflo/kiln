@@ -1332,12 +1332,12 @@ mod tests {
         let device_local_allocation_size = device_local.allocation_size;
         let host_visible_allocation_size = host_visible.allocation_size;
         let live = allocation_stats();
-        assert!(live.live_device_local_buffers >= before.live_device_local_buffers + 1);
-        assert!(live.live_host_visible_buffers >= before.live_host_visible_buffers + 1);
+        assert!(live.live_device_local_buffers > before.live_device_local_buffers);
+        assert!(live.live_host_visible_buffers > before.live_host_visible_buffers);
         assert!(live.live_device_local_bytes >= before.live_device_local_bytes + 17);
         assert!(live.live_host_visible_bytes >= before.live_host_visible_bytes + 19);
-        assert!(live.device_local_allocations >= before.device_local_allocations + 1);
-        assert!(live.host_visible_allocations >= before.host_visible_allocations + 1);
+        assert!(live.device_local_allocations > before.device_local_allocations);
+        assert!(live.host_visible_allocations > before.host_visible_allocations);
         assert!(
             live.device_local_allocated_bytes
                 >= before.device_local_allocated_bytes + device_local_allocation_size
@@ -1350,8 +1350,8 @@ mod tests {
         drop(device_local);
         drop(host_visible);
         let after = allocation_stats();
-        assert!(after.device_local_frees >= live.device_local_frees + 1);
-        assert!(after.host_visible_frees >= live.host_visible_frees + 1);
+        assert!(after.device_local_frees > live.device_local_frees);
+        assert!(after.host_visible_frees > live.host_visible_frees);
         assert!(
             after.device_local_freed_bytes
                 >= live.device_local_freed_bytes + device_local_allocation_size

@@ -650,8 +650,7 @@ pub fn flce_recommended_chunk_len_from_limits(
         .min(by_memory)
         .min(by_dispatch)
         .max(FLCE_MIN_CHUNK);
-    let safe = floor_power_of_two(raw).max(FLCE_MIN_CHUNK).min(vocab);
-    safe
+    floor_power_of_two(raw).max(FLCE_MIN_CHUNK).min(vocab)
 }
 
 pub fn flce_recommended_chunk_len(

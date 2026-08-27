@@ -557,7 +557,7 @@ pub fn vk_gdn_chunk_prep_bwd_cpu_reference(
     let mut d_ks_entry = vec![0.0_f32; batch * nv * chunk * dv];
     let mut d_q_s = vec![0.0_f32; batch * nv * chunk * dv];
 
-    for bh in 0..batch * nv {
+    for (bh, dpl_ref) in dpl.iter().enumerate().take(batch * nv) {
         let cv_base = bh * chunk * dv;
         let cc_base = bh * chunk * chunk;
         let c_base = bh * chunk;
@@ -629,7 +629,7 @@ pub fn vk_gdn_chunk_prep_bwd_cpu_reference(
         }
 
         // ---- p_last branch: p_last = exp(G[C-1])
-        let dpl_v = dpl[bh];
+        let dpl_v = *dpl_ref;
         d_g[c_base + chunk - 1] += p[chunk - 1] * dpl_v;
 
         // d_g currently holds dG[t]. Reverse-cumsum to get dg[t]:
@@ -642,9 +642,7 @@ pub fn vk_gdn_chunk_prep_bwd_cpu_reference(
             acc_g += d_g[c_base + t];
             tmp[t] = acc_g;
         }
-        for t in 0..chunk {
-            d_g[c_base + t] = tmp[t];
-        }
+        d_g[c_base..c_base + chunk].copy_from_slice(&tmp);
     }
 
     Ok((

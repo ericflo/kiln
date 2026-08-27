@@ -4542,7 +4542,7 @@ pub fn dispatch_paged_attn_decode_batch_f32_bytes(
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     anyhow::ensure!(
-        q_data_in.len() == batch * 1 * num_heads * head_dim * 4,
+        q_data_in.len() == batch * num_heads * head_dim * 4,
         "paged_attn_decode_batch: q bytes {} mismatch expected {}",
         q_data_in.len(),
         batch * num_heads * head_dim * 4,
@@ -4739,7 +4739,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
         batch * max_blocks_per_seq
     );
     anyhow::ensure!(
-        q_data_in.len() == batch * 1 * num_heads * head_dim * 4,
+        q_data_in.len() == batch * num_heads * head_dim * 4,
         "paged_attn_decode_batch_paged: q bytes {} mismatch expected {}",
         q_data_in.len(),
         batch * num_heads * head_dim * 4,
@@ -9199,7 +9199,6 @@ pub fn dispatch_gdn_recurrent_step_with_options_bytes(
 /// returns it. Later calls can pass that buffer back and avoid the full state
 /// upload/readback pair; only the small recurrent output is copied to the CPU.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
     vk_device: &VulkanDevice,
     q_data: &[u8],
@@ -9458,7 +9457,6 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
 /// Dispatch a native-head single-token recurrent step while keeping `state`
 /// resident. `q`/`k` are `[batch, 1, q_heads, dk]`; value-side tensors and
 /// state use `heads`.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     vk_device: &VulkanDevice,

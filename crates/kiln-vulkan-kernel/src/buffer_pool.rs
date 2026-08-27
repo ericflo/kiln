@@ -304,17 +304,16 @@ pub fn pool_alloc_host_visible(
     let last_used = inner.next_use();
     // Preserve the common O(exact-bucket) path. Best-fit scans the retained
     // host buckets only when this request shape has no idle exact slot.
-    if let Some(slots) = inner.host_by_device_bytes.get_mut(&key) {
-        if let Some(slot) = slots
+    if let Some(slots) = inner.host_by_device_bytes.get_mut(&key)
+        && let Some(slot) = slots
             .iter_mut()
             .find(|slot| Arc::strong_count(&slot.buffer) == 1)
-        {
-            debug_assert!(slot.buffer.size() >= bytes);
-            slot.last_used = last_used;
-            let buffer = Arc::clone(&slot.buffer);
-            inner.cache_hits = inner.cache_hits.saturating_add(1);
-            return Ok(buffer);
-        }
+    {
+        debug_assert!(slot.buffer.size() >= bytes);
+        slot.last_used = last_used;
+        let buffer = Arc::clone(&slot.buffer);
+        inner.cache_hits = inner.cache_hits.saturating_add(1);
+        return Ok(buffer);
     }
     let candidate = best_fit_free_slot(
         bucket,

@@ -108,7 +108,7 @@ pub fn vk_backward(loss: &VkTensor) -> Result<VkGradStore> {
             input_grads.len(),
             inputs.len()
         );
-        for (input, maybe_grad) in inputs.iter().zip(input_grads.into_iter()) {
+        for (input, maybe_grad) in inputs.iter().zip(input_grads) {
             let Some(g) = maybe_grad else { continue };
             if !input.requires_grad() && input.grad_fn().is_none() && input.param_id().is_none() {
                 continue;
@@ -136,10 +136,10 @@ pub fn vk_backward(loss: &VkTensor) -> Result<VkGradStore> {
     // Collect parameter-leaf grads into the public store.
     let mut store = VkGradStore::new();
     for leaf in leaves {
-        if let Some(pid) = leaf.param_id() {
-            if let Some(g) = grads.remove(&leaf.op_id()) {
-                store.insert(pid, g);
-            }
+        if let Some(pid) = leaf.param_id()
+            && let Some(g) = grads.remove(&leaf.op_id())
+        {
+            store.insert(pid, g);
         }
     }
     Ok(store)

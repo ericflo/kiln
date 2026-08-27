@@ -7,8 +7,8 @@
 //! `narrow().contiguous()`, GQA-expand, etc. on a Vulkan tensor went through
 //! that bounce; this keeps it on the GPU.
 //!
-//! The view is described by raw layout metadata (whole source buffer + shape
-//! + element strides + element start_offset) rather than a `VkTensor`,
+//! The view is described by raw layout metadata (the whole source buffer,
+//! shape, element strides, and element start_offset) rather than a `VkTensor`,
 //! because a `VkTensor` is by construction whole-buffer/contiguous and cannot
 //! represent the strided input.
 

@@ -112,11 +112,10 @@ impl DecodeResidentPool {
             return Ok(None);
         }
 
-        let mut num_slots = if slot_bytes == 0 {
-            PREFERRED_SLOTS
-        } else {
-            ((budget / slot_bytes) as usize).min(PREFERRED_SLOTS)
-        };
+        let mut num_slots = (budget
+            .checked_div(slot_bytes)
+            .unwrap_or(PREFERRED_SLOTS as u64) as usize)
+            .min(PREFERRED_SLOTS);
         if num_slots < MIN_SLOTS {
             num_slots = MIN_SLOTS;
         }

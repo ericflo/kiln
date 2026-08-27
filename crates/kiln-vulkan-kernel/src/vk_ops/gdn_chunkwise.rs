@@ -724,7 +724,7 @@ fn vk_broadcast_mul_lastdim_no_grad(a: &VkTensor, b: &VkTensor, n: usize) -> Res
         "vk_broadcast_mul_lastdim",
         &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
         &push,
-        (total as u32).div_ceil(256) as u32,
+        (total as u32).div_ceil(256),
     )?;
     Ok(VkTensor::from_buffer(
         out_buf,
@@ -1259,13 +1259,7 @@ fn cached_strict_lower_mask_4d(
             mask[i * chunk + j] = 1.0;
         }
     }
-    let mut full = vec![0.0_f32; batch * heads * chunk * chunk];
-    for i in 0..(batch * heads) {
-        let off = i * chunk * chunk;
-        for j in 0..(chunk * chunk) {
-            full[off + j] = mask[j];
-        }
-    }
+    let full = mask.repeat(batch * heads);
     let mask_full = upload_f32(device, &full, vec![batch, heads, chunk, chunk])?;
     STRICT_LOWER_MASK_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, mask_full.clone());

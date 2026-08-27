@@ -550,7 +550,9 @@ fn apply_op(
                 ))
             }
             OpdLossOutputMode::PerPosition => {
-                let buf = alloc_f32(device, 0.max(1))?;
+                // Logical tensor is 0 elements; the backing buffer still
+                // reserves 1 element to avoid a zero-sized device alloc.
+                let buf = alloc_f32(device, 1)?;
                 Ok(VkTensor::from_buffer(
                     buf,
                     vec![0],

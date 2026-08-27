@@ -357,7 +357,7 @@ impl VulkanDevice {
             .iter()
             .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
             .map(|heap| heap.size)
-            .sum::<vk::DeviceSize>() as u64;
+            .sum::<vk::DeviceSize>();
         let device_local_mem_type =
             Self::find_memory_type(&mem_props, vk::MemoryPropertyFlags::DEVICE_LOCAL)
                 .ok_or_else(|| anyhow!("no device-local memory type found"))?;
@@ -1138,8 +1138,7 @@ mod tests {
         let result = VulkanDevice::new();
         // On a machine without Vulkan, we expect an error.
         // On a machine with Vulkan, this test runs as a smoke test.
-        if result.is_ok() {
-            let dev = result.unwrap();
+        if let Ok(dev) = result {
             assert!(
                 !dev.device_name().is_empty(),
                 "device name should not be empty"
