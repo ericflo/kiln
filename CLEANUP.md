@@ -3430,3 +3430,74 @@ Committed total: **3 files changed, 7 insertions(+), 29 deletions(−) = net −
 - The §9.9 OPD cluster was verified untouched: `check_opd_regression.py`, `scripts/bench/opd_baseline_*`, `opd-bench-gate.yml`, and the round-78 `opd_tape_shim` all as-is; `opd_tape_shim` still exists in-tree (kt-native), `flce_candle_shim` confirmed deleted (matching the round-79 ledger).
 
 **Signature:** kiln cleanup agent, round 81 of the CLEANUP.md campaign — the first full-tree marker adjudication of the campaign: every TODO/FIXME/XXX hit in `crates/`, `scripts/`, and root docs classified with per-hit evidence; two rock-solid stale markers deleted and two stale cross-references fixed (comment-only, net −22 lines, commit `850cdaac7`); 29 legitimate markers retained with verified kernel-absence/unfinished-work evidence; frozen-record pointers reported rather than rewritten; all gates green; zero behavior changes.
+
+## Cleanup Agent (round 82) — 2026-08-26 — kiln-server SHA-256 identity helper consolidation: 3 validator copies + 3 byte-identical normalizer copies → 2 canonical `pub(crate)` helpers in `teacher_identity.rs`; net −2 production lines; consolidation regression-locked with 2 new unit tests; state.rs budget ceiling ratcheted 8399→8392
+
+**Steering:** one focused cleanup round, fresh eyes: pick one safe target from anywhere in the tree (not in `bench-results/`, `docs/archive/`, `docs/audits/`, `capabilities/`, `.agents/`, `CHANGELOG.md`, `docs/plans/`, or the §9.9 OPD cluster); do not duplicate or revert prior rounds; keep-by-default — delete only with zero live references verified; no public API or behavior changes (error text preserved verbatim); prefer small, self-contained, fully verifiable improvements; verify with the standing gates; commit incrementally; append this ledger entry; report the rejected candidates.
+
+**Target selection.** The "future session" leads from rounds 79–81 were re-verified at HEAD first: (1) round 80's cross-crate digest-shape sharing is still public-API-blocked (hard rule: kiln-train is consumed by kiln-server/kiln-eval; making its helper usable cross-crate requires a `pub` item — owner-level); (2) round 81's `vulkan_storage.rs:1690/1708` "see TODO" pointers still await the unfinished BF16/F16 Vulkan softmax kernel (rule-(c) work, not a stale marker); (3) round 81's BENCHMARKS.md:607 pointer and c29 `PR #XXX` placeholder sit in dated/frozen records (owner-level). All three remain owner-level/unfinished — correctly not actionable this round. With those out, a fresh-eyes audit of the `sha256:` identity surface in kiln-server (the campaign's historical consolidation ground, rounds 78–80) found **two duplicated-contract families that no prior round ever enumerated**:
+
+- **Family A — strict validator** ("`sha256:` + exactly 64 lowercase hex"), three copies with the same acceptance set but three surface forms:
+  - A1 `src/api/hf_trl.rs:168` — inline in `parse_delete_if_match`, negated `||` form, byte test `is_ascii_hexdigit() && !is_ascii_uppercase()`;
+  - A2 `src/hf_train_cli.rs:178` — `validate_export_sha256`, positive form, same byte test;
+  - A3 `src/openenv_cli.rs:1557` — `validate_openenv_sha256`, positive form, byte test `is_ascii_digit() || (b'a'..=b'f')`.
+- **Family B — prefix normalizer** (add `sha256:` if absent), three **byte-identical** private bodies:
+  - B1 `src/state.rs:4565` `prefixed_sha256` (3 call sites);
+  - B2 `src/api/completions.rs:1235` `rollout_sha256` (5 call sites);
+  - B3 `src/execution_provenance.rs:89` `normalize_sha256` (2 call sites).
+
+Round 78's body-hash scan found "3 byte-identical pairs" in kiln-server but enumerated none of these; rounds 79–80 handled the kiln-train `is_lower_sha256` pair and one functionally-equivalent inline check. **Why the A family slipped:** rounds 78–80 compared two-implementation pairs; A is a **three-way family with three different surface forms in three different files** (one of them inline, not even a named function), so it matched no pair. **Why the B family slipped:** B is likewise three-way, and the round-78 scan's own table lists only pairs — a three-function family with three different names is invisible to a pair scan. (Methodology note for future audits: hash-normalize by signature *and* by name, and enumerate N-way families, not just pairs.)
+
+**Equivalence verification (fresh, at HEAD — not trust):**
+
+Family A: the per-byte acceptance sets are identical — A1/A2's `is_ascii_hexdigit() ∩ ¬is_ascii_uppercase()` = {0x30–0x39} ∪ {0x61–0x66} (uppercase 0x41–0x5A stripped), and A3's `is_ascii_digit() ∪ [a..=f]` = {0x30–0x39} ∪ {0x61–0x66}. A1 is the De Morgan negation of A2's positive form (same set). All three gate on the identical first condition `len == "sha256:".len() + 64` (71), so the `digest["sha256:".len()..]` slice is provably in-bounds in every form. Acceptance set for all three: `sha256:` + exactly 64 bytes from {0–9a-f}. Round 80 already proved the hexdigit/¬uppercase ⇄ digit∪[a-f] identity for the kiln-train pair; the same proof applies here.
+
+Family B: byte-identical bodies — equivalence is trivial (verified by side-by-side diff of the three removed functions).
+
+**Kept deliberately (distinct contracts — merging would change observable error text or return shape):**
+- `teacher_identity.rs:704` `validate_raw_sha256` (bare 64-lower-hex, no prefix, returns the hex) and `teacher_identity.rs:721` `strip_sha256_prefix` (optional prefix, error "expected optional `sha256:` prefix followed by exactly 64 hex characters") — different acceptance sets, different error text, different return shape.
+- The parse/normalize branches `crates/kiln-server/src/cli.rs:5965` (test assertion `identity.starts_with("sha256:")`), `src/training_queue.rs:6067` and `src/api/training.rs:5769` (test-code `.strip_prefix("sha256:")` on already-validated values), and the round-78-adjudicated `api/teachers.rs:570` / `teacher_identity.rs:718` `.strip_prefix` sites — different contracts or test-only, all retained.
+
+**Change (8 files, 149 insertions / 53 deletions; net −2 production lines; +98 regression-lock tests):**
+
+1. `src/teacher_identity.rs` (+127) — the canonical home (already hosts `hex_sha256`, `validate_raw_sha256`, `strip_sha256_prefix`; kiln-server's identity-shaping module):
+   - `pub(crate) fn is_lower_sha256_identity(value: &str) -> bool` — the single form of Family A (body = A3's byte test, the round-80-verified digit∪[a-f] form).
+   - `pub(crate) fn with_sha256_prefix(value: &str) -> String` — the single form of Family B (body byte-identical to B1/B2/B3).
+   - Both `pub(crate)` (kiln-server is a leaf crate — no workspace crate depends on it — so **zero public API change**; lib re-exports nothing new).
+   - Two regression-lock tests in `mod tests`:
+     1. `is_lower_sha256_identity_matches_the_three_legacy_inline_forms` — re-implements all three removed legacy forms (A1 negated `||` with hexdigit/¬uppercase, A2 positive hexdigit/¬uppercase, A3 digit∪[a-f]) verbatim and asserts all three agree with the shared helper over a case table (valid digests, fully-uppercase, mixed-case, 63/65 hex, missing prefix, bare 64-hex, empty, `SHA256:` case-variant, non-hex `g`, 71-byte non-prefixed string).
+     2. `with_sha256_prefix_matches_the_legacy_inline_bodies` — asserts identity with the verbatim legacy body over prefixed, bare, empty, partial-prefix, and colon-only inputs.
+2. `src/api/hf_trl.rs` (+2/−6) — `parse_delete_if_match` delegates to `is_lower_sha256_identity`; the error message `"If-Match must contain a lowercase sha256:<64-hex> export identity"` preserved verbatim.
+3. `src/hf_train_cli.rs` (+3/−5) — `validate_export_sha256` delegates; error `"export identity must be lowercase sha256:<64-hex>"` preserved verbatim; `validate_export_sha256` stays private.
+4. `src/openenv_cli.rs` (+2/−5) — `validate_openenv_sha256` delegates; error `"OpenEnv {label} SHA-256 is malformed"` preserved verbatim.
+5. `src/state.rs` (+4/−11) — `prefixed_sha256` deleted; its 3 call sites in `build_rollout_provenance` re-pointed to `with_sha256_prefix`.
+6. `src/api/completions.rs` (+6/−14) — `rollout_sha256` deleted; its 5 call sites re-pointed. Side benefit: deletion resolves a **pre-existing doc-comment misattachment** — the 5-line doc above the old helper ("Ensure the model runner has the adapter required for this chat request…") describes the adapter-resolution policy of the chat flow and now attaches directly to `build_rollout_provenance`, the function it actually documents (it was sandwiched above a 5-line string helper since the file's creation, `9371035bf`). Doc text itself untouched.
+7. `src/execution_provenance.rs` (+3/−10) — `normalize_sha256` deleted; its 2 call sites (`numerical_runtime_sha256`, `executable_sha256`) re-pointed.
+8. `contracts/production-file-budget-v1.json` (+2/−2) — the ratchet-down contract: `crates/kiln-server/src/state.rs` 8399→8392 (exact-ceiling sync, `2da875018` precedent; the 7-line delta is the B1 helper deletion). Rationale appended, no other entries touched (verified byte-level: the only diff is the two state.rs lines).
+
+**Verification (standing gates, before→after at HEAD):**
+- `cargo test -p kiln-server` — before: **1386 passed / 0 failed / 1 ignored** (matches the round-81 ledger count exactly); after: **1388 passed / 0 failed / 1 ignored** (= 1386 + the 2 new regression-lock tests; all pre-existing suites green).
+- `cargo clippy -p kiln-server --all-targets` — 0 errors; warning set byte-identical to the pre-edit baseline (only the pre-existing kiln-core(3) + kiln-tensor(14) adjudicated sets; kiln-server emits zero).
+- `cargo fmt -p kiln-server --check` — clean.
+- `python3 scripts/check_repository_artifacts.py` — **passed** (6697 tracked paths, unchanged — no files added/removed).
+- `python3 scripts/check_production_file_budget.py` — **passed** (647 files, 5000-line default, 14 reviewed exceptions) after the state.rs ceiling ratchet 8399→8392.
+- Qualification source-tree hash unaffected: `scripts/qualification/source_tree_hash.py` contains **zero** `crates/kiln-server` references — no receipt/hash dependency touched.
+- §9.9 OPD cluster untouched: the diff is confined to kiln-server src + the budget contract; no bench scripts, baselines, or CI jobs.
+- Committed as `833bfbdc6` (`refactor(kiln-server): consolidate 3 validator + 3 normalizer SHA-256 identity helper copies into teacher_identity (round 82)`, 8 files, 149+/53−).
+
+**Rejected candidates this session (evidence recorded so future rounds don't re-litigate):**
+1. `assets/profiling/mtp-phase-b3-aggregate.py` (151 lines) — **KEEP**: an input-log aggregation tool for the MTP Phase B3 audit; its input log was deleted by the recorded artifact-removal audit (`docs/audits/removed-raw-artifacts-2026-07-13-v1.json`), its only live reference is the frozen `docs/archive/profiling/PROFILING.md` audit narrative, it is consumed by no CI/script/test, and it is outside the qualification source hash. Historical-evidence tooling — same keep-with-evidence class as the c2_artifacts receipts.
+2. `.github/` templates + root policy docs (dependabot.yml, ISSUE_TEMPLATE/, PULL_REQUEST_TEMPLATE.md, SECURITY.md, CODE_OF_CONDUCT.md, about.hbs/about.toml) — **audited, consistent**: SECURITY.md's attestation claim verified against the workflows' `actions/attest-build-provenance@v4` steps; the PR template's "CONTRIBUTING.md 'For performance changes'" pointer verified live (`## Performance changes`, CONTRIBUTING.md:186); `forward.rs` and `KILN_LOGGING_FORMAT=auto` both verified to exist. No stale references found; no action.
+3. Cross-crate sharing of the digest-shape helper (kiln-server A-family ⇄ kiln-train `is_lower_sha256`) — **owner-level**: still requires a `pub` item in kiln-train (consumed crate → public API change), hard-ruled out here. This round did the within-crate half (the kiln-server A copies are now one helper); the cross-crate half remains a future candidate only if the owner wants a public digest-shape helper.
+4. `teacher_identity.rs` `validate_raw_sha256` / `strip_sha256_prefix` — **KEEP**: distinct contracts (return shape, acceptance set, and error text) — see "Kept deliberately" above.
+5. `benchmarks/receipts/` (61 tracked files) and `bench-results/` — retention evidence, do-not-touch.
+6. Round-81 owner-level pointers (BENCHMARKS.md:607, c29 `PR #XXX`) — frozen records, no action.
+7. `cargo check --workspace` is **red in this environment for a pre-existing reason**: cudarc's build script runs `nvcc --version` and this machine has no CUDA toolkit (`Os { code: 2, NotFound }`). Not caused by this round (the failing crate is kiln-model/cudarc, not kiln-server; the failure reproduces on any `--workspace` build here). The standing gates are the per-crate suites, which are green.
+
+**Notes for future rounds:**
+- The `sha256:` identity surface in kiln-server is now fully enumerated and consolidated: one strict validator (`is_lower_sha256_identity`), one normalizer (`with_sha256_prefix`), one bare-digest validator, one prefix-stripper — each with a distinct contract, each documented. No further duplication expected on this surface; if a fourth copy appears, it is a regression.
+- Pair-scanning undercounts: three-way families with three distinct names slip past a two-file body-hash scan. A future helper-dedup round should hash by (signature, body) across all files and group by equivalence class of size ≥ 2, then also grep for inline (unnamed) occurrences of the same expression shape.
+- The kiln-train `is_lower_sha256` (bare 64-hex) and the kiln-server A-family (`sha256:`-prefixed 64-hex) differ by exactly the prefix gate; if the owner ever allows a public helper in kiln-train, both could share one `is_lower_sha256` + one prefix-aware wrapper, retiring the kiln-server A-helper as well.
+- `state.rs`'s budget ceiling is now exactly at the reviewed cap (8392); any future growth there needs a new ceiling entry.
+
+**Signature:** kiln cleanup agent, round 82 of the CLEANUP.md campaign — the SHA-256 identity surface in kiln-server consolidated: 3 validator copies (proven set-identical, De Morgan-verified) and 3 byte-identical normalizer bodies merged into 2 canonical `pub(crate)` helpers in `teacher_identity.rs`, every caller's error message preserved verbatim, no public API change (leaf crate, `pub(crate)` only), net −2 production lines + 98 lines of regression-lock tests, state.rs budget ceiling ratcheted to the exact new size, all standing gates green (1388/1388 kiln-server tests, clippy baseline-identical, fmt clean, both Python artifact/budget gates passing), commit `833bfbdc6`; rejected candidates recorded with evidence.
