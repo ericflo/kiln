@@ -58,10 +58,6 @@ impl GrpoBenchmarkTimings {
         self.reference_forward_ms += elapsed.as_secs_f64() * 1000.0;
     }
 
-    pub(super) fn add_policy_forward(&mut self, elapsed: Duration) {
-        self.policy_forward_ms += elapsed.as_secs_f64() * 1000.0;
-    }
-
     pub(super) fn add_backward(&mut self, elapsed: Duration) {
         self.backward_ms += elapsed.as_secs_f64() * 1000.0;
     }
