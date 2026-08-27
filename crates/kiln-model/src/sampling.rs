@@ -951,11 +951,7 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
             let (values, indices, readback_duration) =
                 kiln_tensor::cuda_topk_last_axis_profiled(scaled, top_k)?;
             crate::execution_phase::observe_profiled_readback(readback_duration);
-            let pairs: Vec<(u32, f32)> = indices
-                .into_iter()
-                .zip(values)
-                .map(|(i, v)| (i, v))
-                .collect();
+            let pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
             return Ok(pairs);
         }
     }
@@ -973,11 +969,7 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
             let (values, indices, readback_duration) =
                 kiln_tensor::rocm_topk_last_axis_profiled(scaled, top_k)?;
             crate::execution_phase::observe_profiled_readback(readback_duration);
-            let pairs: Vec<(u32, f32)> = indices
-                .into_iter()
-                .zip(values)
-                .map(|(i, v)| (i, v))
-                .collect();
+            let pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
             return Ok(pairs);
         }
     }
