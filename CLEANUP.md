@@ -3922,3 +3922,49 @@ symbols (`candle_cuda_device_with_stream_no_event_tracking`,
 files untouched, all standing gates green at exact test baselines,
 next-round candidate reported (forward_backward.rs / reporting.rs
 binding renames).
+
+## Cleanup Agent (round 88)
+
+**Date:** 2026-08-27 (goal-orchestrator session)
+
+**Task:** complete the candle-era local-binding class that rounds 86-87
+swept — round 87's report had queued `trainer/forward_backward.rs`
+(3 sites) + `trainer/reporting.rs` (1 site); the orchestrator's tree
+verification found the actual count was 6 sites in forward_backward.rs
+(the file carries TWO functions with the identical binding pattern,
+which the round-87 scan undercounted) + 2 in reporting.rs.
+
+**Change (2 files, 12 insertions / 12 deletions — pure rename, line
+count neutral):**
+
+| File | Before | After | Sites |
+|---|---|---|---|
+| `trainer/forward_backward.rs` | `grads_by_candle_raw` | `grad_deposits` | 2 (fn sites :48, :725) |
+| `trainer/forward_backward.rs` | `candle_grads` | `grad_deposits` | 2 (:488, :1050) |
+| `trainer/forward_backward.rs` | `candle_raw` (loop var) | `deposit_raw` | 2 (:518, :1077) |
+| `trainer/reporting.rs` | `grads_by_candle_raw` | `grad_deposits` | 1 (:1237) |
+
+All bindings hold kt-native values (raw kt deposit keys → kt grads,
+consumed via `tape_bridge::decode_kt_param_deposit`), exactly the class
+round 87 A2 renamed in `opd.rs` — the names now match the round-87
+vocabulary (`grad_deposits` / `deposit_raw`). **Zero public API
+impact** (all `let` bindings in function bodies); **kiln-train now has
+zero candle-named local variables** repo-wide in src/.
+
+**Verification:** `cargo test -p kiln-train` **534/0/2** (exact
+baseline), `cargo clippy -p kiln-train --all-targets` **0** own-code
+warnings, `cargo fmt --check` clean,
+`scripts/check_production_file_budget.py` +
+`scripts/check_repository_artifacts.py` pass, `git status` clean.
+
+**Landed as** the immediately preceding code commit
+(`refactor(kiln-train): rename last candle-era local bindings in
+forward_backward + reporting to the round-87 kt-accurate names
+(round 88)`).
+
+**Lesson (feeding back per protocol):** the round-87 queued-candidate
+count (3+1 sites) was undercounted because the scan patterned on the
+opd.rs shape and missed the second same-shaped function in
+forward_backward.rs. Queued-candidate lists are a STARTING point, not
+an inventory — the executor must `grep -rn` the exact token repo-wide
+before declaring the class complete (this round did: 0 remaining).
