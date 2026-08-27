@@ -6493,3 +6493,103 @@ remaining un-adjudicated surface outside owner-held net-additive classes.
 
 **Signature:** kiln cleanup agent (round 109, bounded single round) —
 headline net **−123** lines; zero justification lines added.
+
+## Cleanup Agent (round 110 — owner decision executed: 3 dead public APIs deleted across kiln-autograd, kiln-opd-loss-kernel, kiln-vulkan-kernel; net −273)
+
+**Steering:** round 108's "3 dead public APIs pending owner decision" —
+the owner decision was to delete all three. Bounded single round: delete
+each item (plus its stale references), one commit per target, gate
+before/after each, no new surface.
+
+**Finding (independent re-verification, before touching anything):**
+each claim was re-grepped repo-wide on the clean tree; every hit was the
+definition, a self-test, a re-export/mod-decl, past-tense prose, or a
+frozen archive doc. No live consumer in any crate, script, or workflow.
+
+**Deletions:**
+
+1. **kiln-autograd: `InjectGradientBackward`** (round 93's hold) —
+   commit f882659b4, 3 files, **−230 lines**:
+   - `src/backwards/inject_gradient.rs` deleted whole (struct,
+     `impl BackwardOp`, `new_validated`, its 6 unit tests, and the
+     crate's only `ignore` doctest).
+   - `src/backwards/mod.rs`: `pub mod inject_gradient;` dropped.
+   - `src/lib.rs`: `pub use backwards::inject_gradient::…` dropped.
+   - Kept: the past-tense provenance comment at kiln-train
+     `checkpoint_execution.rs:650` (it names the *deleted candle shim*
+     `inject_gradient_via_shim`, not this op) and the frozen
+     `docs/archive/candle-removal/*` records.
+   - Why dead (unchanged since round 93): kiln-train's
+     `InjectTensorGradient` custom op was removed in #1082; nothing
+     records this op on any live tape.
+
+2. **kiln-opd-loss-kernel: `PerPositionMetricsRow`** (round 94's hold) —
+   commit ef4fa91c1, 1 file, **−38 lines**:
+   - `src/lib.rs`: struct + both accessors (`entropy_gap`,
+     `overlap_token_advantage`) + the doc block, all at the end of the
+     file. Zero callers repo-wide (grep-verified).
+   - Kept: the distinct live `PerPositionMetricsKt` re-export in
+     `kt_api.rs` (its "no live caller today" provenance comment is
+     accurate and retained), and the `#1082` provenance comment block.
+   - The struct's doc referenced `compute_overlap_ratio_probe`, which
+     exists nowhere in the crate — it died with the block.
+
+3. **kiln-vulkan-kernel: `VulkanDevice::max_compute_shared_memory_size()`
+   getter** (round 94's hold) — commit dbd0c4a3e, 1 file, **−5 lines**:
+   - `src/device.rs`: getter + its 1-line doc deleted only.
+   - Kept (live, verified): the stored field `max_compute_shared_memory_size`
+     (written by the constructor, read by the `Debug` impl and exposed
+     via `compute_capabilities()`), and the policy
+     `VulkanComputeCapabilities::max_compute_shared_memory_size` field
+     (read by `kernels.rs`' prewarm-skip log line and by
+     `supports_full_pipeline_prewarm`).
+
+**Verification (before AND after, all green):**
+- `cargo test -p kiln-autograd`: baseline 290 passed/0 failed/1 ignored
+  → post-deletion **284 passed/0 failed/0 ignored** (exactly the 6
+  module unit tests + 1 ignored doctest removed; zero other drift).
+- `cargo test -p kiln-opd-loss-kernel`: **33/0/0 both sides** (the struct
+  carried no self-tests).
+- `cargo test -p kiln-vulkan-kernel --no-fail-fast`: byte-identical to
+  the pre-edit baseline — lib 65 + bin 2 + 108 integration tests passed,
+  0 failures, doctests 0.
+  - **New environment finding (pre-existing, documented for future
+    rounds):** on this machine 7 kiln-vulkan-kernel test binaries
+    SIGSEGV (gdn_qk_norm_recurrent, gdn_state_rows,
+    linear_decode_argmax, rope_tables, vk_l2_norm_qk_parity,
+    vk_rmsnorm_parity, vk_softmax_parity). Verified identical on the
+    clean pre-edit tree (re-run in isolation: 2 of 3 still crash), and
+    none of them touch the deleted getter. Pre-existing RADV/driver
+    instability, not caused by this round; flagged for the owner.
+- Reverse dependents (union of `cargo tree -i` for the three crates,
+  excluding the three themselves — kiln-core, kiln-flce-kernel,
+  kiln-graph-vulkan, kiln-kt-bridge, kiln-model, kiln-optim,
+  kiln-rmsnorm-kernel, kiln-tensor, kiln-tensor-id, kiln-train,
+  kiln-vulkan-blas): **2250 passed / 0 failed** across 114 test
+  binaries, exit 0.
+- `cargo clippy -p kiln-autograd -p kiln-opd-loss-kernel -p
+  kiln-vulkan-kernel --all-targets`: **0 errors** (pre-existing
+  warnings only, matching round 108's recorded state; zero new
+  unused-item warnings).
+- `cargo fmt --all --check`: clean.
+- `python3 scripts/check_production_file_budget.py`: **pass** — 646
+  files (down from 647; one file deleted), 5000-line default, 14
+  reviewed exceptions.
+- `python3 scripts/check_repository_artifacts.py`: **pass** — 6694
+  tracked paths.
+- `git status`: clean before edits and after the ledger commit.
+
+**Commits:** f882659b4 (inject_gradient module), ef4fa91c1
+(PerPositionMetricsRow), dbd0c4a3e (device getter), + this ledger
+entry.
+
+**Pub/owner-decision items:** none remaining. All three
+round-108-held dead public APIs are now deleted; no new pub surface
+was touched or added.
+
+**Campaign state:** the dead-public-API holds from rounds 93/94/108
+are fully closed.
+
+**Signature:** kiln cleanup agent (round 110, bounded single round) —
+headline net **−273** lines; zero justification lines added; one
+pre-existing environment failure newly documented.
