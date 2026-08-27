@@ -612,6 +612,12 @@ pub(super) enum AttnKind {
     FullAttn,
 }
 
+// keep: test-only caller — `test_partition_segment_layers_by_attn_type`
+// (tests/mod.rs, plain test) — plus `partition_segment_layers_by_attn_type`
+// below. The layer-pair tiled segment-recompute path that consumed this
+// (phase10 #637) was later removed; the block-partition helper and its
+// GDN/FA classification are retained under test for the tiled design.
+#[allow(dead_code)]
 pub(super) fn attn_kind_at(weights: &GpuWeights, layer_idx: usize) -> AttnKind {
     match &weights.layers[layer_idx].attention {
         GpuAttentionWeights::Linear(_) => AttnKind::Gdn,
@@ -626,6 +632,12 @@ pub(super) fn attn_kind_at(weights: &GpuWeights, layer_idx: usize) -> AttnKind {
 /// Used by the layer-pair tiled path to process GDN sub-blocks (time-tile)
 /// and full-attention sub-blocks (monolithic) sequentially within one
 /// segment-recompute pass.
+// keep: test-only caller — `test_partition_segment_layers_by_attn_type`
+// (tests/mod.rs, plain test) pins the maximal-run partitioning contract of
+// the layer-pair tiled path (phase10 #637); the tiled path itself was later
+// removed, and the helper is retained under test with its `AttnKind`
+// classification helper (`attn_kind_at`).
+#[allow(dead_code)]
 pub(super) fn partition_segment_layers_by_attn_type(
     weights: &GpuWeights,
     seg_start: usize,

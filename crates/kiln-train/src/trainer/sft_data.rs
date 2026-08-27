@@ -258,6 +258,13 @@ pub(super) fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
     Ok(())
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — analytic
+// final-RMSNorm backward seed for the checkpointed SFT tail's
+// `Some(unormed)` arm in
+// `checkpointed_forward_backward_tape_authoritative_kt` (forward_backward.rs);
+// also exercised by the finite-difference parity tests (tests/mod.rs
+// `analytic_sft_tail_grad_matches_finite_difference`).
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
@@ -294,6 +301,12 @@ pub(super) fn analytic_sft_tail_grad_pre_final_norm(
     )
 }
 
+// keep: test-only caller — `analytic_sft_tail_grad_from_precomputed_normed_matches_wrapper`
+// (tests/mod.rs, plain test) validates the from-normed path against the
+// pre-normed wrapper; the metadata sibling below is live under GPU features
+// (forward_backward.rs `Some(normed)` arm). Introduced with the exact
+// reverse-checkpointing SFT tail (2c514b7ac) and kept for the parity tests.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
@@ -329,6 +342,10 @@ pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm(
     )
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — the `Some(normed)`
+// arm of the checkpointed SFT tail in
+// `checkpointed_forward_backward_tape_authoritative_kt` (forward_backward.rs).
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
@@ -365,6 +382,9 @@ pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metada
     )
 }
 
+// keep: shared core of the three `analytic_sft_tail_grad_*` wrappers above
+// (live under GPU features / tests) — performs the validated RMSNorm backward.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
@@ -398,6 +418,9 @@ pub(super) fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
     .context("analytic SFT tail final RMSNorm backward")
 }
 
+// keep: called by the three `analytic_sft_tail_grad_*` wrappers above
+// (live under GPU features / tests).
+#[allow(dead_code)]
 pub(super) fn validate_analytic_sft_tail_grad_inputs(
     hidden: &Tensor,
     normed: Option<&Tensor>,
@@ -457,6 +480,12 @@ pub(super) fn validate_analytic_sft_tail_grad_inputs(
     Ok(())
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) by the
+// checkpointed tape paths — `checkpointed_forward_backward_tape_authoritative_kt`
+// (forward_backward.rs, SFT + GRPO) and
+// `checkpointed_opd_step_forward_backward_tape_authoritative` (opd.rs);
+// also exercised by plain tests (tests/mod.rs `rms_norm_backward_*`).
+#[allow(dead_code)]
 pub(crate) fn rms_norm_backward_pre_final_norm(
     _final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
@@ -527,6 +556,11 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
     Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — the
+// checkpointed SFT tail in `checkpointed_forward_backward_tape_authoritative_kt`
+// (forward_backward.rs) calls it at each recomputed boundary so the stored
+// boundary tensor is fully resident before the kt recompute consumes it.
+#[allow(dead_code)]
 pub(super) fn synchronize_training_tensor_ready(label: &str, tensor: &Tensor) -> Result<()> {
     let _ = label;
     match tensor.device() {
@@ -609,6 +643,10 @@ pub(super) fn summarize_sft_debug_values(tensor: &Tensor) -> Result<(bool, Strin
     Ok((first_bad.is_none(), summary))
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) —
+// `StoredCheckpointBoundaries::should_store` (below) computes the resident
+// byte budget in the checkpointed SFT path (forward_backward.rs).
+#[allow(dead_code)]
 pub(super) fn dtype_size_bytes(dtype: DType) -> usize {
     match dtype {
         DType::BF16 | DType::F16 => 2,
@@ -620,12 +658,19 @@ pub(super) fn dtype_size_bytes(dtype: DType) -> usize {
     }
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — the checkpointed
+// SFT path in `checkpointed_forward_backward_tape_authoritative_kt`
+// (forward_backward.rs) spools/recomputes segment boundaries through this
+// struct (`new`/`should_store`/`anchor_for_boundary`/`save`/`load_stored`/
+// `load`); introduced for the exact long-context training path (2cbe72025).
+#[allow(dead_code)]
 pub(super) struct StoredCheckpointBoundaries {
     pub(super) tensors: std::cell::RefCell<Vec<Option<Tensor>>>,
     pub(super) resident_device_storage: bool,
     pub(super) anchor_stride: usize,
 }
 
+#[allow(dead_code)]
 impl StoredCheckpointBoundaries {
     pub(super) fn new(
         num_segments: usize,
@@ -699,6 +744,10 @@ impl StoredCheckpointBoundaries {
     }
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — loads a stored
+// boundary tensor or recomputes it, called from
+// `checkpointed_forward_backward_tape_authoritative_kt` (forward_backward.rs).
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn load_or_recompute_checkpoint_boundary(
     spool: &StoredCheckpointBoundaries,

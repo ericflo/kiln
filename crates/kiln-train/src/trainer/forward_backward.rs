@@ -1115,13 +1115,25 @@ pub(super) fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
 /// across the entire group to a DAPO-style token-level mean.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GrpoLossParams {
+    // keep: used under GPU features (cuda/metal/vulkan/rocm) — read by
+    // `grpo_loss_with_kl_auxiliary_route` (below), the tape-authoritative
+    // loss roots in `grpo_tape_shim.rs` (`grpo_loss_coeff_*`), and the
+    // non-finite-loss debug log of
+    // `grpo_step_forward_backward_tape_authoritative_kt`; set by the live
+    // `GrpoLossParams::from_config` (grpo_step.rs). "Never read" only in
+    // the default (CPU) build, where the GRPO tape paths don't compile.
+    #[allow(dead_code)]
     pub advantage: f64,
     pub clip_low: f64,
     /// Additive PPO upper epsilon for token/sequence GRPO; absolute upper
     /// importance-weight cap for CISPO.
     pub clip_high: f64,
+    // keep: GPU-feature read (see `advantage` above).
+    #[allow(dead_code)]
     pub kl_coeff: f64,
     pub kl_estimator: KlEstimator,
+    // keep: GPU-feature read (see `advantage` above).
+    #[allow(dead_code)]
     pub loss_normalizer: f64,
     /// Importance-sampling level (Phase 2). `Token` is the historical
     /// per-token PPO surrogate; `Sequence` computes the IS ratio at the
@@ -1130,6 +1142,8 @@ pub(crate) struct GrpoLossParams {
     pub is_level: IsLevel,
     /// When true, the IS ratio is forced to 1.0 and the surrogate reduces to
     /// `advantage` per token. KL selection remains independent.
+    // keep: GPU-feature read (see `advantage` above).
+    #[allow(dead_code)]
     pub reinforce: bool,
     /// Phase 3c — entropy-aware KL quantile. `None` = full-token KL; when
     /// `Some(q)`, tokens whose `-policy_log_prob` is below the q-quantile
@@ -1174,6 +1188,11 @@ impl GrpoLossParams {
     }
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — called from
+// `entropy_aware_kl_mask_kt` (below), which the tape-authoritative loss
+// roots call (`grpo_loss_coeff_col_device_fast_path_kt` in
+// grpo_tape_shim.rs, and `grpo_loss_with_kl_auxiliary_route` below).
+#[allow(dead_code)]
 pub(super) fn entropy_aware_kl_threshold_from_policy_log_probs(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
@@ -1232,6 +1251,11 @@ pub(super) fn entropy_aware_kl_threshold_from_policy_log_probs(
     Ok((-thr) as f32)
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — the Phase 3c
+// entropy-aware KL quantile mask, called from
+// `grpo_loss_with_kl_auxiliary_route` (below) and the tape-authoritative
+// fast path (`grpo_loss_coeff_col_device_fast_path_kt`, grpo_tape_shim.rs).
+#[allow(dead_code)]
 pub(crate) fn entropy_aware_kl_mask_kt(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
@@ -1289,6 +1313,11 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
 // (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
 // loss inside its candle-autograd backward composite (#1082 CP-4).
+// keep: test-only callers — the plain tests in tests/mod.rs (TRL-pinned
+// oracle + finite-difference gradient checks) and the `grpo_tape_shim` tests;
+// the HostComposite wrapper form the GPU tape roots bypass in favor of
+// `grpo_loss_with_kl_auxiliary_route` (below).
+#[allow(dead_code)]
 pub(crate) fn grpo_loss(
     policy_log_probs: &Tensor,
     behavior_log_probs: &Tensor,
@@ -1306,6 +1335,10 @@ pub(crate) fn grpo_loss(
     )
 }
 
+// keep: used under GPU features (cuda/metal/vulkan/rocm) — the exact
+// scalar PG (+ KL) loss root, called from the tape-authoritative composite
+// `grpo_pg_loss_from_normed_hidden_loss_and_grad_kt` (grpo_tape_shim.rs).
+#[allow(dead_code)]
 pub(crate) fn grpo_loss_with_kl_auxiliary_route(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,

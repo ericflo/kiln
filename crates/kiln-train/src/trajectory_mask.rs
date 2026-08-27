@@ -638,15 +638,6 @@ mod tests {
         tokenizer.apply_chat_template(&core_msgs).unwrap()
     }
 
-    /// Helper: count tokens whose byte offsets fall fully inside a given
-    /// byte range `[lo, hi)`. With the byte-level tokenizer above, each
-    /// byte is one token, so this is just `hi - lo`.
-    fn count_tokens_in_range(rendered: &str, content: &str) -> usize {
-        // The byte-level tokenizer makes `content.len()` the exact token count.
-        let _ = rendered;
-        content.len()
-    }
-
     #[test]
     fn build_masks_assistant_only_marks_action_tokens() {
         let tok = qwen_shaped_tokenizer();
