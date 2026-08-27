@@ -14,13 +14,13 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12188,
-      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth."
+      "max_lines": 12219,
+      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The 31-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
-      "max_lines": 10774,
-      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth."
+      "max_lines": 10803,
+      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today. The single added qualification setup line installs the stable native policy explicitly, and this exact ceiling forbids unrelated growth. The 29-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/vk_decode_resident.rs",
@@ -64,8 +64,8 @@
     },
     {
       "path": "crates/kiln-train/src/opd.rs",
-      "max_lines": 8447,
-      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap."
+      "max_lines": 8496,
+      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap. The 49-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67–71 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
