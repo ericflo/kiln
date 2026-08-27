@@ -45,7 +45,7 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     ensure_sft_loss_route_supports_checkpointing(sft_loss_route, false)?;
 
-    let (loss_val, _loss_kt, grads_by_candle_raw) =
+    let (loss_val, _loss_kt, grad_deposits) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
             kiln_autograd::TapeOptions { detect_anomaly },
             || {
@@ -177,7 +177,7 @@ pub(super) fn standard_forward_backward_tape_authoritative_kt(
     // grad was aliasing the `in_proj_z` LoRA-B `[out, rank]` slot → AdamW shape
     // mismatch `[32] != [32, 4]`).
     let mut grads = kiln_autograd::GradStore::new();
-    for (key_raw, kt_grad) in grads_by_candle_raw {
+    for (key_raw, kt_grad) in grad_deposits {
         let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
         else {
             continue;
@@ -485,7 +485,7 @@ pub(super) fn checkpointed_forward_backward_tape_authoritative_kt(
             .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
-        let (kt_grads, candle_grads) =
+        let (kt_grads, grad_deposits) =
             kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
                 kiln_autograd::TapeOptions { detect_anomaly },
                 seed,
@@ -515,9 +515,9 @@ pub(super) fn checkpointed_forward_backward_tape_authoritative_kt(
         // The exact segment contract below rejects missing leaves, deposits for
         // another layer range, and any unknown tagged parameter before merge.
         let mut segment_grads = kiln_autograd::GradStore::new();
-        for (candle_raw, g) in candle_grads {
+        for (deposit_raw, g) in grad_deposits {
             let Some(param_raw) =
-                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(deposit_raw as u64)
             else {
                 continue;
             };
@@ -722,7 +722,7 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     let step_started = Instant::now();
 
-    let ((loss_val, env_ce, policy_log_probs), _loss_kt, grads_by_candle_raw) =
+    let ((loss_val, env_ce, policy_log_probs), _loss_kt, grad_deposits) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
             kiln_autograd::TapeOptions { detect_anomaly },
             || {
@@ -871,7 +871,7 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
     // (#1082) keyed by `Parameter::tensor_id()` (== the LoRA primary kt
     // tensor id the tape adapter registered as the kt-input key).
     let mut grads = kiln_autograd::GradStore::new();
-    for (key_raw, kt_grad) in grads_by_candle_raw {
+    for (key_raw, kt_grad) in grad_deposits {
         let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
         else {
             continue;
@@ -1047,7 +1047,7 @@ pub(super) fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
         })?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
-        let (kt_grads, candle_grads) =
+        let (kt_grads, grad_deposits) =
             kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
                 kiln_autograd::TapeOptions { detect_anomaly },
                 seed,
@@ -1074,9 +1074,9 @@ pub(super) fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             })?;
 
         let mut segment_grads = kiln_autograd::GradStore::new();
-        for (candle_raw, g) in candle_grads {
+        for (deposit_raw, g) in grad_deposits {
             let Some(param_raw) =
-                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(deposit_raw as u64)
             else {
                 continue;
             };

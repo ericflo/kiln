@@ -1234,13 +1234,13 @@ pub(super) fn run_mtp_alignment_phase(
                 Ok((loss_val, loss))
             },
         );
-        let (loss_val, _loss_kt, grads_by_candle_raw) = match result {
+        let (loss_val, _loss_kt, grad_deposits) = match result {
             Ok(triple) => triple,
             Err(e) => anyhow::bail!("mtp alignment step failed: {e}"),
         };
 
         let mut grads = kiln_autograd::GradStore::new();
-        for (key_raw, kt_grad) in grads_by_candle_raw {
+        for (key_raw, kt_grad) in grad_deposits {
             let Some(param_raw) =
                 kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
             else {
