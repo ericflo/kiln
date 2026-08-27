@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_train::long_context_fixture::{
-    SyntheticLongContextFixture, synthetic_long_context_group_for_length,
+    SyntheticLongContextFixture, synthetic_long_context_group_for_length, synthetic_tokenizer,
 };
 use kiln_train::trainer::{GrpoBenchmarkReport, grpo_benchmark_tokenization};
 use kiln_train::{GrpoConfig, GrpoGroup, Optimizer};
@@ -275,46 +275,6 @@ fn load_tokenizer(model_path: &Path) -> Result<KilnTokenizer> {
         tokenizer = tokenizer.with_chat_template(template);
     }
     Ok(tokenizer)
-}
-
-fn synthetic_tokenizer() -> Result<KilnTokenizer> {
-    let mut vocab = String::from("{");
-    for b in 0u32..256 {
-        let ch = char::from_u32(b).context("invalid byte vocab char")?;
-        let key = match ch {
-            '"' => "\\\"".to_string(),
-            '\\' => "\\\\".to_string(),
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32),
-            c => c.to_string(),
-        };
-        if b > 0 {
-            vocab.push(',');
-        }
-        vocab.push_str(&format!("\"{}\":{}", key, b));
-    }
-    vocab.push('}');
-    let json = format!(
-        r#"{{"version": "1.0", "model": {{"type": "BPE", "vocab": {}, "merges": []}}}}"#,
-        vocab
-    );
-    let template = "{% for message in messages -%}\
-{% if message.role == 'tool' %}\
-{% if loop.previtem is undefined or loop.previtem.role != 'tool' %}<|im_start|>user
-{% endif %}<tool_response>
-{{ message.content }}
-</tool_response>\
-{% if loop.last or loop.nextitem.role != 'tool' %}<|im_end|>
-{% endif %}\
-{% else %}<|im_start|>{{ message.role }}
-{{ message.content }}<|im_end|>
-{% endif %}\
-{% endfor %}";
-    Ok(KilnTokenizer::from_bytes(json.as_bytes())
-        .map_err(|err| anyhow::anyhow!("{err}"))?
-        .with_chat_template(template.to_string()))
 }
 
 fn current_vram_mib() -> Option<u64> {

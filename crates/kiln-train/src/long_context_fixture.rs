@@ -168,6 +168,51 @@ pub fn synthetic_long_context_rollout(
     )
 }
 
+/// Canonical synthetic test tokenizer fixture: a 256-byte identity BPE
+/// vocab (each byte maps to its own token id) plus a Qwen-shaped chat
+/// template with tool-response wrapping. Shared by the in-crate tests and
+/// the `long_context_grpo_bench` example so both build the identical
+/// tokenizer instead of hand-rolled copies.
+pub fn synthetic_tokenizer() -> Result<KilnTokenizer> {
+    let mut vocab = String::from("{");
+    for b in 0u32..256 {
+        let ch = char::from_u32(b).context("invalid byte vocab char")?;
+        let key = match ch {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32),
+            c => c.to_string(),
+        };
+        if b > 0 {
+            vocab.push(',');
+        }
+        vocab.push_str(&format!("\"{}\":{}", key, b));
+    }
+    vocab.push('}');
+    let json = format!(
+        r#"{{"version": "1.0", "model": {{"type": "BPE", "vocab": {}, "merges": []}}}}"#,
+        vocab
+    );
+    let template = "{% for message in messages -%}\
+{% if message.role == 'tool' %}\
+{% if loop.previtem is undefined or loop.previtem.role != 'tool' %}<|im_start|>user
+{% endif %}<tool_response>
+{{ message.content }}
+</tool_response>\
+{% if loop.last or loop.nextitem.role != 'tool' %}<|im_end|>
+{% endif %}\
+{% else %}<|im_start|>{{ message.role }}
+{{ message.content }}<|im_end|>
+{% endif %}\
+{% endfor %}";
+    Ok(KilnTokenizer::from_bytes(json.as_bytes())
+        .map_err(|err| anyhow::anyhow!("{err}"))?
+        .with_chat_template(template.to_string()))
+}
+
 pub fn adapter_verify_prompt_for_group(group: &GrpoGroup) -> String {
     let trace = group
         .completions
@@ -211,46 +256,6 @@ fn rollout_seq_len(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn synthetic_tokenizer() -> Result<KilnTokenizer> {
-        let mut vocab = String::from("{");
-        for b in 0u32..256 {
-            let ch = char::from_u32(b).context("invalid byte vocab char")?;
-            let key = match ch {
-                '"' => "\\\"".to_string(),
-                '\\' => "\\\\".to_string(),
-                '\n' => "\\n".to_string(),
-                '\r' => "\\r".to_string(),
-                '\t' => "\\t".to_string(),
-                c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32),
-                c => c.to_string(),
-            };
-            if b > 0 {
-                vocab.push(',');
-            }
-            vocab.push_str(&format!("\"{}\":{}", key, b));
-        }
-        vocab.push('}');
-        let json = format!(
-            r#"{{"version": "1.0", "model": {{"type": "BPE", "vocab": {}, "merges": []}}}}"#,
-            vocab
-        );
-        let template = "{% for message in messages -%}\
-{% if message.role == 'tool' %}\
-{% if loop.previtem is undefined or loop.previtem.role != 'tool' %}<|im_start|>user
-{% endif %}<tool_response>
-{{ message.content }}
-</tool_response>\
-{% if loop.last or loop.nextitem.role != 'tool' %}<|im_end|>
-{% endif %}\
-{% else %}<|im_start|>{{ message.role }}
-{{ message.content }}<|im_end|>
-{% endif %}\
-{% endfor %}";
-        Ok(KilnTokenizer::from_bytes(json.as_bytes())
-            .map_err(|err| anyhow::anyhow!("{err}"))?
-            .with_chat_template(template.to_string()))
-    }
 
     #[test]
     fn synthetic_fixture_is_reproducible_and_serializable() -> Result<()> {
