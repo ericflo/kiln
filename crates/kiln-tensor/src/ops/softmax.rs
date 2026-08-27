@@ -155,23 +155,10 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): implement
-        // `crate::metal_softmax_last_axis(x)` analogous to
-        // `crate::cuda_softmax_last_axis` above. Until that kernel
-        // lands, fall through to the CPU path so the op still produces
-        // correct results on Mac (numerics-correct, performance-wrong).
-        // Candidate implementations:
-        //   1. MPS Graph `softMax(_:axis:)` for one-shot dispatch
-        //      (rank-aware, fused max/sub/exp/sum/div).
-        //   2. Custom MSL kernel: per-row threadgroup reduction over
-        //      the trailing dim, two-pass max → exp+sum → divide.
-        //   3. Reuse the metal kernels in `kiln-model::backend::metal`
-        //      (the existing softmax there is the production hot path).
-        //
-        // Phase 4 substrate-op landing: dispatch through
-        // `crate::metal_softmax_last_axis` which wraps candle's
-        // `candle_nn::ops::softmax_last_dim` (zero-copy on UMA — shares
-        // the MTLBuffer between kt and candle storages). See
+        // Metal substrate-op landing: dispatch through
+        // `crate::metal_softmax_last_axis` — a Kiln-owned MSL kernel
+        // (one threadgroup per last-axis row; the output buffer is
+        // allocated directly through metal-rs, no host bounce). See
         // `metal_storage.rs::metal_softmax_last_axis` for the
         // integration pattern.
         Ok(Some(crate::metal_softmax_last_axis(x)?))

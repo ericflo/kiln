@@ -16,15 +16,6 @@
 #![cfg(all(feature = "cuda", feature = "vulkan"))]
 
 use anyhow::Result;
-// TODO(#1082): inline-qualify the remaining `candle_core::*` sites once
-// `opd_top_k_reverse_kl_per_position_via_kt_forward_op` (the production
-// OPD shim) and `VkTensor::from_candle` (Vulkan upload boundary) accept
-// kt::Tensor instead of candle Tensor. Both APIs still take candle types
-// as of this commit. Every candle reference in this file is spelled
-// `candle_core::*` inline so the file has no top-level `use candle_*`
-// import (mirrors the kiln-vulkan-kernel/kernels.rs pattern from PR
-// f476cb97).
-//
 // (#1082, 2026-05-28) The CUDA side of this parity test was migrated
 // off `opd_top_k_reverse_kl_phase_b_per_position`
 // (and the `OpdLossCustomOp` candle CustomOp1 it builds) onto the

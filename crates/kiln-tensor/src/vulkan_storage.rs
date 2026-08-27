@@ -129,9 +129,9 @@ impl VulkanStorage {
     /// this `Arc` is dropped.
     ///
     /// This is the zero-copy bridge between the kernel layer
-    /// (`VkTensor` holds `Arc<VulkanBuffer>`) and kt storage referenced
-    /// by the `vulkan_softmax_last_axis` TODO. Validates the buffer
-    /// length against `dtype.size_in_bytes()` for non-packed dtypes.
+    /// (`VkTensor` holds `Arc<VulkanBuffer>`) and kt storage, used by
+    /// `vulkan_softmax_last_axis`. Validates the buffer length against
+    /// `dtype.size_in_bytes()` for non-packed dtypes.
     pub fn from_arc_buffer(
         vulkan_device: Arc<VulkanDevice>,
         device_index: usize,
