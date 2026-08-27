@@ -2520,6 +2520,13 @@ pub fn gdn_l2_norm_scale_bwd_bf16_kt(
 
 /// Shared shape/dtype check for the gates family. Returns
 /// `(rows, nv, out_shape)`.
+///
+/// The three `gdn_gates_*` entry points that consume it are gated
+/// `#[cfg(any(feature = "cuda", feature = "rocm"))]`, so the helper is dead
+/// in a backend-less build. Keep it (both backends need it) and suppress the
+/// config-dependent `dead_code` warning the same way `kiln-flash-attn` does
+/// for its cfg-gated FFI shells.
+#[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(dead_code))]
 fn gates_validate_inputs(
     a: &KtTensor,
     b: &KtTensor,
