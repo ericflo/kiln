@@ -5544,3 +5544,172 @@ adjudicated), HEADLINE NET LINES **−3** (11 ref lines removed:
 code lines, commits `cac04abf8` + `d62d75de0` + `76e24fa2b` +
 `b3095c93e` + `9a10ca270` + `43a73815b` + `ff4213ded` +
 `f6794a2fe` + `85a202580` + `40abd1504` + this ledger commit.
+
+## Cleanup Agent (round 96d — kiln-model campaign, slice 4 of 4)
+
+**Date:** 2026-08-27
+
+**Scope:** kiln-model campaign slice 4 — the root tail, the full
+14-file set (82 ref lines at round start; post-sweep counts, all
+remaining refs adjudicated KEEP):
+- `generate.rs` (19 remain)
+- `cuda_graph.rs` (13)
+- `marlin_proj.rs` (9)
+- `sampling.rs` (10)
+- `kv_cache.rs` (5)
+- `lib.rs` (3)
+- `fp8.rs` (3)
+- `decode_buffers.rs` (3)
+- `speculative.rs` (3)
+- `packed_weight_registry.rs` (1)
+- `lora_loader.rs` (2)
+- `adapter_merge.rs` (1)
+- `engine.rs` (0 — its single ref was reworded)
+- `weights.rs` (0 — its single ref was reworded)
+
+**Work (comment-only, zero code lines):**
+- `1196b43bc` marlin_proj.rs — 7 ins / 15 del (net **−8**): the
+  "candle→kt bridge happens once at pack time (a single
+  device-to-device copy)" claim reworded to the verified live actor
+  (`upload_packed` is a kt-native host build + host→device upload —
+  verified in the live `pack_host`/`upload_packed` bodies);
+  "Built from candle's `I32` packed buffer … see
+  `kiln_kt_bridge::candle_dtype_to_kt`" reworded —
+  `candle_dtype_to_kt` is verified ABSENT workspace-wide (dangling
+  pointer); the "Numerically identical to [`matmul_bf16`]"
+  rustdoc sentence deleted — verified `matmul_bf16` (non-kt) never
+  existed on mainline (the file was added at 9371035bf already
+  `matmul_bf16_kt`-only; the candle twin lived only on the #1082
+  branch and was dropped by 94ceb73ea there) — the FFI-symbol /
+  F16-kernel facts it stated survive on the adjacent doc lines;
+  "(bridged once at pack time …)" reworded to "(built once at pack
+  time …)" at the two remaining sites
+- `c3cac7531` cuda_graph.rs — 3 ins / 8 del (net **−5**): the two
+  pre-Phase-5 "capture runs on the kt context's DEFAULT stream"
+  claims deleted/reworded — verified FALSE against the live capture
+  path (`primary_cuda_context(device_idx).new_stream()` +
+  `with_active_cuda_stream` scope, per the Phase 5 note that the
+  NULL default stream cannot be captured); the true halves
+  (kt-native graph-stable buffers, capture-control FFI now on a kt
+  context stream, used to live on a candle `CudaStream` handle)
+  kept in one block; "so Candle / cudarc prime any lazy allocator
+  state" reworded to name the live actor (cudarc)
+- `d6f889ae6` generate.rs — 1 ins / 1 del (net **0**):
+  "safetensors/Candle names" reworded to "safetensors names" (the
+  registry keys off safetensors tensor names; "Candle names" was
+  not a category). NOTE: `generate.rs` stayed exactly at its
+  12223-line budget ceiling (net 0) — no ceiling sync required
+- `44e874e54` packed_weight_registry.rs — 1 ins / 1 del (net **0**):
+  "Candle/safetensors names" reworded to "safetensors names" (same
+  adjudication as generate.rs)
+- `8457297d5` weights.rs — 1 ins / 1 del (net **0**): "(candle Tensor
+  or raw CUDA buffers)" reworded to "(kt Tensor or raw CUDA buffers)"
+- `fb3aafb0d` engine.rs — 1 ins / 1 del (net **0**): "Phase 2: real
+  Qwen3.5 inference via candle or CUDA kernels" reworded to "via kt
+  ops or CUDA kernels" (names the live substrate; the Phase 1 mock
+  + trait structure it sits in are untouched)
+- HEADLINE NET LINES **−13** (14 ins / 27 del across 6 edited files,
+  zero code lines)
+
+**Adjudicated KEEP (no edit needed) — 8 files fully (49 refs) + the
+remaining refs in the 6 edited files (23 refs):**
+- `generate.rs` (19/19): the repeated "(#1082) kt-native logits —
+  forward + sampler are both kt; no candle bridge" pattern verified
+  against the live tree (`model_dispatch.rs` is kt-typed per 96a/96b,
+  `sampling.rs` imports bare `Tensor` = `kiln_tensor`);
+  "the candle `crate::paged_kv_cache` module is gone; the kt twin
+  `PagedKvCacheKt` is the production cache" verified (only
+  `paged_kv_cache_kt.rs` exists); "route through the kt-typed
+  `KvCache::new_kt`" verified live; the tracing::warn string
+  ("falling back to candle CPU LoRA delta path") FROZEN — string
+  literal in live code, same category as 96c's "using Candle
+  fallback"
+- `cuda_graph.rs` (13/13 remaining): L280 borrow-adapter history
+  (verified round 95), L1055/2460/2948 kt-typed claims (verified —
+  `decode_step_paged` returns kt `Tensor`, position buffer
+  kt-allocated), L1465 "seqused_k is U32 in the kt path (was i32 in
+  candle; same bytes)" (verified round 95), L1658–1659 "the candle
+  `update_cuda_scalar` helper … is gone" (symbol verified absent
+  workspace-wide), L2076–2078 "no candle alloc … capture runs on a
+  FRESH non-default stream" (verified live at the `new_stream()`
+  + `with_active_cuda_stream` sites), L2301–2302 explicitly
+  labeled "Historical context" bug-postmortem (kept)
+- `marlin_proj.rs` (9/9 remaining): "all kt-native, no candle"
+  (verified in the pack body), the #1082 "no
+  `kt_tensor_from_candle_cuda_copy` bridge" history (symbol verified
+  absent), the "no `kt_logits_to_candle` /
+  `candle_to_kt_activation` round-trip" claims (both symbols
+  verified absent), "no candle detour" cast notes (verified against
+  the live F16/BF16 kt casts)
+- `sampling.rs` (10/10): the module doc "candle has been removed
+  from the sampler. Mirrors `forward.rs`" verified (imports are
+  `kiln_tensor`), the repeated "`flat`/`logits` is already a kt
+  tensor, so the candle->kt bridge is gone" verified at the live
+  `try_kt_*` call sites, "kt `argmax` yields an I64 index tensor …
+  (candle's `argmax` returned U32)" past-tense history (verified in
+  96b against the live `to_vec1::<i64>` read-back), test name
+  `test_cuda_sampling_penalties_kt_default_matches_candle_path` +
+  its eprintln string FROZEN (test names / log strings)
+- `kv_cache.rs` (5/5): module-doc history VERIFIED AGAINST GIT —
+  the candle-era `KvCache` at 9424fd43d^ stored head-major
+  `[1, num_kv_heads, max_seq_len, head_dim]` and `append` wrote
+  along dim 2, exactly as the doc claims (commit 9424fd43d
+  "contiguous KvCache -> kt-native token-major; drop candle
+  (#1082)" is the migration); the L195 "kept `Result` for call-site
+  compatibility with the previous candle bridge" design-history
+  kept
+- `lib.rs` (3/3): "`cuda_train` deleted — the hand-rolled
+  candle-autograd" + "`backend::for_device` (candle-typed shim) was
+  deleted … production uses `for_device_kt`" — all four symbols
+  (`cuda_train`, `CudaTrainTensor`, `CudaBackwardOp`,
+  `cuda_backward`) verified absent, `for_device_kt` verified live
+- `speculative.rs` (3/3): the module doc verified — all four named
+  forward entries (`model_forward_head`, `model_forward_paged`,
+  `model_forward_paged_with_last_hidden`, `mtp_forward_step`) exist
+  in `model_dispatch.rs` and return kt `Tensor`, `model_forward_kt`
+  returns `Result<Tensor>` (kt)
+- `lora_loader.rs` (2/2): "`register_resident_activation` … now
+  takes `&kiln_tensor::Tensor`" verified against the live trait
+  signature (`runtime_register_resident_activation(&self, tensor:
+  &kiln_tensor::Tensor)`)
+- `packed_weight_registry.rs` (1/1): "read the absolute device
+  pointer through the kt CUDA bridge instead of the candle storage
+  chain" — `kiln_kt_bridge::cuda_input_device_ptr` verified live
+- `fp8.rs` (3/3) + `decode_buffers.rs` (3/3) + `adapter_merge.rs`
+  (1/1): true present-tense "no candle" claims; the decode_buffers
+  "tensor()/tensor_mut()/with_bf16_device_ptr were DELETED — all
+  three had zero callers" claim verified (none present in the live
+  file); the fp8 "legacy candle impl used … to_scalar" past-tense
+  and "no candle `randn` dependency" kept
+
+**Frozen code / test-protected strings preserved:**
+- `generate.rs` tracing::warn message (live string literal)
+  untouched
+- `sampling.rs` test name `…_matches_candle_path` + its eprintln
+  string untouched
+- `kv_cache.rs` / `speculative.rs` / `sampling.rs` module docs
+  untouched beyond the adjudicated sites
+
+**Verification (own runs, final state):** `cargo test -p kiln-model`
+**394/0/0 EXACT** (run twice: after the five main-file edits and
+again after engine.rs); `cargo clippy -p kiln-model --all-targets`
+**0 own-code warnings** (all observed warnings are kiln-tensor's 14
++ kiln-core's 3, pre-existing dependency warnings, unchanged);
+`cargo fmt -p kiln-model --check` clean; both Python gates pass
+(`check_repository_artifacts.py`: 6697 tracked paths;
+`check_production_file_budget.py`: 647 files — generate.rs at its
+12223-line ceiling, unchanged); `git status` clean.
+
+**Campaign plan status:** 96a DONE, 96b DONE, 96c DONE, **96d DONE**
+— the kiln-model campaign (618 refs / 46 files per the round-95
+census) is **COMPLETE**. Every in-campaign ref is adjudicated:
+stale/false/dangling refs deleted or reworded to the live actor;
+verified-true #1082 history, verified absence/dispatch claims, and
+frozen strings kept.
+
+**Signature:** kiln cleanup agent, round 96d of the CLEANUP.md
+campaign — 6 files edited / 8 files verified-clean (14/14
+adjudicated), HEADLINE NET LINES **−13** (10 ref lines removed:
+82 → 72 remaining, all adjudicated KEEP), 394/0/0 exact, zero code
+lines, commits `1196b43bc` + `c3cac7531` + `d6f889ae6` +
+`44e874e54` + `8457297d5` + `fb3aafb0d` + this ledger commit.
