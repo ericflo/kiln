@@ -825,7 +825,7 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
                     .map(|blocks| {
                         blocks
                             .iter()
-                            .filter(|&b| (b.get("type").and_then(|t| t.as_str()) == Some("text")))
+                            .filter(|&b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
                             .map(|b| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
                             .collect::<Vec<_>>()
                             .join("\n")

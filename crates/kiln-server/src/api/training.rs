@@ -30,7 +30,6 @@ use crate::training_preflight::{
     estimate_vk_native_recompute_working_set_with_residency, format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
-use kiln_memory::vram::VramSource;
 use kiln_train::TrainingDataProvenance;
 
 #[derive(Debug)]
@@ -4837,6 +4836,7 @@ mod grpo_jsonl_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_memory::vram::VramSource;
     use kiln_train::checkpoint::{
         CheckpointArtifact, CheckpointFileRole, TrainingCheckpointData, TrainingCheckpointManifest,
         TrainingCheckpointOptimizer, TrainingCheckpointPrecision, TrainingCheckpointProgress,
@@ -4851,8 +4851,6 @@ mod tests {
     };
     use std::sync::{Arc, Barrier, RwLock};
     use tower::ServiceExt;
-
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn optimizer_support_errors_preserve_structured_http_semantics() {

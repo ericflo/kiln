@@ -889,7 +889,7 @@ mod tests {
             safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
                 .unwrap();
         let serialized =
-            safetensors::tensor::serialize([("ignored.weight", tensor)].into_iter(), None).unwrap();
+            safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
         std::fs::write(dir.path().join("adapter_model.safetensors"), serialized).unwrap();
 
         let lora = LoraWeights::load(dir.path(), 0, Device::Cpu).unwrap();

@@ -4,19 +4,19 @@
 //!
 //!   - `kiln-eval list [--server URL]` — list registered suites
 //!   - `kiln-eval register --file PATH [--force] [--server URL]` —
-//!       upload a suite JSON file to the server
+//!     upload a suite JSON file to the server
 //!   - `kiln-eval run [--suite NAME | --file PATH] [--adapter NAME]
 //!                    [--include-baseline] [--max-tokens N] [--temperature F]
 //!                    [--watch] [--json] [--server URL]` —
-//!       submit an eval and (optionally) wait for results
+//!     submit an eval and (optionally) wait for results
 //!   - `kiln-eval compare --suite NAME --adapter NAME [NAME ...] [--watch]`
-//!       run a compare across multiple adapters and print a head-to-head
+//!     run a compare across multiple adapters and print a head-to-head
 //!   - `kiln-eval replay --job ID [--run-index N] [--json]`
-//!       reproduce one retained run and require a byte-identical verdict
+//!     reproduce one retained run and require a byte-identical verdict
 //!   - `kiln-eval trace-suite --input TRACE.jsonl --output SUITE.json`
-//!       sample production tool-call turns from a generic JSONL export
+//!     sample production tool-call turns from a generic JSONL export
 //!   - `kiln-eval panel-suite --suite FULL.json --max-examples N`
-//!       build a weighted stratified fast panel from a full eval suite
+//!     build a weighted stratified fast panel from a full eval suite
 //!
 //! All commands respect `KILN_SERVER_URL` and the `--server` flag (default
 //! `http://localhost:8420`). Output is human-readable by default; pass
@@ -901,9 +901,7 @@ fn allocate_panel_counts(strata: &[PanelStratum], target_examples: usize) -> Vec
 
     let mut keep_counts = vec![0usize; strata.len()];
     if target_examples >= strata.len() {
-        for keep in &mut keep_counts {
-            *keep = 1;
-        }
+        keep_counts.fill(1);
         let remaining = target_examples - strata.len();
         let remaining_capacity = strata
             .iter()
@@ -1482,19 +1480,17 @@ async fn poll_until_done(
         match payload.state.as_str() {
             "completed" | "failed" | "cancelled" => return Ok(payload),
             _ => {
-                if let Some(p) = payload.progress.as_ref() {
-                    if p.examples_total > 0 {
-                        let frac = p.examples_completed as f32 / p.examples_total as f32;
-                        if last_progress.map_or(true, |last| (frac - last).abs() > 0.01) {
-                            eprintln!(
-                                "  {}/{} ({:>5.1}% acc, mean={:.2})",
-                                p.examples_completed,
-                                p.examples_total,
-                                p.running_accuracy * 100.0,
-                                p.running_mean_score
-                            );
-                            last_progress = Some(frac);
-                        }
+                if let Some(p) = payload.progress.as_ref().filter(|p| p.examples_total > 0) {
+                    let frac = p.examples_completed as f32 / p.examples_total as f32;
+                    if last_progress.is_none_or(|last| (frac - last).abs() > 0.01) {
+                        eprintln!(
+                            "  {}/{} ({:>5.1}% acc, mean={:.2})",
+                            p.examples_completed,
+                            p.examples_total,
+                            p.running_accuracy * 100.0,
+                            p.running_mean_score
+                        );
+                        last_progress = Some(frac);
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;

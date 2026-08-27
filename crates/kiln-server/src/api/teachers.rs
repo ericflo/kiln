@@ -1005,8 +1005,7 @@ mod tests {
         let tensor =
             safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
                 .unwrap();
-        let bytes =
-            safetensors::tensor::serialize([("ignored.weight", tensor)].into_iter(), None).unwrap();
+        let bytes = safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
         std::fs::write(adapter.join("adapter_model.safetensors"), bytes).unwrap();
     }
 
@@ -1165,7 +1164,12 @@ mod tests {
             registration_probe_config(config).timeout_ms,
             REGISTRATION_REMOTE_PROBE_TIMEOUT_MS
         );
-        assert!(REGISTRATION_REMOTE_PROBE_TIMEOUT_MS < 60_000);
+        // Compile-time invariant: the registration probe must time out before
+        // the full registration request (assertions_on_constants: check at build
+        // time instead of re-checking the constant at runtime on every run).
+        const {
+            assert!(REGISTRATION_REMOTE_PROBE_TIMEOUT_MS < 60_000);
+        }
     }
 
     #[test]

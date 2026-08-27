@@ -672,8 +672,8 @@ fn current_vram_used_bytes(selector: VramProbeSelector) -> u64 {
 ///   - 0-9:   GSM8K-style grade-school math word problems (prose format)
 ///   - 10-19: HumanEval-style Python function signatures + docstrings
 ///   - 20-29: C4-style natural English text fragments
-/// This exercises MTP acceptance across math prose, source code, and
-/// general-domain English, producing a true domain-balanced variance band.
+///     This exercises MTP acceptance across math prose, source code, and
+///     general-domain English, producing a true domain-balanced variance band.
 const PROMPT_POOL: [&str; 30] = [
     // === 0-9: GSM8K-style grade-school math word problems ===
     // 0: eggs-per-day revenue
@@ -1052,7 +1052,7 @@ fn bench_latency_paged(
     let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     let max_total = actual_prompt_tokens + max_output_tokens;
-    let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+    let num_blocks = max_total.div_ceil(PAGED_BLOCK_SIZE);
 
     // #1082 candle-drop: candle `PagedKvCache::new_kt(&device_kt, ...)` ->
     // kt `PagedKvCacheKt::new(..., device)`. Pools are allocated on the

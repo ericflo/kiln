@@ -33,7 +33,7 @@ use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest
 use crate::error::ApiError;
 use crate::gpu_coordination::write_guard_while_healthy_async;
 use crate::latency_observability::{
-    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
+    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
@@ -246,9 +246,7 @@ fn slow_request_log_values(
     state: &AppState,
     record: &RequestRecord,
 ) -> Option<SlowRequestLogValues> {
-    let Some(threshold) = state.slow_request_warn_threshold else {
-        return None;
-    };
+    let threshold = state.slow_request_warn_threshold?;
     let elapsed = std::time::Duration::from_millis(record.duration_ms);
     if elapsed < threshold {
         return None;

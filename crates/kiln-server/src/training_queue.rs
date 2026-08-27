@@ -5302,8 +5302,6 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
 
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
-
     #[test]
     fn admitted_sft_loss_route_must_match_execution_backend() {
         use kiln_model::backend::SftFlceLossRoute;

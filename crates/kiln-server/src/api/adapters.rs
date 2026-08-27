@@ -1807,7 +1807,7 @@ async fn adapter_detail(
             .collect()
     };
     // Newest-first: more-recent submitted_at (larger Instant) first.
-    training_pairs.sort_by(|a, b| b.0.cmp(&a.0));
+    training_pairs.sort_by_key(|b| std::cmp::Reverse(b.0));
     let training_jobs: Vec<AdapterLinkedJob> = training_pairs.into_iter().map(|(_, v)| v).collect();
 
     let mut eval_pairs: Vec<(String, AdapterLinkedEval)> = {

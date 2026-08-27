@@ -482,11 +482,10 @@ pub(super) fn mock_prompt_logprobs(
 ) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
     let vocab_size = state.model_config.vocab_size.max(1);
     let mut selections = Vec::with_capacity(prompt_tokens.len().saturating_sub(1));
-    for pos in 1..prompt_tokens.len() {
+    for &observed_token_id in &prompt_tokens[1..] {
         // The mock distribution is score-descending in token-id order:
         // logprob(token_id) = -token_id. This keeps behavior deterministic
         // while exercising the same K/K+1 observed-token rule as real models.
-        let observed_token_id = prompt_tokens[pos];
         let observed_in_top_k = (observed_token_id as usize) < top_k;
         let mut entries = Vec::with_capacity(top_k + usize::from(!observed_in_top_k));
         entries.push(CompactPromptLogprobEntry {

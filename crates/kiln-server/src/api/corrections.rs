@@ -23,7 +23,7 @@
 //! | DELETE | /v1/corrections/{request_id}  | Remove one row                   |
 //! | DELETE | /v1/corrections               | Clear active (untrained) rows    |
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::routing::{delete, get};
@@ -382,6 +382,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn store(dir: &Path) -> CorrectionsStore {
         CorrectionsStore {

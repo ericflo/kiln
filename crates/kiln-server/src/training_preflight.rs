@@ -10,7 +10,7 @@
 
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_memory::vram::{GpuVramInfo, VramSource};
+use kiln_memory::vram::GpuVramInfo;
 use kiln_model::backend::SftFlceLossRoute;
 use kiln_train::{CheckpointBoundaryPolicy, GrpoGroup, Optimizer, SftExample};
 

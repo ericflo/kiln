@@ -1,5 +1,6 @@
 use super::batch::*;
 use super::*;
+use crate::latency_observability::TokenPhaseDurations;
 use kiln_core::config::ModelConfig;
 
 struct PromptLogprobDropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
