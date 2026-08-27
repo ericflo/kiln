@@ -7311,3 +7311,9 @@ New finding: **kiln-core has 3 warn-by-default sites** (type_complexity tokenize
 **Gates:** kiln-model default 394/0 (after capability-report regen); 3-lane clippy: default 0, cuda 10 (5 lib + 5 tests, all report-only above), rocm 3 (report-only); fmt clean; budget pass (2 exact-ceiling syncs: rocm_graph.rs 10862→10854, generate.rs 12236→12233); artifacts pass; capability report regenerated (line numbers).
 **Salvage note (9th):** timeout at 45 min mid-class; 8 sub-agent class commits + 1 orchestrator-committed class (collapsible_if). All commits incremental; no uncommitted pile at handoff.
 **Queue:** 118 kiln-train (29/27 per 116b) → 119 tail crates (kiln-server 6/9, kiln-rmsnorm-kernel 6/6 = the six  sites above, kiln-tensor 1/6, kiln-rocblas 1/1, **kiln-core 3 — new**) → 120 dead-code adjudication (cuda_graph.rs:671, model_dispatch.rs:2978/3186,  owner question, kiln-tensor , kiln-flash-attn rocm-only fns) → 121 judgment classes (incl. kiln-core type_complexity).
+**Corrections (round 117a, queue line):** the six rmsnorm sites are the
+`manual_is_multiple_of` sites (kt_api.rs:521/1241/1876/2203/2269/2340);
+the 120 dead-code queue is: cuda_graph.rs:671 (`captured_graph_count`),
+model_dispatch.rs:2978/3186 (the two `lm_head_argmax_..._eager` fns),
+the `max_seqlen_k` owner question (full_attention.rs:2224),
+kiln-tensor `MultiRowBatchUnsupported`, kiln-flash-attn rocm-only fns.
