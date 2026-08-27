@@ -341,9 +341,9 @@ where
                     "tape_bridge: tape-authoritative(kt) backward walk: {e}"
                 ))
             })?;
-        // Same grad-map build as the candle variant: deposit each recorded kt
-        // input grad under every mapped key (the LoRA-Parameter deposits are
-        // KT_PARAM_DEPOSIT_TAG-tagged via `register_input_mapping_kt`).
+        // Same grad-map build as the (removed) candle variant: deposit each
+        // recorded kt input grad under every mapped key (the LoRA-Parameter
+        // deposits are KT_PARAM_DEPOSIT_TAG-tagged via `register_input_mapping_kt`).
         let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
             cell.borrow()
                 .as_ref()
