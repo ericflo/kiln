@@ -14,8 +14,8 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12219,
-      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The 31-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "max_lines": 12223,
+      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration. This exact increase keeps the shared multi-row behavior-logprob graph path beside the decode lifecycle it reuses while preventing unrelated growth. The line growth is the cleanup-campaign `#[allow]`-with-evidence annotations: 31 lines from rounds 67\u201371 (2026-08-26/27) plus 4 lines from round 76 (the vk_batch_sampling_contexts type_complexity allow + its 3-line rationale, matching its non-vulkan sibling). This exact ceiling sync follows the 2da875018 precedent."
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
@@ -24,8 +24,8 @@
     },
     {
       "path": "crates/kiln-model/src/vk_decode_resident.rs",
-      "max_lines": 5228,
-      "rationale": "Resident Vulkan decode owns tightly coupled shader state and lifecycle validation; this exact ceiling forbids further consolidation into the file."
+      "max_lines": 5230,
+      "rationale": "Resident Vulkan decode owns tightly coupled shader state and lifecycle validation; this exact ceiling forbids further consolidation into the file. The 2-line round-76 delta is the too_many_arguments allow + one-line rationale on record_resident_decode_rope_tables_into (flat record-into ABI, round-67 GDN-ABI precedent)."
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",

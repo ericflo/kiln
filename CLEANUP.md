@@ -2738,3 +2738,72 @@ warnings observed during the sweep (kiln-tensor `should_implement_trait`,
 touched. The protected OPD bench-gate cluster
 (`check_backend_latency_fixtures.py --require-covered`,
 `try_kt_paged_kv_*`) was not touched. No uncommitted pile remains.
+
+## Cleanup Agent (round 76) — 2026-08-26 — kiln-model vulkan-feature clippy sweep: 70 kiln-model warnings → 0
+
+**Steering:** the round-67 ledger deferred item — sweep
+`cargo clippy -p kiln-model --features vulkan --all-targets` to zero
+kiln-model warnings while keeping every other gate green, committing by
+lint category. Re-measured on the pristine tree (`9892c9fdc`,
+post-round-75): **70 unique kiln-model warnings** (14 lint types; the
+round-67 estimate had been 73). Classification per protocol:
+judgment-class keeps (flat kernel-ABI argument lists, fixed kernel
+output tuples) → `#[allow(...)]` + one-line rationale (round-67
+GDN-ABI precedent), signatures NOT reshaped; everything else fixed
+properly, value-identical. No public signature changes; no
+audited-region restructures; the protected `try_kt_paged_kv_*` family
+and benchmarks/contracts untouched.
+
+**Commits (each verified with `cargo fmt --check`, kiln-model clippy,
+and `cargo test -p kiln-model` 394 passed / 0 failed, then committed):**
+
+| commit | category | effect |
+|---|---|---|
+| `015d30a36` | collapsible_if (21 warnings, 18 sites, 9 files) | every nested `if cond { if let … }` merged into a single let-chain (edition 2024, already used in-crate); value-identical, no control-flow restructuring. Sites: model_dispatch.rs `model_forward_paged`, `model_forward_paged_last_token`, `model_forward_paged_last_token_resident`, `model_forward_paged_last_token_greedy` (×2), `model_forward_paged_inner_bounded`; primitives.rs `rms_norm`; transformer.rs `transformer_block_paged_with_rope_tables`; linear_attention_streaming.rs `gated_deltanet_forward_decode_if_inner`; lm_head.rs `lm_head_forward_backend_decode_if`; vulkan_decode_state.rs `insert_recurrent_state_resident_buffer` (×2); vulkan_residency.rs; vulkan_resources.rs `acquire_resident_scratch` + `acquire_resident_scratch_host_visible`; vulkan_gdn.rs `gdn_decode_gates_recurrent_rmsnorm` |
+| `b8b0267f2` | mechanical (34 warnings, 9 files) | `identity_op` ×7 (vk_decode_resident.rs byte-size math, drop leading `1 *`), `redundant_closure` ×7 (tape_forward.rs `backward_with_seeds` + tests/vk_sft_step_proof.rs ×3 + tests/vk_tape_record_proof.rs ×3 pass `ops::add` directly), `needless_borrows_for_generic_args` ×7 (tape_forward.rs `NarrowCompositeBackward::apply`: `Tensor::cat(&[lz, grad, rz])` drops the redundant refs — `Tensor: AsRef<Tensor>` — and 3 `Tensor::zeros(dev)` sites drop the redundant `&dev` — `Device` is `Copy`, bound is `impl Borrow<Device>`; these 3 surfaced once the cat borrows were fixed), `needless_return` ×3 (tape_forward.rs, model_dispatch.rs, backend/mod.rs — statement is already last in the block), `useless_conversion` ×2 (backend/vulkan.rs, drop no-op `.into_iter()`), `manual_is_multiple_of` ×4 (vk_decode_resident.rs ×3, vulkan_gdn.rs ×1), `manual_contains` ×3 (model_dispatch.rs), `needless_range_loop` ×1 (vulkan_attention.rs). Also: `docs/backend-capability-report.json` regenerated (`runtime_decode_resident_pool_ready` 1750→1748, paired method 1737→1735) because code line numbers shifted — keeps the `generated_capability_report_check_mode_is_non_mutating_and_enforced` gate green |
+| `7e6ac5b20` | doc comments (3 warnings, 3 files) | `doc_lazy_continuation` ×2: vk_decode_resident.rs (wrap reworded so no continuation line begins with `+`), vulkan_training.rs (blank `///` line before the "This is the contract…" paragraph); `empty_line_after_doc_comments` ×1: vulkan_linear.rs orphaned `#1082` doc block moved onto `max_flop_per_dispatch()` |
+| `c05365bc9` | items_after_test_module (2 warnings, 11 functions, 2 files) | vulkan_linear.rs: 9 `pub(super)` fns moved above `mod tests`; vulkan_gdn.rs: `gdn_gates` + `gdn_gated_rms_norm` moved above `mod tests` (pure text relocation, 341/341 insertions-deletions) |
+| `803368e2d` | too_many_arguments judgment keeps (11 sites, 5 files) | `#[allow(clippy::too_many_arguments)]` + one-line rationale each: vulkan_gdn.rs `gdn_chunkwise_forward`, `gdn_full_chunk_forward`, `gdn_decode_gates_recurrent_rmsnorm`, `gdn_recurrent_qk_norm_prefill_native_head_last` (flat kernel ABIs — args map 1:1 to kernel parameters); vulkan_linear.rs `linear_decode_sample`, `linear_decode_sample_batch` (flat per-row sampling ABI); vulkan_weights.rs `prewarm_full_attn_qkv_weights_kt`, `prewarm_mlp_decode_weights_kt` (one tensor per weight + f32/bf16 accumulators); vk_decode_resident.rs `record_resident_decode_rope_tables_into` (flat record-into ABI); tests/adamw_pytorch_oracle.rs `assert_f32_close`, `assert_values` (test helpers, not API surface) |
+| `b9b7cd154` | type_complexity judgment keeps (2 sites, 2 files) | `#[allow(clippy::type_complexity)]` + rationale each: vulkan_gdn.rs `gdn_chunk_prep` (the Option 6-tuple is the fixed `gdn_chunk_prep` kernel output contract shared by the `runtime_gdn_chunk_prep` trait seam — same allow as backend/mod.rs and the sibling backend impls); generate.rs `vk_batch_sampling_contexts` (was missing the allow its non-vulkan sibling `batch_sampling_contexts` already carries — same 2-element `(seeds, histories)` pair) |
+| (ledger commit) | policy sync | `contracts/production-file-budget-v1.json`: generate.rs ceiling 12219 → 12223 (+4: the round-76 type_complexity allow + its 3-line rationale), vk_decode_resident.rs ceiling 5228 → 5230 (+2: the too_many_arguments allow + one-line rationale on `record_resident_decode_rope_tables_into`); exact-ceiling sync per the 2da875018 precedent (same pattern as the kiln-train/opd rounds 67–71 entries) |
+
+**Classification decisions (the 13 judgment-keep sites):**
+- **`too_many_arguments` ×11 — KEPT.** Flat kernel-ABI / sampling-ABI /
+  prewarm-ABI argument lists where each argument maps 1:1 to a distinct
+  kernel parameter (or per-row slice of one), plus 2 test-helper
+  assertion signatures. Wrapping them in structs would add
+  allocation/copy without clarity and would break the 1:1 audit mapping
+  (round-67 GDN-ABI precedent; same shape as the round-71/75 kernel-crate
+  keeps). Signatures NOT reshaped.
+- **`type_complexity` ×2 — KEPT.** Fixed kernel-output / sampling-context
+  tuple contracts already allowed at the trait seam; a named struct
+  would change the seam or add indirection for a positional contract.
+
+**Policy repair (caught by the standing gate, red before / green
+after):** `generate.rs` (12219 → 12223) and `vk_decode_resident.rs`
+(5228 → 5230) sat exactly at their reviewed ceilings and grew by the
+annotation blocks above; ceilings synced to the exact re-verified line
+counts with per-file round-76 deltas in the rationale.
+
+**Verification (after the final commit, all green):**
+- `cargo clippy -p kiln-model --features vulkan --all-targets` — **0
+  kiln-model warnings** (before: 70 unique warnings / 14 lint types);
+  dependency-crate warnings (e.g. kiln-tensor) out of scope, untouched.
+- `cargo clippy -p kiln-model --all-targets` (default features) —
+  **0 kiln-model warnings**.
+- `cargo test -p kiln-model` — **394 passed / 0 failed** (identical
+  count at every commit; includes the artifact/capability contract
+  gates).
+- `cargo fmt --check` (workspace) — clean.
+- `python3 scripts/check_repository_artifacts.py` — passed (6694
+  tracked paths).
+- `python3 scripts/generate_backend_capability_report.py --check` —
+  passed (report committed in `b8b0267f2`, in sync with line numbers).
+- `python3 scripts/check_production_file_budget.py` — passed (647
+  files, 5000-line default, 14 reviewed exceptions) after the ceiling
+  sync.
+- `git status` — clean (ledger commit).
+
+**Remainder:** none inside kiln-model. The `try_kt_paged_kv_*`
+family, benchmarks, and protected crates were not touched. No
+uncommitted pile remains.
