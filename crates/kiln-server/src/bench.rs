@@ -294,8 +294,8 @@ struct BenchArgs {
     /// from paying unrelated benchmark costs.
     latency_only: bool,
     /// Number of throwaway latency runs to execute before the measured run.
-    /// This keeps low-level kernel A/Bs from mixing first-use Metal/Candle
-    /// compilation latency into prefill and decode timing.
+    /// This keeps low-level kernel A/Bs from mixing first-use backend
+    /// compilation latency (e.g. Metal JIT) into prefill and decode timing.
     latency_warmup_runs: usize,
     /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
     /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
@@ -1070,14 +1070,14 @@ fn bench_latency_paged(
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
     // When `accelerator.kt_api_mode = "all"` is on
     // AND we're on a CUDA device, allocate a kt twin alongside the
-    // candle `paged_cache` and pass it to `model_forward_paged_with_kt`
-    // below so every paged-KV write inside the GQA attention writer
-    // mirrors into the kt cache. When the gate is off (the default) or
+    // primary `paged_cache` (both kt now) and pass it to
+    // `model_forward_paged_with_kt` below so every paged-KV write inside
+    // the GQA attention writer mirrors into the kt cache. When the gate is off (the default) or
     // the device isn't CUDA, `try_kt_paged_kv_cache_new` returns `Ok(None)`
     // and the decode loop is bit-identical to the previous behavior.
     //
-    // The candle `paged_cache` remains authoritative for reads; the kt
-    // mirror only exercises the writer surface — that's enough to
+    // The primary `paged_cache` remains authoritative for reads; the kt
+    // twin only mirrors writes (exercises the writer surface) — that's enough to
     // validate constructor + writer end-to-end on a real production
     // workload (the latency bench).
     //
@@ -2174,13 +2174,10 @@ fn bench_latency_paged_mtp(
         .context("MTP prefill (paged with last-hidden) failed")?
     };
 
-    // #1082 forward-flip: the paged-with-last-hidden entry now returns kt
-    // tensors. The MTP step (`speculative_mtp_decode_step`) and the candle
-    // host sampler both still consume candle tensors, so bridge the
-    // last-position hidden state to candle once here and thread the candle
-    // `h_prev` through the decode loop.
-    // #1082: speculative_mtp_decode_step + greedy_sample are kt-native now —
-    // keep h_prev / prefill_last as kt (no candle bridge).
+    // #1082 forward-flip: the paged-with-last-hidden entry, the MTP step
+    // (`speculative_mtp_decode_step`), and the host sampler
+    // (`greedy_sample`) are all kt-native now — keep h_prev /
+    // prefill_last as kt (no candle bridge).
     let mut h_prev = prefill_h_prev_kt;
 
     // prefill_logits is already [1, 1, V] (kt). Squeeze the time dim.
