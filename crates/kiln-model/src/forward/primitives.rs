@@ -605,7 +605,7 @@ pub(super) fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel
 //   inner `VulkanRmsNormOp`: Vulkan is inference-only; training autograd is
 //   CUDA-BF16 / kt-tape only now.
 
-/// Candle-op reference RMSNorm. Kept as the CPU path and as the correctness
+/// Reference RMSNorm. Kept as the CPU path and as the correctness
 /// oracle for the fused CUDA kernel. Matches HF semantics exactly:
 /// `out = (1 + w) * x * rsqrt(mean(x^2) + eps)` with F32 reduction and epilogue.
 pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
@@ -1826,7 +1826,7 @@ pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
 /// separate the path from the baseline composite. Mirrors the
 /// other Phase 7 elementwise helpers.
 ///
-/// `to_dtype(same)` is a no-op in candle but `cuda_cast` short-
+/// `to_dtype(same)` is a no-op, but `cuda_cast` short-
 /// circuits to a `.contiguous()`, so we treat `target == src.dtype()`
 /// as an early `Ok(None)` and let the caller decide.
 #[cfg(feature = "cuda")]
@@ -1845,7 +1845,7 @@ pub(super) fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor
         return Ok(None);
     }
     if x.dtype() == target {
-        // Same-dtype `.to_dtype` is a no-op in candle (zero-copy view);
+        // Same-dtype `.to_dtype` is a no-op (zero-copy view);
         // skip the kt-API path so we don't pay an unnecessary dtod copy.
         return Ok(None);
     }
