@@ -63,12 +63,12 @@ fn ref_backward(
         for i in 0..sq {
             let n = i + 1; // causal: keys 0..=i
             let mut scores = vec![0.0f32; n];
-            for j in 0..n {
+            for (j, slot) in scores.iter_mut().enumerate() {
                 let mut s = 0.0f32;
                 for d in 0..hd {
                     s += qi(i, h, d) * ki(j, hk, d);
                 }
-                scores[j] = s * scale;
+                *slot = s * scale;
             }
             let m = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
@@ -80,12 +80,12 @@ fn ref_backward(
                 ex.iter().map(|&e| e / sum).collect()
             };
             let mut dp = vec![0.0f32; n];
-            for j in 0..n {
+            for (j, slot) in dp.iter_mut().enumerate() {
                 let mut acc = 0.0f32;
                 for d in 0..hd {
                     acc += si(i, h, d) * vi(j, hk, d);
                 }
-                dp[j] = acc;
+                *slot = acc;
             }
             let pdp: f32 = (0..n).map(|j| p[j] * dp[j]).sum();
             let ds: Vec<f32> = (0..n).map(|j| p[j] * (dp[j] - pdp)).collect();
