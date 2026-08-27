@@ -2558,6 +2558,84 @@ re-verified line counts per the 2da875018 exact-ceiling precedent:
 batching_engine.rs 8637 → 8641, training_queue.rs 7968 → 7976,
 api/training.rs 6616 → 6614.
 
+## Cleanup Agent (round 74) — 2026-08-26 — remaining small crates swept: 8 crates to 0 own-code warnings, 2 deny-by-default errors cleared
+
+**Scope:** the remaining small crates with own-code clippy warnings
+(the round-16 40226e667 candidate list minus rounds 16–17, re-measured
+fresh at 6c08178e3 on the rustc/clippy 1.96.1 toolchain):
+kiln-conv1d-kernel, kiln-gdn-kernel, kiln-flash-attn (7 build-script
+warnings each), kiln-mps (1), kiln-graph-cuda (2), kiln-hip (8),
+kiln-opd-loss-kernel (9), kiln-autograd (11) — plus the kiln-vulkan-kernel
+red baseline (2 deny-by-default `approx_constant` errors). Behavior
+preserved everywhere; no public signature changed; every test baseline
+unchanged. One commit per crate, per the round-16/17 single-commit-per-
+build-script-crate precedent.
+
+| commit | crate | before → after | approach |
+|---|---|---|---|
+| `c8118b8e1` | kiln-conv1d-kernel | build.rs 7 → 0 | `needless_borrow` (`&format!` → `format!`), `ptr_arg` (`&PathBuf` → `&Path`), `collapsible_if` ×5 (nested if-let → edition-2024 let-chains in `find_rocm_root`/`find_cuda_root`) — same build-script pattern as round 16 kiln-rmsnorm-kernel |
+| `1403826b1` | kiln-gdn-kernel | build.rs 7 → 0 | same 7-warning sweep (identical build-script template across the three GPU-kernel crates) |
+| `bb3e006e5` | kiln-flash-attn | build.rs 7 → 0 | same 7-warning sweep; nvcc-location comment preserved |
+| `3c3a5b71c` | kiln-mps | 1 → 0 | `derivable_impls`: manual `impl Default for MpsUmaHint` → `#[derive(Default)]` + `#[default]` on the `PrivateGpuOnly` variant |
+| `51a9c0e23` | kiln-graph-cuda | 2 → 0 | `redundant_clone` in replay-plan tests: `[input.clone()]` → `std::slice::from_ref(&input)` (round-66 kiln-graph precedent) |
+| `0347fded8` | kiln-hip | 8 → 0 | `question_mark` ×6 (`if let Err(e) = check_call_status(..) { return Err(e); }` → `..?;` — 5 flagged + 1 surfaced after the conversions), `unnecessary_cast` ×1 (`hipError_t` is already an i32 alias), `collapsible_if` ×1 (let-chain) |
+| `9dec9c856` | kiln-opd-loss-kernel | 9 → 0 | build.rs `ptr_arg`; `doc_lazy_continuation` ×4 (root cause below — reword, not indent); `too_many_arguments` ×4 kept with `#[allow]` + justification (flat FFI input contract; the public composite-bwd is the kiln-train integration surface, called from kiln-train/src/opd.rs:5476) |
+| `02bd8fc35` | kiln-autograd | 11 → 0 | `excessive_precision` (√(2/π) literal kept with allow; see below), `needless_range_loop` (zip), `manual_is_multiple_of`, 4 dead test locals removed (round-69 kiln-param precedent), `manual_repeat_n` ×3 (`repeat_n`, stable since 1.82), `useless_vec` (`&vec![1.0f32; 12]` → `&[1.0f32; 12]`) |
+| `c27c345d4` | kiln-vulkan-kernel | 2 deny errors → 0 | `approx_constant`: round-trip test payload `vec![3.14, -1.0, 2.718, 0.0]` → arbitrary `vec![1.5, -1.0, 2.25, 0.0]` — 3.14 (~π) and 2.718 (~e) tripped the deny-by-default lint and red-lined the whole crate; round-51 erasing_op / round-65 kiln-eval red-baseline precedent |
+
+**doc_lazy_continuation root cause (new finding, kiln-opd-loss-kernel
+`kt_api` module header, list item 2):** the wrapped line beginning
+`+ reverse-KL reduction…` was parsed by pulldown-cmark as a NEW NESTED
+bullet list inside item 2 (CommonMark allows `+` bullets), which turned
+the following 4 lines into lazy continuations of that nested item — so
+indentation was the WRONG fix (verified with a minimal vA/vB/vC repro;
+only the reword removes the lint). Reworded `gather + matmul +
+log-softmax + reverse-KL` → `gather, matmul, log-softmax, and
+reverse-KL`. Same bug family as round 65 (kiln-eval line starting with
+`//`) and round 67 (kiln-model list), but a distinct underlying parse.
+
+**excessive_precision (kiln-autograd `activation.rs` GELU tanh
+approximation):** `const C: f32 = 0.7978845608_f32` (√(2/π)). Verified
+the f64-intermediate closed form `(2.0_f64 / std::f64::consts::PI).sqrt()
+as f32` is bit-identical to the literal (both f32 bits 0x3F4C422A; the
+native f32 computation is 1 ULP lower), but `f64::sqrt` is not const
+(E0015) so a const closed form is impossible and a `let` binding would
+trip non_snake_case — kept the literal with `#[allow]` + the
+bit-identity note. Same constant and handling as the kiln-tensor
+round-19 documented precedent (the f64-intermediate identity was the
+missing piece in that round's reasoning).
+
+**Explicit remainder (NOT swept, recorded for a dedicated round):** the
+kiln-vulkan-kernel own-code warning set — ~62 lib + ~75 test/example
+warnings: 49 `too_many_arguments` on the flat Vulkan kernel-launch
+argument lists (all judgment-keep candidates, mirroring the WGSL kernel
+signatures 1:1, same shape as the round-66 kiln-flce-kernel and round-71
+kiln-server keeps), 17 `needless_borrow`, 10 `no_effect`, plus a few
+`collapsible_if`/`type_complexity` sites. Full-round scale, comparable
+to round 68 (kiln-server 44) or round 73 (kiln-model 79).
+
+**Environmental note (unchanged baseline):** the kiln-conv1d-kernel /
+kiln-gdn-kernel / kiln-flash-attn *test* targets still fail to build on
+this host from the pre-existing `cudarc` build-script failure (no nvcc)
+— same as the round-66 kiln-marlin-gemm precedent; their lib targets
+compile clean and clippy-clean, which is what the build-script sweep
+targeted.
+
+**Verification:** per crate — `cargo clippy --all-targets` 0 own-code
+warnings (baselines 7/7/7/1/2/8/9/11) and the vulkan-kernel error-free
+(baseline: 2 deny-by-default `approx_constant` errors);
+`cargo fmt -p … --check` clean on all 8 crates; `cargo test -p …`
+identical to baseline — kiln-hip 29 passed/0 failed, kiln-mps
+14/0, kiln-graph-cuda 3/0, kiln-opd-loss-kernel 33/0 (includes the
+FD-parity composite-bwd tests around the kept signatures),
+kiln-autograd 290 passed/0 failed/1 ignored (272 lib + 18 integration;
+includes the FD tests around every touched site), kiln-vulkan-kernel
+172 passed/0 failed. Final gates: `cargo check -p kiln-server -p
+kiln-model -p kiln-train` green; `python3
+scripts/check_repository_artifacts.py` passed (6694 tracked paths);
+`python3 scripts/check_production_file_budget.py` passed (647 files,
+14 reviewed exceptions — none added this round).
+
 **Verification (final gate, after every commit):**
 - `cargo test -p kiln-server` — **all targets pass, 0 failures**; lib
   **1189 passed / 0 failed / 1 ignored** (the pre-existing baseline).
