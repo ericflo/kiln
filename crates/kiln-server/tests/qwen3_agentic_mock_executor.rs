@@ -110,7 +110,7 @@ fn xml_call(name: &str, params: &[(&str, &str)]) -> String {
 async fn builtin_qwen3_agentic_core_validates_and_lists_tools() {
     let suite = kiln_eval::qwen3_agentic_core();
     assert!(suite.examples.len() >= 20);
-    assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 4));
+    assert!(suite.tools.as_ref().is_some_and(|t| t.len() == 4));
     // Round-trip via JSON to confirm the suite is fully serializable.
     let json = serde_json::to_string(&suite).unwrap();
     let parsed: EvalSuite = serde_json::from_str(&json).unwrap();
