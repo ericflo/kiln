@@ -149,11 +149,11 @@ fn reference_bwd_host(
         let rms_inv = 1.0 / (sum_sq / hidden as f32 + eps).sqrt();
 
         let mut s = 0.0f32;
-        for h in 0..hidden {
+        for (h, &w) in weight_host.iter().enumerate().take(hidden) {
             let idx = row_off + h;
             let gate = silu_f32(z_host[idx]);
             let d_normed = dout_host[idx] * gate;
-            s += d_normed * x_host[idx] * weight_host[h];
+            s += d_normed * x_host[idx] * w;
         }
 
         let rms_inv3 = rms_inv * rms_inv * rms_inv;
