@@ -64,8 +64,8 @@
     },
     {
       "path": "crates/kiln-train/src/opd.rs",
-      "max_lines": 8496,
-      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap. The 49-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent."
+      "max_lines": 8493,
+      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap. The 49-line delta is the cleanup-campaign `#[allow]`-with-evidence annotations from rounds 67\u201371 (2026-08-26/27), and this exact ceiling sync follows the 2da875018 precedent. The round-86 delta is the kiln-train stale-comment sweep (net -3 comment lines, zero code lines)."
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",

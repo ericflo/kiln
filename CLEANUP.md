@@ -3622,3 +3622,118 @@ table re-verified against the tree (helpers present at
 delegation sites delegating, error texts intact) — consistent. A full
 systematic sample audit of the last 6 rounds' claims remains available
 as a future-round target.
+
+## Cleanup Agent (round 86)
+
+**Date:** 2026-08-27
+
+**Task:** stale-comment sweep in **`crates/kiln-train` only** (the round-85
+lesson applied: one crate per round, per-file-group commits). Non-marker
+comments making present-tense claims the current code refutes —
+candle-era labels where the code is kt-native, references to deleted
+functions/files, stale behavior claims. Comment-only: zero code-line
+changes. Anything requiring a code change (string literals, an unused
+dev-dependency, stale loop-variable names) is reported for a future round,
+not fixed.
+
+**Scope mapping:** 61 `.rs` files; 362 "candle" references in 23 src files
++ 6 in examples/tests at start. Every reference adjudicated FIX or KEEP
+against the current code (symbol existence greps, function bodies, the
+`kiln-kt-bridge`/`kiln-model`/`kiln-optim` owners).
+
+**Change (19 unique files, 3 commits, 245 insertions / 244 deletions):**
+
+| Group | Commit | Files |
+|---|---|---|
+| 1 — `trainer/` module | `c4aaa074f` | `trainer/{forward_backward,tensor_support,lora_parameters,sft,grpo,grpo_jsonl,reference_policy,tests/mod}.rs` (8 files, 24 hunks) |
+| 2 — crate root + manifest | `3e6b422f1` | `Cargo.toml`, `cd_types.rs`, `lib.rs`, `opd.rs`, `tape_step.rs`, `train_receipt.rs` (6 files, 25 hunks) |
+| 3 — parity test + final sweep | `6d95245a3` | `tests/vk_cuda_opd_parity.rs`, `trainer/{checkpoint_execution,grpo_step,forward_backward}.rs`, `grpo_tape_shim.rs`, `opd_tape_shim.rs`, `opd.rs` (7 files, 23 hunks) |
+
+Plus the exact-ceiling budget sync below (the round-86 net −3 in
+`opd.rs` crossed under its reviewed ceiling).
+
+**Adjudication table (stale claim → refuting code → action):**
+
+| File | Stale present-tense claim (pre-fix) | Refuting current code | Action |
+|---|---|---|---|
+| `trainer/forward_backward.rs` | module doc + 4 sites: candle `GradStore`/`loss.backward()` as the current producer; `with_tape_authoritative_scope` (deleted fn) | `optimizer_step_from_kt_grad_store` consumes kt `GradStore`; only `with_tape_authoritative_scope_kt` exists (`tape_bridge.rs:319`) | fixed to kt-tape claims |
+| `trainer/tensor_support.rs` | `Tensor`/`Device` aliases described as candle | `cd_types.rs` aliases are kt-pinned (`kiln_tensor::*`) | fixed |
+| `trainer/lora_parameters.rs` | `sync_to_master` "candle CPU device"; `apply_sgd_update` + "candle Var storage"; `Var::set` doc; "candle island" + deleted `safetensors_load_file` | `sync_to_master` is kt-native (`lora_parameters.rs:474`); `apply_sgd_update` deleted (only `apply_sgd_update_kt` exists); `load_from_safetensors`/`save_peft` use `kiln_tensor::safetensors` | fixed (L866/L947 history notes kept) |
+| `trainer/sft.rs` | L456/L1080/L1349: candle forward/backward as current path | SFT is unconditionally kt tape-authoritative post-#1082 | fixed (L1040-1046 history + L1089 GPU-only claim kept) |
+| `trainer/grpo.rs` | L270: candle device handoff | `device` is kt downstream; safetensors I/O kt-native | fixed |
+| `trainer/grpo_jsonl.rs` | L1635: same device handoff | same | fixed |
+| `trainer/reference_policy.rs` | L400: `token_log_probs` "candle" + `keep:` rationale claiming a live candle caller | `token_log_probs` is kt; CPU-only builds still need the `#[allow(dead_code)]` (called from `grpo_tape_shim.rs:1958` in the CUDA+ path) | fixed claim, kept marker + attribute |
+| `trainer/tests/mod.rs` | 3 present-tense candle claims in test docs | kt tape producer is the validated path | fixed (history/fixture refs kept) |
+| `lib.rs` | 7 stale sites: forward-ref "ECHO env-CE has no kt tape root" guidance, candle `trainer` as current, deleted `echo`/`flce_candle_shim` described as present | ECHO resurrection PR2 folds env-CE into the fused GRPO tape root (`grpo_tape_shim.rs:70-82`); `trainer.rs` is candle-free; the modules are deleted | fixed (L1782/L1828 ECHO resurrection history kept) |
+| `cd_types.rs` | 3 sites describing the aliases as candle | all 6 aliases are kt-pinned | fixed |
+| `tape_step.rs` | 4 module-doc sentences as if the candle path were current | kiln-train has since adopted the Tape substrate exclusively | minimally rewritten to past-tense history |
+| `opd.rs` | 14 stale sites across the round: "optimizer bridges LoRA grads to candle until kiln-optim goes kt-native" (×3); "bridge kt<->candle GPU tensors"; "shared by the candle and tape-authoritative paths"; "returns a detached candle scalar … registered for the bridge"; "candle dep still blocked on the kt-typed OPD forward surface" (contradicted by its own module note); "`Device` is the per-crate candle facade alias (= candle_core::Device)"; "candle-keyed deposits"; "ECHO env-CE has no kt tape root" (L1509/2784/4688 family) | `optimizers.rs:578-580` kt-native end-to-end (kt master + moments); tape adapters record kt GPU ops; callers are `opd_step_loss`/tape/CP steps; `try_tape_opd_scalar_mean_cuda_kt` returns `Option<kiln_tensor::Tensor>`; crate candle deps are gone; `cd_types::Device = kiln_tensor::Device`; `decode_kt_param_deposit` tag semantics | fixed |
+| `train_receipt.rs` | stale candle example in a doc | kt-native receipt flow | fixed (L13-20/L2387 history kept) |
+| `Cargo.toml` | 5 stale sites: candle deps/bridges described as current; L62-67 contradicted by the accurate L98-104 note; "half dev-dep for `inject_gradient_parity`" (deleted fn) | manifest candle deps removed; `half` currently unreferenced in kiln-train; `inject_gradient_parity` deleted | fixed (L48-52/L98-104 history kept) |
+| `tests/vk_cuda_opd_parity.rs` | module note references deleted `..._via_kt_forward_op` shim as current | shim deleted with candle drop; test runs `opd_top_k_reverse_kl_per_position_kt` directly | fixed to past-tense |
+| `trainer/checkpoint_execution.rs` | L704-716: "6 call sites use `inject_grad_shim::inject_gradient_via_shim`" (both fns deleted) + "candle-core dep can move to dev-deps" (already fully removed); L718 "NOT the LoRA Vars" | `full_attention_single_layer_tiled_mlp_reverse`/`inject_gradient_via_shim` don't exist; candle-core fully removed | fixed (history preserved) |
+| `trainer/grpo_step.rs` | L1111: "ECHO env-CE has no kt tape root, so an ECHO-active GRPO step is not supported on the kt-only path" | the same function builds `EchoEnvSpec` and passes it to the fused root when ECHO is enabled (L1142-1166; `grpo_tape_shim.rs:70-82` "ECHO env-CE (resurrection PR2 — COVERED)") | fixed |
+| `grpo_tape_shim.rs` | 6 stale sites: deleted `try_tape_cross_entropy_from_logits_cuda`/`try_tape_opd_scalar_mean_cuda` names; "Saves the candle `logits` … only the candle I/O bridges remain"; "returned candle scalar … caller's `loss.backward()` is `{loss: ones}`" + "kt -> candle copy-back failure"; "dispatch keeps non-GPU on the candle path"; "final `[1,T,V]` grad bridged back to candle" | the `..._kt` roots exist (`tape_forward.rs:954`, `opd_tape_shim.rs:103`); the node saves kt logits; `try_tape_grpo_pg_loss_from_logits_kt` returns `Result<Option<kiln_tensor::Tensor>>`; the backward is fully kt | fixed (L54/L123/L242/L4439/L4497 accurate notes kept) |
+| `opd_tape_shim.rs` | "Only the SCALAR loss crosses back to candle … `with_tape_authoritative_scope` can resolve `loss.id()` → `loss_kt`"; "returned candle scalar … output IO mapping registered for the bridge" | scalar stays kt; seeded at `loss_kt.id()` via `with_tape_authoritative_scope_kt` (L180: "no kt->candle copy, no `register_output_mapping`") | fixed |
+
+**Considered and kept (evidence recorded so future rounds don't re-litigate):**
+1. All `#1082` / "was a candle X" / "deleted" / "removed" / "pre-C2" past-tense migration-history notes (e.g. `opd.rs` module header L65-85, `grpo_tape_shim.rs` L59-63 "Pre-C2" paragraph, `vk_cuda_opd_parity.rs` L20-26, `sft.rs` L1040-1046, `lib.rs` L29-71 kernel-crate drop history).
+2. All accurate negative claims: "no candle bridge", "NO full-tensor kt->candle grad copy", "No candle: the old path bridged …", "candle-free finite-difference test" (`forward_backward.rs` L8/L670, `grpo_tape_shim.rs` L242/L2147, `opd.rs` L1741-1743/L2799-2800/L3983/L4238, `optimizers.rs` L11-12/L568/L578).
+3. `cross_entropy_from_logits_grad_candle` references (`grpo_tape_shim.rs:1926`) — **the function exists** in `kiln_model::forward` (misnomer, kt-native, self-documented as such in `kiln-model/src/tape_forward.rs:828`); not a deleted-symbol ref.
+4. The two `#[ignore]`d-test rationales and the `try_kt_paged_kv_*` family (`tests/mod.rs:6233`, `sft.rs:1078-1090`) — documented current limitations, claims consistent with the code that bails.
+5. Test names/oracle baselines containing "candle" (`tape_authoritative_grads_match_candle_baseline_bf16` at `opd.rs:7980`) — fixture/oracle identity, not a claim.
+6. `keep:` markers with `#[allow(dead_code)]` (`reference_policy.rs:405-410`) — marker + attribute preserved; only the false factual claim inside the rationale fixed.
+7. `examples/long_context_grpo_bench.rs:333` — past-tense "mirrors the candle CUDA path", accurate.
+8. `sft.rs:1401`, `checkpoint_execution.rs:560`, `opd.rs:8094/8103/8140`, `forward_backward.rs:454` "LoRA Var(s)" labels — claims (grads are routed/evicted/detached as stated) remain true; naming-only staleness, kept per the keep-by-default rule to bound the sweep.
+
+**Out of scope (code, reported for a future round — NOT fixed):**
+1. `half = "2"` dev-dependency in `crates/kiln-train/Cargo.toml` is **unused** (zero `half::` references in the crate; the fn it was for, `inject_gradient_parity`, is deleted). Removing a manifest line is not comment-only.
+2. String literal `"synced LoRA Vars to candle before GRPO save"` (`trainer/grpo.rs:1215`) and `"synced LoRA Vars to candle before streamed GRPO save"` (`trainer/grpo_jsonl.rs:2503`) — `tracing::debug!` payloads are code.
+3. Stale loop-variable names `candle_raw` / `candle_grads` (`opd.rs:5191/5632/5657`) — code identifiers.
+
+**Exact-ceiling budget sync (gate-mandated, 2da875018 precedent):**
+`contracts/production-file-budget-v1.json` — `crates/kiln-train/src/opd.rs`
+`max_lines` 8496 → **8493** (the round-86 comment edits net −3 lines,
+crossing under the exact reviewed ceiling; the gate requires the ceiling to
+track the file). Rationale updated to record the round-86 delta.
+
+**Verification (standing gates, after all three commits):**
+- `cargo test -p kiln-train` — **534 passed / 0 failed / 2 ignored** (exact baseline).
+- `cargo clippy -p kiln-train --all-targets` — **zero** kiln-train warnings (remaining warnings are pre-existing in dependency crates; `grep -c crates/kiln-train` on the clippy output = 0).
+- `cargo fmt -p kiln-train --check` — clean.
+- `cargo check -p kiln-train` — clean (each group verified before commit; the cuda-gated paths re-read by source, no local CUDA).
+- `python3 scripts/check_repository_artifacts.py` — **passed** (6697 tracked paths).
+- `python3 scripts/check_production_file_budget.py` — **passed** (647 files, 14 reviewed exceptions; opd.rs at its new exact ceiling).
+- `git status` — clean after the ledger commit.
+- Comment-only proof: `git diff` of all three groups filtered for changed lines not matching comment syntax → **0 non-comment lines**.
+
+**kiln-server density read (next-round scoping):** 134 `.rs` files; only **5**
+files contain "candle" — 46 references total: `bench.rs` (16), `device.rs`
+(15), `training_preflight.rs` (10), `state.rs` (4), `api/training.rs` (1).
+Much lower density than kiln-train's 23-file/362-ref surface; a single
+session should fit the round-85 timeout budget.
+
+**Notes for future rounds:**
+- The kiln-train "candle" surface is now the historical floor: every
+  remaining reference is either past-tense #1082 migration history, an
+  accurate negative claim, a fixture/oracle/test name, or a reported
+  out-of-scope code artifact (items above). A present-tense claim that
+  candle is the current producer is a regression.
+- The three out-of-scope items (unused `half` dev-dep, two
+  "synced LoRA Vars to candle" log strings, `candle_raw`/`candle_grads`
+  identifiers) are a ready-made round-87 candidate set if a code-touching
+  round is scheduled.
+- `cross_entropy_from_logits_grad_candle` (kiln-model) is a real fn with a
+  candle-era name — if a future round renames it, `grpo_tape_shim.rs:1926`
+  and the `kiln-model` docs reference it.
+
+**Signature:** kiln cleanup agent, round 86 of the CLEANUP.md campaign —
+stale-comment sweep of `crates/kiln-train` (19 unique files, 72 hunks,
+245+/244−, comment-only proven by scripted diff filter): every one of the
+362 "candle" references adjudicated FIX/KEEP against the current code;
+21 stale present-tense claims fixed across three committed file groups
+(`c4aaa074f`, `3e6b422f1`, `6d95245a3`), 14+ considered-and-kept items
+recorded with evidence, 3 out-of-scope code artifacts reported; all standing
+gates green (534/0/2 kiln-train, clippy zero own-code warnings, fmt clean,
+both Python gates passing, exact-ceiling budget synced 8496→8493, git
+clean); kiln-server density read (5 files / 46 refs) queued for round 87.
