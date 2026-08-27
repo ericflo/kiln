@@ -497,7 +497,9 @@ fn validate_sha256(field: &'static str, value: &str) -> Result<(), TeacherIdenti
     Ok(())
 }
 
-fn is_lower_sha256(value: &str) -> bool {
+/// SHA-256 digest shape check: exactly 64 lowercase hexadecimal characters.
+/// Shared with the logit-cache module for prefix-digest validation.
+pub(crate) fn is_lower_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

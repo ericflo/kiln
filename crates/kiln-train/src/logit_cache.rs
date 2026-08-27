@@ -30,6 +30,7 @@ use crate::logit_source::{
     validate_full_vocab_logprobs_batch, validate_logit_request, validate_topk_logprob_row,
     validate_topk_logprobs_batch,
 };
+use crate::teacher_identity::is_lower_sha256;
 
 const CACHE_SCHEMA_V3: &str = "kiln.logit-cache.v3";
 const CACHE_PATH_PREFIX_V3: &str = "v3-";
@@ -904,13 +905,6 @@ fn read_bounded_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
 
 fn invalid_data(error: anyhow::Error) -> IoError {
     IoError::new(ErrorKind::InvalidData, format!("{error:#}"))
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
