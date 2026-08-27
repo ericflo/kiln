@@ -76,9 +76,7 @@ use kiln_tensor::Layout;
 #[cfg(any(test, feature = "cuda", feature = "rocm"))]
 use kiln_tensor::TensorId;
 #[cfg(feature = "cuda")]
-use kiln_tensor::{
-    CudaStorage, cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx,
-};
+use kiln_tensor::{CudaStorage, cuda_fp8_quantize_direct, cuda_zeros_ctx};
 use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
 static NEXT_KV_POOL_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);

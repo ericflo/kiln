@@ -7,8 +7,6 @@
 //! the production decode path.
 
 use anyhow::{Context, Result, bail, ensure};
-#[cfg(feature = "cuda")]
-use cudarc::driver::DevicePtr;
 use std::fmt;
 use std::marker::PhantomData;
 
