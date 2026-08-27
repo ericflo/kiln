@@ -378,7 +378,7 @@ fn admission_backend_phases_follow_new_and_already_active_requests() {
     let (queued_tx, mut queued_rx) = mpsc::channel(4);
     queue_test_request(&mut actor, request(201, 1), queued_tx);
 
-    assert_eq!(actor.admit_waiting(), false);
+    assert!(!actor.admit_waiting());
     assert_eq!(actor.run_decode_batch(), 2);
     for response in [&mut active_rx, &mut queued_rx] {
         match response.blocking_recv() {
@@ -479,7 +479,7 @@ fn exclusive_barrier_phases_follow_queued_requests_not_active_requests() {
     actor.run_pending_exclusive_mutations_at_barrier();
     assert_eq!(resize_rx.blocking_recv().unwrap(), Ok(17));
     assert_eq!(adapter_rx.blocking_recv().unwrap(), Ok(()));
-    assert_eq!(actor.admit_waiting(), false);
+    assert!(!actor.admit_waiting());
     assert_eq!(actor.run_decode_batch(), 1);
     match queued_rx.blocking_recv() {
         Some(EngineEvent::Token { timing, .. }) => {
