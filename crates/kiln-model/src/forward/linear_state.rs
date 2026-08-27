@@ -90,8 +90,7 @@ impl LinearAttentionState {
     }
 
     /// Create fresh inference state for `batch` decode rows, allowing callers
-    /// whose accelerator is not represented by Candle's `Device` enum to name
-    /// the backend explicitly.
+    /// to name the backend explicitly.
     pub fn new_with_batch_for_inference_backend(
         config: &kiln_core::config::ModelConfig,
         batch: usize,
@@ -328,7 +327,7 @@ impl LinearAttentionState {
             // Phase 7 (#1082): when stable KT routes are enabled and every input is a
             // contiguous CUDA tensor of a supported dtype, route the
             // axis-0 concat through `kiln_tensor::cuda_concat(_, 0)`.
-            // Falls through to the candle composite when any
+            // Falls through to the kt composite when any
             // precondition fails so behavior is identical with the
             // gate off.
             let recurrent_cat = {
