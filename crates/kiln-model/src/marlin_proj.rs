@@ -34,15 +34,13 @@ use half::f16;
 ///
 /// `b_packed`/`scales` are stored as kt (`kiln_tensor::Tensor`) so the kt-API
 /// GEMM (`kiln_marlin_gemm::marlin_w4a16_gemm_kt`, optional dependency) consumes them directly on
-/// the decode hot path. The candle→kt bridge happens **once** at pack time in
-/// `upload_packed` (a single device-to-device copy at model load), not on
-/// every per-token decode call.
+/// the decode hot path. The kt upload happens **once** at pack time in
+/// `upload_packed` (at model load), not on every per-token decode call.
 #[derive(Clone, Debug)]
 pub struct MarlinPackedProj {
     /// Packed 4-bit weights in Marlin's tiled/permuted layout.
-    /// Shape: `[k / 16, n * 16 / 8]`. Built from candle's `I32` packed
-    /// buffer; the kt-side dtype is `U32` (same 4-byte layout — see
-    /// `kiln_kt_bridge::candle_dtype_to_kt`'s I32→U32 mapping).
+    /// Shape: `[k / 16, n * 16 / 8]`. The packer emits `i32`; the kt
+    /// dtype is `U32` (same 4-byte layout).
     pub b_packed: kiln_tensor::Tensor,
     /// Per-group scales, Marlin-permuted. Shape `[k / groupsize, n]`, dtype `f16`.
     pub scales: kiln_tensor::Tensor,
@@ -269,14 +267,8 @@ pub fn pack_from_bf16_batch(
 /// the BF16→F16 cast, the kernel call, and the F16→BF16 cast entirely
 /// in kt-space, with **no** `kt_logits_to_candle` / `candle_to_kt_activation`
 /// round-trip on the activation or the output. The packed weight + scales
-/// are stored as kt tensors in [`MarlinPackedProj`] (bridged once at pack
-/// time in [`upload_packed`]) and handed straight to the kernel — **no**
-/// per-call candle→kt bridge of the weights.
-///
-/// Numerically identical to [`matmul_bf16`]: same FFI symbol
-/// (`marlin_w4a16_gemm_kt`), same F16-only kernel, same BF16↔F16 cast at
-/// the boundary — the only difference is the activation/result never make a
-/// candle detour.
+/// are stored as kt tensors in [`MarlinPackedProj`] and handed straight to
+/// the kernel — **no** per-call candle→kt bridge of the weights.
 #[cfg(feature = "cuda")]
 pub fn matmul_bf16_kt(
     x_kt: &kiln_tensor::Tensor,
@@ -331,7 +323,7 @@ pub fn matmul_bf16_kt(
             .context("marlin_proj kt: x_fp16 contiguous")?
     };
 
-    // #1082: the packed weight + scales are already kt (bridged once at
+    // #1082: the packed weight + scales are already kt (built once at
     // pack time in `upload_packed`). Hand them straight to the kernel —
     // no per-call candle→kt bridge on the decode hot path. They were built
     // contiguous at pack time, so no `.contiguous()` is needed here.
