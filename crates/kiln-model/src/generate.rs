@@ -283,7 +283,7 @@ pub struct ModelRunner {
     /// resolved by the owning runtime options before construction.
     metal_graph: Mutex<MetalGraphRunner>,
     /// Phase A explicit decode weight registry. Decode kernels address weights
-    /// by enum keys instead of safetensors/Candle names.
+    /// by enum keys instead of safetensors names.
     /// Phase A.5: lazily built on first hot-path access via `packed_weight_registry()`.
     /// Building eagerly in `ModelRunner::new` measured a 22% c=1 paged decode regression
     /// (Validation #4: 42.6 vs 54.76 baseline), so construction stays cheap and the
