@@ -8001,3 +8001,26 @@ and which gate or script owns it — the same job `docs/README.md` and
 (benchmarks), `3de5c4267` (bench-results), `73f30287f`
 (qualification). This ledger entry lands as its own follow-up commit
 (wave-3/4 precedent) so the recorded hashes are stable.
+
+## Link-rot campaign — CLOSURE [2026-08-28]
+
+Full-repo relative-link scan (926 relative links in tracked .md,
+code fences stripped): **83 broken, 0 of them fixable**:
+
+- **17** in owner-managed surfaces (capabilities/, docs/plans/,
+  docs/public/, docs/site/) — report-only per campaign rule.
+- **~49** historical raw-artifact pointers in docs/archive/
+  (profiling-artifacts/*.json|csv, ./artifacts/, *.log, *.env):
+  raw dumps purged by policy; files exist in git history. Left as
+  frozen historical pointers by design (wave-4 leave-alone protocol).
+- **6** CLEANUP.md ledger prose mentions (ledger is history, not a
+  live index).
+- **~11** false positives: code-fence fragments (`positions=positions,`),
+  directory-link checks, `fn@crate::...` prose.
+- **~7** PHASE11 site PNGs (purged from site by design) + pr1383 raw
+  logs (wave-1 policy).
+
+Trajectory: 130 (wave-2 census) → 83 (post wave-4). All mechanically
+fixable hrefs have been repaired (63 in wave 4 + 1 in wave 2).
+**Campaign closed.** New broken links must be caught by the Pages
+link-checker (site-scope) or re-run of this scan during a docs wave.
