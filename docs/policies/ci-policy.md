@@ -115,7 +115,7 @@ Replace the backend with `cuda`, `rocm`, or `metal` as appropriate. The
 captured device identity belongs in the receipt; do not copy it into runtime
 dispatch, workload admission, or product defaults.
 
-Validate every portable qualification and serving-benchmark receipt:
+Validate every portable qualification receipt:
 
 ```bash
 mapfile -d '' receipts < <(
@@ -124,15 +124,20 @@ mapfile -d '' receipts < <(
 if ((${#receipts[@]})); then
   python3 scripts/qualification/receipt.py "${receipts[@]}"
 fi
-
-mapfile -d '' benchmark_receipts < <(
-  find benchmarks/receipts -type f -name '*.json' -print0 | sort -z
-)
-if ((${#benchmark_receipts[@]})); then
-  python3 scripts/bench-concurrent-batch.py \
-    --validate-receipt "${benchmark_receipts[@]}"
-fi
 ```
+
+Validate serving-benchmark receipts with the retained-evidence gate:
+
+```bash
+scripts/qualification/validate_retained_evidence.sh
+```
+
+The gate splits receipts by driver version: current-driver receipts validate
+against the live `scripts/bench-concurrent-batch.py --validate-receipt`, while
+retained legacy-driver receipts (frozen evidence under
+`benchmarks/receipts/rocm/strix-halo/`) validate against the validator pinned
+to their checkpoint commit, with the files required to stay byte-identical to
+that checkpoint.
 
 On the qualification machine, add the strict local checks to the relevant
 receipt paths:

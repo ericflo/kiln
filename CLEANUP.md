@@ -10196,3 +10196,45 @@ owner queue. It supersedes the scattered "owner queue" mentions in rounds 37,
 where an older entry and this list disagree, this list governs. Execution of
 any item here still requires the owner's approval phrasing above; no item in
 this list is executed by a cleanup round by default.
+
+## 160. ci-policy.md serving-receipt validation procedure (round 160)
+
+`docs/policies/ci-policy.md` ("Local qualification") instructed:
+`python3 scripts/bench-concurrent-batch.py --validate-receipt <all
+benchmarks/receipts>`. Since `ec2bf43f9` ("Restore green integration
+checks", 2026-07-27) the enforced gate is
+`scripts/qualification/validate_retained_evidence.sh` (invoked by
+`repository-hygiene.yml`), which splits receipts by driver version:
+current-driver receipts validate against the live driver script, while the 51
+retained legacy-driver receipts (frozen Strix Halo evidence under
+`benchmarks/receipts/rocm/strix-halo/`) validate against the validator pinned
+to their checkpoint commit, and must stay byte-identical to that checkpoint.
+
+Proof the documented command was stale: it fails on the committed tree
+(`rc=2`, "receipt must use kiln.serving-benchmark.v1 driver version in
+{26, 27}"), while the real gate passes (`rc=0`: 10 current + 51 legacy
+benchmark receipts OK, plus 17 legacy oracle results OK). Precedent class:
+R14 (QUICKSTART factual drift), R26 (deny.toml header), R156 (bench-results
+README factual regressions).
+
+Fix: split the block — qualification receipts keep their `receipt.py` command
+(passes verbatim, all receipts OK), serving-benchmark receipts now point to
+`scripts/qualification/validate_retained_evidence.sh` with a short
+two-tier description (no duplicated version constants or commit hashes).
+
+Proof: documented procedure runs verbatim and passes (qualification block
+`rc=0`; retained-evidence gate `rc=0`); `check_repository_artifacts.py`
+passes (4564 tracked paths); `check_production_file_budget.py` passes (646
+files); docs site builds 59 documents and static smoke passes
+(`KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs`,
+`rc=0`); browser smoke phase not runnable in this environment (no Chromium;
+same as round 8). Audited and found sound this round (no change): `deploy/`
+(Dockerfile crate list == workspace, build.rs set exact, workflow/README
+claims match), `benchmarks/` (61 receipts, counts, README examples, BENCHMARKS.md
+cited numbers match receipt contents, validator story), `docs/policies/
+qualification.md` (receipt links resolve, oracle validation prose accurate),
+`desktop/` (icons, window URLs, capabilities consistent with usage;
+autostart is server-side `ManagerExt` usage, correctly needs no frontend
+permission), `docs/papers/` (frozen corpus, untouched). BENCHMARKS.md's
+"CI validates both families" sentence remains accurate at its level of
+abstraction and was left unchanged.
