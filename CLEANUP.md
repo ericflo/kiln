@@ -9358,3 +9358,24 @@ a future round.
   scans must be recursive-directory greps, not file-list greps.
 - **0 deletions.** Option B closed; all five R142 options (A/B/C/D +
   free-roam) now adjudicated this session.
+
+## Round 144 — three remaining seams closed (empty files, dead $defs, UI JS) [2026-09-02]
+
+- **Zero-byte tracked files + .gitkeep**: all 10+ empty
+  capabilities/caps/*.jsonl + the single .gitkeep sit inside
+  capabilities/ (owner-managed surface; report-only, left untouched).
+  Empty untracked dirs are local run state (adapters/.eval,
+  .qualification, .claude/worktrees) — not repo hygiene.
+- **Dead $defs in contracts/*.schema.json: REPORT-ONLY, 0 deletable.**
+  11 candidates across 3 schemas, each adjudicated:
+  ChatCompletionChunkStream (cross-ref'd by kiln-http-api-v1.openapi.json
+  + docs-site smoke), 5 kiln-openenv receipt defs (gate-consumed by
+  check_openenv_contract.py and/or kiln-server .rs consumers), 5
+  thinking-budget defs (0 refs for outcome/recentRecord/serverDefaults
+  but documented standalone contract shapes; generic-name substring
+  noise on record/request). Schema defs are public contract
+  documents — deletion is owner-level; none proven inert.
+- **Desktop UI dead JS: 0 candidates across all 5 HTML files**
+  (recursive grep count > def count for every function; R141's
+  hideInstallPane remains the only one ever found).
+- 0 deletions. Three more classes closed.
