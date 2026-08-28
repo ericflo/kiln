@@ -9258,3 +9258,17 @@ paths); `git status` clean after the commit. Suite verification in CI
 scripts/qualification/run.py,
 `ff14cec30dda44411e07f7c2832f871fcbbf5c1f68288474bcfca4b0e01791df`
 scripts/qualification/result_details.py (untouched reference).
+
+## Round 139 — Rust dead-code sweep, full default workspace [2026-08-28]
+
+Authoritative compiler evidence (not grep heuristics): `cargo check`
+across all 25 default-member crates (4 largest individually, then
+workspace-minus-8-GPU-crates) — **zero `dead_code`/`never used`
+warnings**. The ~516 grep-flagged "zero-ref fns" from the first pass
+were all false positives: `#[test]` fns (zero callers by design),
+trait-impl methods (serde visitors, Metal-Rt protocol traits, From),
+feature-gated references, string/comment mentions. Rust dead-private
+code class CLOSED. pub-API removals remain owner-level (queue).
+GPU-feature-only deadness is out of reach locally (no CUDA/ROCm
+toolchain) and would require feature-matrix CI — report-only if ever
+pursued.
