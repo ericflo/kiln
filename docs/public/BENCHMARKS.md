@@ -62,7 +62,7 @@ otherwise Kiln keeps the Vulkan 1.0 untiled route.
 ## Reproduce the latest result
 
 ```bash
-KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench \
+./target/release/kiln-bench \
   --model-path Qwen3.5-4B \
   --paged \
   --latency-only \
