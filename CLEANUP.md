@@ -7440,3 +7440,38 @@ items_after_test_module kiln-tensor, unnecessary_mut_passed ×5
 kiln-model tests, max_seqlen_k owner question, kiln-tensor E0599
 ×6 test-target, kiln-train E0061 ×5 test-target) + new-code
 surfaces as they appear.
+
+## Cleanup Agent (round 121 — allow re-verification + full workspace inventory)
+
+**Date:** 2026-08-28
+
+**A. Re-verification of round-112/113/116 allows (probe protocol, one at a
+time):** removed each allow, clippy in its active lane, measured:
+- kiln-gdn-kernel kt_api.rs:109 (R112, dead_code, non-cuda lane): FIRES
+  → KEEP.
+- kiln-rmsnorm-kernel kt_api.rs:46 (R113, dead_code, non-rocm lane):
+  FIRES → KEEP.
+- kiln-tensor blaslt_request.rs:112 (R116, dead_code, default lane):
+  FIRES → KEEP.
+- kiln-tensor rocm_matmul.rs:187 (R116, needless_return, rocm lane):
+  FIRES (2 returns at :197-198) → KEEP.
+All four re-proven load-bearing; tree restored byte-identical
+(git status clean after each restore).
+**B. FULL WORKSPACE INVENTORY (new):** the manifest lists 34 crates;
+15 had never been measured by the campaign: kiln-eval,
+kiln-flce-kernel, kiln-graph, kiln-graph-cuda, kiln-graph-metal,
+kiln-graph-vulkan, kiln-marlin-gemm, kiln-memory, kiln-mps,
+kiln-openenv, kiln-param, kiln-resource, kiln-scheduler,
+kiln-tensor-id, kiln-vulkan-blas. All 15: **0 in-crate clippy spans**
+(default lane). (kiln-marlin-gemm briefly showed "1 span" — false
+positive: the build.rs "CUDA not found" warning text for the
+dependency kiln-blas; verified 0 real spans.)
+**C. Spot-checks:** `dbg!` 0 occurrences repo-wide;
+`todo!()`/`unimplemented!()` 0 in non-test src. All `#[ignore]`
+tests are legitimately gated (network/live-server/Metal device).
+**D. STATUS (authoritative):** ALL 34 crates, all buildable lanes:
+0 mechanical in-crate clippy warnings. Remaining debt is exclusively:
+judgment classes (TMA ×7, type_complexity ×3, PIP ×1,
+mut_passed ×5, await_holding_mutex ×3, should_implement_trait ×1,
+items_after_test_module ×1) + owner-design (kiln-tensor E0599 ×6,
+kiln-train E0061 ×5, max_seqlen_k) — see owner queue (round 122).
