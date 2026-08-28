@@ -7923,3 +7923,81 @@ no new untracked files exposed, tree clean.
 
 **Standing rule.** New `.gitignore` entries for artifact/output
 directories MUST be root-anchored unless deliberately depth-wild.
+
+## Wave 5 — navigation-gap READMEs: crates/, contracts/, deploy/, benchmarks/, bench-results/, qualification/ [2026-08-30]
+
+**Problem.** Six top-level trees had no index README, so a reader landing on
+any of them (from LAYOUT.md, the root README, or a raw directory listing)
+had no map of what the files are, which are generated, or which script
+enforces them. Every other curated root-level tree (docs/, scripts/,
+capabilities/, assets/, ...) already has one.
+
+**What.** One new README per tree, house style (short purpose paragraph,
+compact file tables with one-line roles, explicit generated-file marking,
+repo-relative paths only where the tree can't be reached from the file's own
+directory), 40–75 lines each, 308 lines total:
+- `crates/README.md` (75) — all 33 workspace crates grouped into 4
+  families with Cargo.toml one-line descriptions verbatim, plus the two
+  root-level non-crate members (desktop/, benches/ does not exist — see
+  discrepancies) and the bench-harness map.
+- `contracts/README.md` (50) — all 15 tracked files with the enforcing or
+  generating script per file; generated files marked with their generator
+  command.
+- `deploy/README.md` (40) — 9 files, what the two builders
+  (`docker-server-release.yml`, `runpod-image.yml`) consume, what
+  `server-release.yml` does NOT build from here, base images and runtime
+  content per the Dockerfile headers.
+- `benchmarks/README.md` (43) — 61 receipts in 3 `backend/machine`
+  directories, receipt schema and key fields, naming convention,
+  raw-output policy pointer.
+- `bench-results/README.md` (59) — all 38 tracked files: #1082 Phase 0
+  audit families with their regenerate scripts, baselines + gate scripts,
+  findings docs, backend-latency fixtures (explicitly distinguished from
+  the tracked fixture manifest `docs/backend-latency-fixtures.json`).
+- `qualification/README.md` (41) — 255 tracked files across 8 subdirectories
+  with per-directory contents, enforcement step in
+  `repository-hygiene.yml` + the manual `qualification-contract.yml` entry
+  point, schema-companion note.
+
+**Why it mattered.** These are the five trees a new contributor hits most
+often after `docs/` and `scripts/` (crates, deployment, evidence), and each
+now self-describes: what each file is, which is generated (never hand-edit),
+and which gate or script owns it — the same job `docs/README.md` and
+`scripts/README.md` do for their trees.
+
+**Verification (read/grep/test only — docs-only change, no cargo):**
+- Every cited repository path `test -e` resolves (scripted sweep over all
+  backticked paths and `|`-separated filename lists in the six files;
+  zero dangling).
+- File counts cross-checked against `git ls-files` per tree (33 crate
+  dirs; 15; 9; 61; 38; 255) and receipt groupings (2/8/51; 4/5/116/38).
+- `python3 scripts/check_production_file_budget.py` → PASS (646 files,
+  5000-line default, 14 reviewed exceptions).
+- `python3 scripts/check_repository_artifacts.py` → PASS (4,562 tracked
+  paths — exactly +6 vs the pre-change 4,556 — 119,495,607 bytes; CSV and
+  per-file ceilings within limits).
+- `docs/site/docs-manifest.json`: zero `README` entries and none of the
+  six new files referenced — no Pages build impact. (Note: `contracts/`
+  schema files and `qualification/schema/` files are already manifest
+  sources as site pages; the new READMEs are not.)
+- `git status` clean after the commits; gitignored `adapters/` and other
+  local runtime state untouched.
+
+**Discrepancies vs steering (recorded, not forced).**
+- Steering said 34 crates; the workspace has **33** (32 lib/bin crates +
+  `kiln-bench` binary crate; no hidden 34th). All 33 have descriptions,
+  so none are marked "no description".
+- Steering said "the 2 `benches/` dirs have no description" — there is no
+  `benches/` directory in the repo (root or per-crate); the bench harnesses
+  live in `crates/kiln-server/src/bench.rs` (the `kiln-bench` binary),
+  `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs`, and
+  `scripts/`. The crates README indexes the real harness map instead of a
+  phantom directory.
+- `deploy/runpod/Dockerfile` is CUDA-based (no ROCm stage); the README
+  describes only what the file actually contains.
+
+**Commit.** Six work commits (one per README): `2922728ec` (crates),
+`c4e508b1f` (contracts), `667807dac` (deploy), `ac89edb9a`
+(benchmarks), `3de5c4267` (bench-results), `73f30287f`
+(qualification). This ledger entry lands as its own follow-up commit
+(wave-3/4 precedent) so the recorded hashes are stable.
