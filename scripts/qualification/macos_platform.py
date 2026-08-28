@@ -8,7 +8,6 @@ import fcntl
 import hashlib
 import json
 import os
-import platform
 import plistlib
 import re
 import select

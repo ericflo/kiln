@@ -18,7 +18,6 @@ from typing import Any
 
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
 from strict_json import (
-    JSON_INTEGER_MAX_DIGITS,
     StrictJSONError,
     loads as strict_json_loads,
 )

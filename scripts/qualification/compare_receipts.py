@@ -17,7 +17,6 @@ from typing import Any
 
 from receipt import validate_receipt
 from strict_json import (
-    JSON_INTEGER_MAX_DIGITS,
     StrictJSONError,
     loads as strict_json_loads,
 )
