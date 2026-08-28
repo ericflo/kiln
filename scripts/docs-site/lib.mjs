@@ -29,15 +29,6 @@ const EXCLUDED_SOURCE_SEGMENTS = new Set([
   'plans',
   '.ipynb_checkpoints',
 ]);
-const IMAGE_EXTENSIONS = new Set([
-  '.avif',
-  '.gif',
-  '.jpeg',
-  '.jpg',
-  '.png',
-  '.svg',
-  '.webp',
-]);
 const OUTPUT_MARKER = '.kiln-docs-site-output';
 const DOCUMENT_KINDS = new Set(['markdown', 'json_schema', 'openapi']);
 
@@ -1551,8 +1542,4 @@ export async function buildDocsSite({
     if (!published) await rm(buildOut, { recursive: true, force: true });
   }
   return { manifest, documentCount: manifest.documents.length, assetCount: assetCopies.size };
-}
-
-export function isPublishedImagePath(path) {
-  return IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
 }

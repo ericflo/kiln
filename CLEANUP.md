@@ -9633,3 +9633,31 @@ routes or frozen prose) · untracked byproducts: **0**.
 
 Committed the wave (no push). No test-suite execution; gate scripts run as
 checks only; no frozen prose reworded; no new cleanup threads opened.
+
+## Cleanup Agent (round 153) — 2026-08-28
+
+Deleted two dead symbols from `scripts/docs-site/lib.mjs` (net −13 lines):
+the `isPublishedImagePath(path)` export (3 lines) and its now-orphaned
+`IMAGE_EXTENSIONS` constant (10 lines, `.avif/.gif/.jpeg/.jpg/.png/.svg/
+.webp`). The function was dead from the file's birth (lib.mjs was created in
+9371035bf): repo-wide grep found zero references in `build.mjs` (imports only
+`DocsBuildError` + `buildDocsSite`), the test suite (imports
+`DocsBuildError`/`buildDocsSite`/`loadAndValidateManifest`/`slugifyHeading`),
+`check_docs_site_smoke.mjs` (imports only `slugifyHeading`), and anywhere
+else (code, docs, workflows). Image handling is fully served by
+`rewriteReference(href, doc, image = true)` — which resolves, validates,
+copies to `_assets/`, and rewrites the src — so the extension-set helper is
+an abandoned earlier design, not a live seam. `extname` stayed (used at 5
+other sites). Why it mattered: the docs-site tooling had been audited only
+for behavior (build/tests), never for dead surface — this was its first
+dead-code finding, and the file's export list no longer advertises a
+nonexistent API. Verified before AND after with the docs-site-relevant gate
+subset: `node --check lib.mjs` clean; `build.mjs --validate-only` 59
+documents (identical); `node --test test/build.test.mjs` 11/11 pass (the
+fixture build exercises the live image-copy path, unaffected);
+`check_docs_site_smoke.mjs` rc=1 both on the pristine tree (git stash) and
+after — sole failure is the pre-existing Chromium absence documented in
+Rounds 5 and 152, byte-identical output; standing gates
+`check_repository_artifacts.py` (4563 tracked paths) and
+`check_production_file_budget.py` both pass; `git diff` is exactly the 13
+deleted lines, nothing else.
