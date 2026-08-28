@@ -7780,3 +7780,35 @@ href-only edits cannot make them resolve):**
 Commits: `528fbe926` (wave 2a — docs/README.md) and the wave-2b commit
 (href repair), into which this ledger entry was folded via the protocol's
 sanctioned `--amend` (so it has no stable hash of its own to record).
+
+## Wave 1 follow-up — Pages CI failure (wave-1 regression) + repair [2026-08-28]
+
+**Incident.** Wave 1's untracking of docs/audits raw dumps broke the Pages
+build: `docs/ARTIFACT_RETENTION.md:119` links
+`audits/removed-raw-artifacts-2026-07-13-v1.json`, which wave 1
+untracked (the wave swept ALL non-`.md` files without checking receipts).
+The file is the 2026-07-13 removed-artifacts MANIFEST (1.37MB, 4518
+entries, restoration commands) — a compact receipt, exactly what the
+`.gitignore` policy says to retain ("Retain compact receipts, summaries,
+manifests, and hashes instead").
+
+**Repair (commit `4ca9fd5a5`).** `.gitignore` negation
+`!docs/audits/removed-raw-artifacts-2026-07-13-v1.json` + re-track.
+Pages link checker (scripts/docs-site/lib.mjs) validates manifest
+documents (docs/site/docs-manifest.json, 59 docs) against the TRACKED
+tree and throws on the first broken link.
+
+**Standing rules (recorded from this incident).**
+1. Local `node scripts/docs-site/build.mjs --validate-only` is INSUFFICIENT
+   after any untracking: it checks the working tree, where
+   `git rm --cached` files still exist. The authoritative local check is
+   "every file-target link in a manifest document resolves to a path in
+   `git ls-files`". Scan ran post-repair: 0 in-scope broken links.
+2. Before untracking a class of files, scan ALL tracked documents for
+   links into the class (wave 1 scanned only the 60 audit reports, not
+   repo-wide). Full 130-issue link census taken; all other issues are
+   pre-existing, out of manifest scope (archive/, capabilities/,
+   root docs) or 404-by-design raw-evidence links; listed for a future
+   wave if the owner wants them addressed.
+3. Wave 1's `~16MB` estimate was off; measured tracked delta was 7.94MiB
+   (2,141 files). Tracked repo total: 6,694 → 4,553 paths.
