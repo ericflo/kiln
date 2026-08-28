@@ -7391,3 +7391,52 @@ real_model_integration.rs:1463 + await_holding_mutex ×3 (1999/2029/
 **Gates:** per-crate tests green (rmsnorm 4/0, rocblas 31/0,
 kiln-server rocm-lane test target compiles); clippy spans per above;
 fmt clean; budget + artifacts pass.
+
+## Cleanup Agent (round 120 — dead-code adjudication; keep-by-default)
+
+**Date:** 2026-08-28
+
+**DELETED (1 item, net −44 lines, commit e36104211):** kiln-train
+`cross_entropy_loss` (src/trainer/sft_data.rs:229, `pub(super)`,
+cfg-gated cuda/metal/vulkan/rocm). Evidence: zero live refs repo-wide
+(only doc prose remains — kiln-model tape_forward.rs /
+training_primitives.rs mention it in comments; the LIVE
+`cuda_cross_entropy_loss` in kiln-tensor is a different function);
+`cargo doc -p kiln-train` confirms not in the public API surface
+(glob re-export does not lift `pub(super)`); dead in cuda/rocm/
+vulkan lanes, absent in default; tests green (534/0). Hunk verified:
+exactly one function + 2 doc-reword lines, nothing else.
+**KEPT (9 items, each with liveness evidence):**
+- kiln-model `captured_graph_count` (cuda_graph.rs:671): live test
+  caller forward/tests/mod.rs:3991 (cuda test target). Lib-target
+  warning only.
+- kiln-model `lm_head_argmax_from_hidden_eager` (:2978) and
+  `..._batched_hidden_eager` (:3186): dead in CUDA lane, **live in
+  ROCm lane** (rocm_graph.rs:5333, generate.rs:6550). Cross-lane
+  liveness — KEEP.
+- kiln-train 6 tape-shim items (grpo_tape_shim.rs:153/1157/1476/
+  1903/2098, opd_tape_shim.rs:635): all live in cuda/rocm/vulkan
+  TEST targets (callers enumerated per item, e.g. :3121/:3563/
+  :4283/:2992). KEEP.
+- `MultiRowBatchUnsupported`: MIS-ATTRIBUTED in the queue — it is
+  kiln-MODEL (rocm_graph.rs:1107, private), constructed in test
+  target (:3812, :10597). KEEP.
+- kiln-flash-attn "rocm-only fns": STALE queue item — round 116
+  already closed that debt (6f9dd0b01); re-measured 0 in-crate
+  warnings in all three lanes.
+**Rescan conclusion:** the entire cross-lane "never used" set is
+test-target-live code; no further item meets deletion criteria.
+**Gates (orchestrator re-verified):** kiln-train 534/0 (default);
+kiln-model cuda + rocm lanes compile clean; kiln-train vulkan lane
+compiles clean; fmt clean; budget pass; artifacts pass (6694 paths);
+working tree clean; 1 commit (e36104211), nothing pushed by
+sub-agent.
+
+**Queue (after 120):** judgment classes only remain
+(too_many_arguments ×3 in kiln-model, TMA in kiln-server,
+await_holding_mutex ×3 kiln-server, type_complexity kiln-core ×2 +
+kiln-model reporting.rs:1052, private_in_public ×1 kiln-train,
+items_after_test_module kiln-tensor, unnecessary_mut_passed ×5
+kiln-model tests, max_seqlen_k owner question, kiln-tensor E0599
+×6 test-target, kiln-train E0061 ×5 test-target) + new-code
+surfaces as they appear.
