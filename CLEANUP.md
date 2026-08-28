@@ -8928,3 +8928,79 @@ this campaign, across all tracked file types:
 
 **Outcome: 0 stale refs, 0 deletions. The "references to deleted
 items" class is CLOSED repo-wide.**
+
+## Cleanup Agent (round 135) — 2026-08-28
+
+Fresh-eyes discovery (3 candidates) + ONE bounded execution.
+
+**Executed — candidate C: 10 unused imports deleted from live
+qualification tooling (net −10, commit 550a8879d).**
+AST import/usage scan of all scripts/*.py, every flagged name verified
+unreferenced by word-grep + whole-repo consumer check (no
+re-export consumers):
+- `os` ×3: scripts/check_source_parsing_tests.py:9,
+  qualification/rocm_hf_layer_attribution.py:9,
+  qualification/tests/test_hf_next_token_oracle.py:6
+- `JSON_INTEGER_MAX_DIGITS` ×3 (from strict_json, in-group removal;
+  same group's StrictJSONError + loads as strict_json_loads are used
+  and kept): qualification/compare_receipts.py:20,
+  qualification/receipt.py:21, qualification/workload.py:17 — run.py
+  imports the constant itself directly (run.py:38) and uses it
+  (L481/L483), untouched
+- `json`: qualification/serve_rocm_graph_failure_containment.py:7
+- `platform`: qualification/macos_platform.py:11 (code uses
+  sys.platform; "platform" grep hits are prose only)
+- `threading`: qualification/tests/test_cargo_bounded.py:6
+- `shutil`: qualification/tests/test_run.py:10 (tests patch
+  run_module.shutil — run.py's own import — not this binding)
+Gates: full qualification suite `python3 -m unittest discover -s
+scripts/qualification/tests` → 754 tests OK (skipped=1, same as
+baseline); `check_production_file_budget.py` pass;
+`check_repository_artifacts.py` pass; `git diff --stat`: 10 files,
+10 deletions, 0 insertions.
+
+**Candidate A (safe, not executed — smaller): scripts/qualification/run.py:1522 `_compact_details`.**
+4-line private wrapper, zero callers repo-wide (git grep: only its
+own def). Orphaned in e2efd5dff when the details-joining logic moved
+to result_details.py and the call site switched to `join_details`;
+`compact_details` in the run.py:36 import then goes unused too →
+net −5. Ironclad but half C's size; chose C per the
+prefer-larger-net-removal rule.
+
+**Candidate B (owner-level, queued — NOT executed): the `--warmup` /
+`--mode` compatibility flags in scripts/bench-concurrent-batch.py
+(L5830-5833, L5938-5942).** Parsed, never read: `args.warmup` and
+`args.mode` have zero consumers (grep-verified). Help text
+self-describes them as "Compatibility alias; warmup is already on"
+/ "Compatibility flag". The canonical evidence invocation
+(bench-results/concurrent-batched-decode-2026-05-26.md:28-29)
+records `--mode concurrent --warmup` in its command line, so
+deleting them breaks replay of the documented invocation — an
+API-surface judgment. Recommend adding to the owner queue. (The live
+`--warmup-requests` flag, L5828, is used at L5724/L5965/L6102/L6260
+and stays.)
+
+**Noticed-but-left:**
+- 22 more unused imports, all inside the 29 retained one-off
+  investigation scripts (audit-customop.py, audit-dtype-usage.py,
+  bench-concurrent-batch.py tempfile, bench-trajectory-turns.py,
+  c11/c12/c13/c14, h15c×2, h17×3, h17b, h18×3, mtp_c1_summarize,
+  mtp_h_main_reference_dump×2, mtp_reference_dump,
+  phase-c40b/analyze_c40b.py) — each verified unused, but round-25
+  policy retains these as frozen-investigation evidence; deletion is
+  an owner-policy call → queue.
+- qualification/qwen35_sft_oracle.py:218 `import jinja2` is a
+  deliberate fail-fast availability guard (version read via
+  importlib.metadata, not the module) — keep.
+- qualification/tests/test_rocm_hf_path_attribution.py:22
+  `import rocm_hf_next_token_oracle as hf_oracle` — binding appears
+  unused, but the test asserts on `attribution.hf_oracle` (L233);
+  import-order/load-order coupling → keep.
+- Root Cargo.toml `default-members` exclusion comment lists 7 crates
+  while 8 are actually excluded (`rocblas` absent from the comment) —
+  owner queue #14 territory.
+
+**Campaign state:** autonomous "unused imports in live tooling"
+class closed for this sweep; owner queue remains the sole work source
+(27 items; candidate B + the 22 evidence-script imports are new
+queue-worthy observations if the owner wants them folded in).
