@@ -36,6 +36,16 @@ profiling-artifacts/
 *.nvvp
 *.perf.data
 
+# Raw audit evidence under docs/audits/ (run captures, probe dumps, candidate
+# patches, sweep summaries). Audit .md receipts stay tracked; raw dumps are
+# local-only, retained in git history.
+docs/audits/**/*.json
+docs/audits/**/*.jsonl
+docs/audits/**/*.ndjson
+docs/audits/**/*.txt
+docs/audits/**/*.diff
+docs/audits/**/*.status
+
 # Vulkan SPIR-V build artifacts
 *.spv
 
