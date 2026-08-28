@@ -20,7 +20,7 @@ Per the issue:
 
 ## How to capture
 
-The capture script lives at `scripts/capture-pre-migration-baseline.sh`.
+The capture script lives at `scripts/investigations/capture-pre-migration-baseline.sh`.
 It is **GPU-only** and is run on a RunPod pod (or a kiln developer's
 local CUDA host), NOT on a CPU-only build host.
 
@@ -28,7 +28,7 @@ local CUDA host), NOT on a CPU-only build host.
 # From the kiln repo root, on a CUDA-enabled pod:
 KILN_MODEL_PATH=/workspace/qwen3.5-4b-bf16-st \
 KILN_BENCH_BIN=target/release/kiln-bench \
-scripts/capture-pre-migration-baseline.sh
+scripts/investigations/capture-pre-migration-baseline.sh
 
 git add bench-results/pre-migration-baseline/
 git commit -m "phase 0.10: pre-migration baseline (<GPU>)"

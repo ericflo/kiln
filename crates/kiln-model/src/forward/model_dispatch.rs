@@ -3722,7 +3722,7 @@ pub fn mtp_forward_step(
     //      token would occupy in the prompt+decode stream. This is what
     //      RoPE must use so the MTP head sees the same rotation angles the
     //      base Qwen3-Next block would have applied at that position. The
-    //      PyTorch reference (`scripts/mtp_reference_dump.py`) applies RoPE
+    //      PyTorch reference (`scripts/investigations/mtp_reference_dump.py`) applies RoPE
     //      at the absolute position; Phase B7a (PR #276) confirmed kiln's
     //      prior use of bare `mtp_pos` here caused monotonic `post_layer`
     //      drift at pos=1,2 — the RoPE-wrong-position signature.
