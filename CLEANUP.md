@@ -10039,3 +10039,70 @@ tree. Suggested approval format (any of):
 On approval, execution is mechanical: apply the phase's table rows verbatim,
 run the gate suite, commit one phase per commit, and record the follow-up ledger
 round.
+## Cleanup Agent (round 158) — 2026-08-28
+
+**Residual post-reorg drift in `scripts/README.md` — five stale claims the
+R156 sweep missed.** R156's audit covered per-section script lists,
+subdirectory counts, and moved-filename references, but not the file's two
+prose census paragraphs: bare-basename and count claims survived the
+scripts/ (R154) and bench-results/ (R155) reorganizations.
+
+**Fixes (1 file, 5 precision edits, each verified against disk + ledger):**
+1. "The other 22 one-off investigation scripts (c11–c16, c29,
+   h15c/h17/h17b/h18, mtp_*) are frozen evidence in `investigations/`" →
+   25, naming the 3 missing one-off drivers (`capture-pre-migration-
+   baseline.sh`, `cuda_qwen_sft_smoke.sh`, `phase7_cuda_graph_prefix_cache_
+   verify.sh`) — 6 (c11–c16) + 3 (c29) + 8 (h15c/h17/h17b/h18) + 5 (mtp_*)
+   + 3 (drivers) = 25, exactly the top-level `git ls-files
+   scripts/investigations/` set (minus its README) and matching R154's
+   breakdown (14 MTP + 8 multi-engine + 3 drivers).
+2. "All 75 top-level scripts have ≥1 external reference" (contradicted the
+   file's own "Index of the 50 top-level scripts" header) → "All 75
+   then-root scripts (50 today; the other 25 since frozen into
+   `investigations/` in round 154) had ≥1 external reference".
+3. "Heavily cited" bullet listed three `mtp_*` scripts as if still root →
+   annotated "(the three `mtp_*` ones now live in `investigations/`)" —
+   all three confirmed there by `git ls-files`.
+4. Added a point-in-time qualifier to the census counts: several had
+   legitimately drifted since the 2026-08-28 census (measured today:
+   mtp_compare 33→29, cargo-bounded 24→15, vllm_teacher 19→12, budget gate
+   "6 external + 13 ledger" → 3 external + 62 ledger mentions), so the
+   dated record no longer reads as a current claim.
+5. "Round 153 (2026-09) reorg" → "Round 154 (2026-08-28) reorg" (ledger
+   and steering brief both number the scripts/ freeze as 154; "Round 153"
+   came from a worktree-branch local number) and "the eight bench-results
+   regenerate scripts" → "the seven … (the `bench-results/README.md`
+   Regenerate line)" — exactly 7 named there, all present at root; the
+   phantom 8th was evidently the gate-pinned H15c driver, which the same
+   section counts separately as "the one gate-pinned H15c driver".
+
+Why it mattered: `scripts/README.md` is the live index future agents audit
+against; it internally contradicted itself (50 vs 75 top-level, 22 vs 25
+frozen) and pointed readers at three root paths that no longer exist.
+**All other claims in the file were re-verified this round and held:**
+29 `.py`/14 `.sh`/7 `.mjs` split; 5 subdirs; the 50-entry per-section list;
+family sizes 3/12/6/10/7/2/4/6 = 50; `c2_artifacts/` inventory (6 `.st` +
+`c2_compare.txt`); `docs-site/`, `hf_trl/`, `qualification/` one-liners;
+`bench-results/parity-tolerance.csv` at root (R155 keep-set);
+`docs/desktop/*.png` (3) and `docs/site/assets/server-ui-*` (13) generator
+claims; `RETIRED_ENV_REFERENCE_ALLOWLIST` still pinning
+`scripts/h15c_kiln_alpha_from_csv.py`'s exact path; `Cargo.toml`
+default-members exclusion comment matches the 8 excluded crates on disk.
+
+**Proof:** pre AND post `python3 scripts/check_repository_artifacts.py`
+PASS (4564 tracked paths, 119,636,509 bytes — byte-identical summary) and
+`python3 scripts/check_production_file_budget.py` PASS (646 files);
+post-edit claim sweep — 50 top-level root scripts (`git ls-files
+scripts/`), 25 `investigations/` top-level scripts, the 3 `mtp_*` + 3
+driver files present in `investigations/`, 7 regenerate scripts present at
+root; stale-phrasing grep for "22 one-off" / "75 top-level" / "Round 153
+(2026-09)" / "eight bench-results" → 0 hits; the file contains 0 markdown
+links (no link-rot surface). Commit: (recorded in the follow-up commit's
+amended ledger line below).
+
+**Lessons:** (a) index READMEs carry both per-entry lists AND prose census
+sections — a reorg sweep that only re-counts the lists leaves the prose
+stale, and count claims in dated snapshots rot independently of paths;
+(b) worktree waves can introduce local round numbers (R154's commit said
+"Round 153" while the ledger numbers it 154) — reconcile to the ledger
+when editing live index prose.

@@ -54,9 +54,11 @@ the live-vs-frozen decision rule).
 ## One-off investigations (kept at root: live-locked)
 
 Candle-removal (#1082) regenerate tooling (LOCKED — `bench-results/README.md`
-regenerate table) plus the one gate-pinned H15c driver. The other 22 one-off
-investigation scripts (c11–c16, c29, h15c/h17/h17b/h18, mtp_*) are frozen
-evidence in `investigations/`.
+regenerate table) plus the one gate-pinned H15c driver. The other 25 one-off
+investigation scripts (c11–c16, c29, h15c/h17/h17b/h18, mtp_*, plus
+`capture-pre-migration-baseline.sh`, `cuda_qwen_sft_smoke.sh`, and
+`phase7_cuda_graph_prefix_cache_verify.sh`) are frozen evidence in
+`investigations/`.
 
 - `audit-candle-usage.sh` (LOCKED) — Phase 0.1: audit the candle API surface (call sites by module + symbol) into `bench-results/candle-api-surface.csv`.
 - `audit-customop.py` (LOCKED) — Phase 0.2: audit `CustomOp1/2/3` impl blocks to design the kiln-tensor forward/backward seam.
@@ -100,14 +102,18 @@ evidence in `investigations/`.
 Census method: for each top-level script, count tracked files outside
 `scripts/<self>` (and outside `.git/`) that reference its basename in
 `.github/`, `crates/`, `docs/`, `scripts/`, and the root docs.
+Citation counts below are point-in-time to that census; the disposition is
+what stands.
 
-**Result: zero orphans.** All 75 top-level scripts have ≥1 external
+**Result: zero orphans.** All 75 then-root scripts (50 today; the other 25
+since frozen into `investigations/` in round 154) had ≥1 external
 reference, so there is no orphan-candidate queue to adjudicate:
 
 - **Heavily cited (evidence provenance):** `mtp_reference_dump.py` (34),
   `mtp_compare.py` (33), `cargo-bounded.sh` (24),
   `mtp_h_main_reference_dump.py` (22), `vllm_teacher.py` (19) — cited by
-  `docs/archive/` investigation reports and audit receipts.
+  `docs/archive/` investigation reports and audit receipts (the three
+  `mtp_*` ones now live in `investigations/`).
 - **Campaign gates (ledger-cited):** `check_production_file_budget.py`
   (6 external + 13 ledger), `check_repository_artifacts.py` (7 external
   + 11 ledger).
@@ -115,10 +121,11 @@ reference, so there is no orphan-candidate queue to adjudicate:
   `runpod-validate-substrate-orchestrator.sh` (1) — each referenced by
   exactly one script or doc; retained (pod-workflow entry points).
 
-**Round 153 (2026-09) reorg:** the 25 non-locked one-off investigation
+**Round 154 (2026-08-28) reorg:** the 25 non-locked one-off investigation
 scripts and the 5 phase-c family directories moved to `investigations/`;
-the eight bench-results regenerate scripts, both screenshot generators, and
-every gate/contract/tooling script stayed at root. Current family sizes:
+the seven bench-results regenerate scripts (the `bench-results/README.md`
+Regenerate line), both screenshot generators, and every gate/contract/
+tooling script stayed at root. Current family sizes:
 campaign gates 3, CI contract gates 12, contract/schema generators 6,
 benchmark harness 10, one-off investigations (root, locked) 7, capture/UI
 smoke 2, training/serving drivers 4, utility/build 6, frozen
