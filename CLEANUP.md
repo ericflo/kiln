@@ -8789,3 +8789,52 @@ status` clean. No cargo commands run; no push.
 
 **Commits.** Parent HEAD at entry: `6bf8a8621`. This ledger entry lands as
 its own commit.
+
+## Session consolidation — cleanup surface exhausted pending owner decisions [2026-08-28]
+
+**13 rounds executed this session, all pushed, all CI green
+(3 lanes each):** waves 1–7 (raw-dump untracking −2,141 files / −7.9
+MiB; docs/ index; scripts/ index + zero-orphan census; 63 archive
+href repairs + .gitignore anchoring; 6 navigation READMEs; −8 inert
+workspace deps; assets/ README) + rounds 126–131 (−2 dead feature
+alias; −6 stale candle comments; config-surface perfect 83/83;
+license coverage 0 stale; desktop/ workspace 0 dead config + −2 stale
+README clauses; root-docs claim audit).
+
+**Every autonomous class now CLOSED with gate-backed evidence:**
+navigation · links (0 fixable) · raw bloat · dead workspace deps ·
+dead features · dead optional/dev/build deps (root + desktop) · stale
+claims (candle, desktop README, root docs) · TODO census (all live,
+documented) · config-surface integrity (perfect) · contract gates
+(http/openenv/runtime-env/thinking-budget all green) · license
+coverage (0 stale) · CI path filters (111/111) · tooling enforcement
+(cargo-deny, SLSA) · lint/allow/pub-API debt (zero) · .gitignore
+shadowing · local artifact hygiene.
+
+**Owner decision queue (27 items, all decision-ready with line
+evidence + correct values — see per-round entries for details):**
+- #1–#9: round-122/123 lint/API judgment (13 sub-items)
+- #12 max_seqlen_k · #13 RemoteTeacher::new example
+- #14 zero-dependent crates (kiln-mps / kiln-graph-cuda /
+  kiln-vulkan-blas — keep/fold/delete; net −1,331 lines if all deleted)
+- #15 stale-claim reword pass (5 files, ~22 sites + 2 error strings)
+- #16 candle-named pub fns/params
+- #17 openenv.credentials example doc · #18 [agent] header convention
+- #19 foldhash 0.1.5 license bullet (Zlib body already present)
+- #20 docs-site OFL-1.1 notice for Inter + JetBrains Mono
+- #21 desktop app identifier copy (com.kiln.desktop →
+  com.eflorenzano.kiln.desktop)
+- #22 desktop CI: dispatch-only build lane → no PR compile gate;
+  tests Linux-leg only
+- #23–#27: root-docs batching/rendezvous stale cluster (common root
+  cause: batching.mode + direct_decode_rendezvous_* removed from
+  code; 14 sites across README/QUICKSTART/BENCHMARKS) + README crate
+  list 14→33
+
+**Loop status:** autonomous cleanup surface systematically exhausted.
+Next work waves are unlocked by owner decisions on the queue above.
+Per the campaign protocol, no further sub-agent rounds will be
+spawned on already-closed classes; the loop resumes when owner
+decisions land (each queued item becomes a steered round) or when
+fresh drift appears (re-run the gate suite: budget, artifacts,
+4× contract checks, schema self-test).
