@@ -7630,3 +7630,96 @@ no leftover kiln test processes remain). Severe.
 - Keep all other local work light: no long sleeps, no parallel
   builds of large dependency trees when a single small crate
   build suffices.
+
+## Cleanup Agent (docs overhaul wave 1 — raw audit dump untracking) — 2026-08-27
+
+Major wave (orchestrator-directed): brought `docs/audits/` into line with the
+repository's own stated artifact policy. The directory held 2,201 tracked
+files = 60 `.md` audit receipts (reports) + 2,141 raw run captures (json,
+txt, diff, ndjson, status, jsonl) — probe dumps, candidate request/response
+JSON, sweep summaries, terminal transcripts, patch diffs. Untracked all 2,141
+raw files (`git rm --cached`, nothing deleted from disk), added a scoped
+`.gitignore` section (`docs/audits/**/*.{json,jsonl,ndjson,txt,diff,status}`
+— never a global `*.json`; verified `docs/backend-latency-fixtures.json` at
+the docs/ root is unaffected), and rewrote `docs/audits/README.md` to document
+the receipts-vs-raw split, the policy, the raw-evidence home subdirs, and the
+code-cited load-bearing reports.
+
+Policy citation (`.gitignore`, pre-existing, which the tracked raw dumps
+violated): *"Raw benchmark, serving, metrics, and profiler output. Retain
+compact receipts, summaries, manifests, and hashes instead."* (and *"Profiling
+artifact dumps (kept in git history only)"*). Raw dumps stay on local disks
+and in git history; they are now ignored so they cannot be re-added.
+
+**Evidence (measured, `stat` on `git ls-files` sets):**
+
+| metric | before | after |
+|---|---|---|
+| tracked files under `docs/audits/` | 2,201 | 60 (all `.md`) |
+| tracked bytes under `docs/audits/` | 8,327,149 (7.94 MiB) | 1,346,927 (1.28 MiB) |
+| untracked raw files | 0 | 2,141 (6,978,647 B = 6.65 MiB) |
+| files on disk (`find docs/audits -type f \| wc -l`) | 2,201 | 2,201 (unchanged) |
+| tracked repo total (artifact gate) | 6,694 | 4,553 |
+
+Note: the wave brief estimated ~16 MB; the measured tracked size is 7.94 MiB
+(8,327,149 bytes) — this entry reports the measured figure.
+
+**Safety findings (re-verified this round):**
+
+- Zero tracked code/scripts/CI/contracts reference the RAW files by path:
+  `git grep 'docs/audits'` across `scripts/`, `.github/`, `contracts/` returns
+  nothing; all `crates/` references are the 5 comment citations below.
+- The only `docs/audits` references in `crates/` are 5 comment citations to
+  `.md` reports (all kept tracked at their current paths):
+  1. `crates/kiln-flce-kernel/src/lib.rs:40` → `PHASE10_MODE_B_TRACE.md`
+  2. `crates/kiln-model/src/lora_loader.rs:884` → `PHASE10_LORA_PRECISION_STUDY.md`
+  3. `crates/kiln-server/src/api/completions/batch.rs:10` → `security-audit-v0.1.md`
+  4. `crates/kiln-server/src/training_queue.rs:124` → `security-audit-v0.1.md`
+  5. `crates/kiln-train/src/trainer/lora_parameters.rs:249` → `PHASE10_LORA_PRECISION_STUDY.md`
+- `BENCHMARKS.md` and `docs/archive/*.md` mention run names (vulkan-strix-halo)
+  textually only — unaffected. `docs/backend-latency-fixtures.json` uses
+  "vulkan-strix-halo" as a fixture name only — untouched (not under
+  docs/audits/, outside the ignore scope).
+- Working tree and index were identical before the change
+  (`diff <(git ls-files …) <(find …)` clean), so untracking removed nothing
+  from disk and broke no relative paths.
+
+**Kept reports — subdirectories containing tracked `.md` receipts:**
+
+- `docs/audits/` (top level): 53 `.md` — the phase 7/9/10/11/12 audit
+  reports, shortlogs, security-audit-v0.1.md, the three `pr1383-*.md` eval
+  reports, and the rewritten README.
+- `docs/audits/MACOS_QWEN35_4B_FASTEST_artifacts/`: 7 `.md` (e440–e444
+  per-experiment summaries) beside its 975 raw files.
+- `docs/audits/pr1383-qwen35-base-production-tool-call-eval-2026-05-24/` and
+  `-1000-2026-05-25/`: raw-evidence homes (15 json total); their reports are
+  the flat `pr1383-*.md` files at the top level (kept).
+
+**Raw links inside receipts (informational):** 4 markdown links to raw files
+across 2 reports — `pr1383-qwen35-base-production-tool-call-eval-2026-05-24.md`
+(3 links to its two raw-evidence dirs) and `phase7-h15b-stratified-c29-v2.md`
+(1 link to `phase-c29-v2/verdict.json`, which was ALREADY dangling before this
+change — the real file lives at `docs/archive/phase-c/phase-c29-v2/verdict.json`
+and was never moved here; left untouched per "do not edit report content").
+Locally the pr1383 links keep working; on GitHub they 404 by design — the
+policy explicitly retains raw dumps in git history only.
+
+**Verification (no builds, per round-125 protocol):**
+
+- `python3 scripts/check_production_file_budget.py` → PASS (646 files, 14
+  reviewed exceptions — identical before/after).
+- `python3 scripts/check_repository_artifacts.py` → PASS (6,694 → 4,553
+  tracked paths; 125,039,693 → 118,061,046 bytes).
+- `git ls-files docs/audits | grep -v '\.md$' | wc -l` = 0.
+- `git ls-files docs/audits | grep '\.md$' | wc -l` = 60.
+- `find docs/audits -type f | wc -l` = 2,201 (raw files all still on disk).
+- `git check-ignore`: new rule matches raw json/txt/diff/etc. under
+  docs/audits/ at both top level and in artifact subdirs; does NOT match any
+  `.md` under docs/audits/ nor `docs/backend-latency-fixtures.json` (scope
+  confirmed by negative checks).
+- `git status` clean after commit.
+- NO local test runs (round-125 protocol); CI is the test venue.
+
+Commit: `334252575` (single logical change: 2,141 staged removals + scoped
+.gitignore section + rewritten docs/audits/README.md); this ledger entry lands
+as the small follow-up commit sanctioned by the protocol.
