@@ -8903,3 +8903,28 @@ reliably complete bounded, evidence-anchored tasks.
 
 **Campaign state:** every autonomous class now CLOSED (rounds 61–133
 cumulative). Owner queue remains the sole work source (27 items).
+
+## Round 134 — removed-item residual-reference sweep (whole repo) [2026-08-28]
+
+Mechanical sweep for stale references to items DELETED/RETIRED during
+this campaign, across all tracked file types:
+
+- Wave-6 removed deps (chrono@kiln-core, memmap2@kiln-tensor,
+  half@kiln-rocblas/mps/vulkan-blas, thiserror@6 crates): 0 stale
+  code refs (grep hits were "synchronous" substring false-positives;
+  memmap2 legitimately live in kiln-model; manifests clean), 0 doc
+  refs.
+- R126 removed `rocm = ["hipblaslt"]` alias: 0 refs (remaining
+  `rocm = [` hits are legitimate feature-forwarding chains in other
+  crates).
+- R131 removed config keys: cli.rs:4482 is the intentional
+  "must remain removed" test assertion. 0 comment refs.
+- Retired env KILN_W4A16 / KILN_KV_CACHE_FP8: all remaining refs are
+  legitimate (config.rs RETIRED list, bench-results/ + BENCHMARKS.md
+  historical run records, docs/archive/ frozen, preserve-list CSV
+  evidence, CONFIGURATION.md:278 retirement note). 0 stale.
+- `.qualification/`: 0 tracked files, gitignored (correct wave-1
+  pattern). `contracts/README.md` mentions all 15 contract files.
+
+**Outcome: 0 stale refs, 0 deletions. The "references to deleted
+items" class is CLOSED repo-wide.**
