@@ -81,32 +81,20 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 ## Features
 
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting, and first-class thinking budgets by token count or decode time.
-- **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
-- **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
-- **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile, with atomic publication under normal `stable` serving or drained `maintenance`.
-- **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
-- **Native OpenEnv training** — discover any OpenEnv server, run seed-matched stateful WebSocket episodes, preserve typed rewards and multi-turn action/observation trajectories, then collect or directly train a LoRA with `kiln openenv`.
-- **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
-- **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes, and strictly replay a completed seeded run against exact model/adapter, tokenizer/template, backend/binary, generation/scorer, and raw decoder-byte identities. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
-- **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
-- **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
-- **Post-training auto-eval** — attach a held-out `post_eval` to SFT/GRPO and Kiln rejects exact, normalized, source-row, group, or session contamination before queuing; explicit `train-set-eval` runs are diagnostic-only. Results are back-linked to the training job.
-- **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
-- **Capability-bound optimizers** — Muon is the default, with AdamW and SGD selectable only when the exact resident optimizer tuple and requested workload support them. Product updates are fixed to round-to-nearest; Muon ranks are 2+ on CPU, 2..=48 on CUDA/ROCm, and 2..=32 on Metal/Vulkan, and Metal SGD is rejected. `GET /v1/config` field `training.optimizer_support` separates raw implementation, resident tuple, per-workload admission, and dynamic memory checks so portable CPU tuples and Vulkan hooks never overclaim server training.
-- **Atomic LoRA transitions** — normal `stable` serving coordinates live hot-swap with inference; `maintenance` supports drained activation.
-- **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
-- **Typed tiled-prefill policy** — backend dispatch, inference tiles, tape-training tiles, detached full-attention tiles, and last-token LM-head behavior resolve once at startup with provenance and no mid-request environment rereads.
-- **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
-- **Paged KV cache** — virtual memory-style block allocation eliminates fragmentation.
-- **FP8 KV cache** — optional quantization doubles effective context length.
-- **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
-- **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
-- **Typed SFT checkpoint-boundary policy** — sparse boundary replay, its automatic 8192-token crossover, anchor stride, and 6 GiB anchor-cache target resolve once for matching admission and execution; no trainer-side environment rereads.
-- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui/` for its provenance (training history + eval scores against it).
-- **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling and source-revision-aware caching, or merge them server-side via weighted_average / TIES / concatenation.
-- **Embedded web dashboard** at `/ui/` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
-- **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
-- **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/guides/EVAL_GUIDE.md § Mine your own request log](docs/guides/EVAL_GUIDE.md#mine-your-own-request-log).
+- **pi integration** — `kiln pi-setup` backs up and merges pi's `models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
+- **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`), streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the flywheel trains on.
+- **Bounded online-LoRA SFT** over HTTP under the fixed `native_online_lora_v1` profile, with atomic publication and live hot-swap under normal `stable` serving or drained `maintenance`.
+- **GRPO training** over HTTP — submit scored completions and you control the reward function; multi-turn agentic rollouts are ECHO-by-default (λ=0.05 env-CE term, `--no-echo` opt-out).
+- **Native OpenEnv training** — discover OpenEnv servers, run seed-matched stateful episodes, and collect or directly train a LoRA with `kiln openenv`.
+- **On-policy distillation (OPD)** over HTTP against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
+- **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes, strictly replay a completed seeded run, and turn A/B picks into a local judge LoRA.
+- **Post-training auto-eval** — attach a held-out `post_eval` to SFT/GRPO and Kiln rejects contamination before queuing.
+- **Capability-bound optimizers** — Muon is the default, with AdamW/SGD admitted only where the exact resident tuple and workload support them; `GET /v1/config` field `training.optimizer_support` reports implementation, admission, and memory checks.
+- **Continuous batching** with token-budgeted prefill and a typed tiled-prefill policy that resolves once at startup with provenance.
+- **128K+ context on 24GB** — Qwen3.5-4B's hybrid architecture keeps KV cache 4x smaller than a pure transformer; paged KV cache, optional FP8 KV, prefix caching, and gradient checkpointing.
+- **Adapter management and composition** — load, unload, upload, download, version, stack, and merge LoRAs; `/ui/` shows provenance, training history, and eval scores.
+- **Embedded web dashboard** at `/ui/` — live server status, training queue with loss curves, the full eval workflow, an A/B playground, and a `⌘K` command palette. No extra service to run.
+- **Prometheus metrics** at `/metrics`, plus a durable size-rotated request log you can mine into SFT data or an eval suite — see [docs/guides/EVAL_GUIDE.md § Mine your own request log](docs/guides/EVAL_GUIDE.md#mine-your-own-request-log).
 - **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
 
@@ -115,239 +103,26 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 Interactive reinforcement-learning environments are a native Kiln data source,
 not an external preprocessing step. Point `kiln openenv` at one or more OpenEnv
 servers and Kiln owns discovery, deterministic task grouping, policy action
-generation, stateful episode sessions, reward aggregation, canonical agentic
-trajectories, ECHO masks, GRPO submission, and audit artifacts.
-The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
-a dependency, configuration namespace, or special execution path.
-Native GRPO admission preserves a validated OpenEnv corpus identity through
-live job status, the train receipt, and the installed adapter manifest. Its
-ordered plan digest binds each endpoint, canonical complete-discovery digest,
-schema, reset hash, seed, and candidate count. Every action also carries one content-addressed behavior-policy identity
-covering the base model, inference config/runtime, and optional adapter bytes;
-drift fails collection or admission instead of silently becoming off-policy.
-Checkpoint resume separately binds every exact input byte.
+generation, seed-matched stateful episode sessions, reward aggregation,
+canonical agentic trajectories, ECHO masks, GRPO submission, and audit
+artifacts — with held-out environment evaluation and promotion gates after
+training. The runtime is implementation-neutral: miniopenenv is a pinned CI
+oracle, not a dependency, configuration namespace, or special execution path.
 
-OpenEnv is also native to the embedded dashboard and control plane. Use
-**Training → OpenEnv** in `/ui/`, submit `POST /v1/openenv/runs`, or use
-`kiln openenv start --request openenv-run.json --idempotency-key <attempt-key> --follow`; Kiln persists
-discovery and collection progress,
-canonical artifact links, native GRPO progress and loss, linked evaluation
-results, promotion-gate outcomes, artifact-bound rollout returns, terminal
-outcomes, recoveries, capacity retries, policy cost, failures, and cancellation across browser
-refreshes. Valid submissions enter a bounded FIFO when all configured OpenEnv
-workflow slots are occupied; CLI and dashboard expose live queue position,
-admission wait, immediate cancellation before execution, and safe restart of
-entries that never acquired a slot. Persisted non-secret idempotency keys make
-submission retry-safe: an identical retained request recovers its original run,
-while changed semantics under that key fail closed. Every training path
-materializes its exact native-GRPO config and preflights the behavior adapter,
-loss and checkpoint contract, installed static eval suite, serving profile,
-backend workload, optimizer, and LoRA rank. The dashboard's **Prove it after
-training** control uses that same `post_eval` path; rollout-only requests reject
-all training fields instead of silently ignoring them. Persisted runs do this
-before persistence and store the fully materialized
-`kiln.openenv-training-contract.v1` in v5 status and `run.json`; queue resume,
-trainer submission, CLI, dashboard, and the summary receipt consume that sealed
-contract instead of recomputing defaults. One-shot `kiln openenv train` calls
-`POST /v1/openenv/training/preflight` before discovery, accepts the returned
-effective config as authoritative, and submits those exact values after
-collection; summary v5 preserves that contract and policy identity even if
-submission later fails. Before GPU work Kiln revalidates the policy under the
-adapter-mutation barrier and privately snapshots a named behavior adapter. The
-capacity snapshot is evidence, not a reservation, so final
-native queue and memory admission still recheck live conditions. The
-`kiln_openenv_training_preflights_total{status="accepted"|"rejected"}` metric
-covers both paths; persisted rejection also retains its run-specific metric.
-After training, it can pair behavior and candidate policies on
-identical, disjoint held-out environment seeds, compare environment-owned
-returns with an exact sign test, and defer auto-load until the candidate earns
-promotion. A train run is terminal only after every requested evaluation has
-an outcome; restart-interrupted active work fails explicitly. Newly failed
-runs retain `kiln.openenv-run-failure.v1` with a stable stage, code,
-retryability, operator hint, and exact OpenEnv protocol or HTTP evidence when
-available. API, CLI, dashboard, capability pipelines, and the fixed-cardinality
-`kiln_openenv_run_failures_total{stage,retryable}` metric all consume that
-diagnosis; the legacy `error` string remains only for compatibility.
-Prometheus also exports fixed-cardinality episode terminations, recoverable
-errors, capacity retries, environment steps, policy tokens, and aggregate model
-latency from the same published collection statistics shown by CLI and dashboard.
-
-```bash
-# Inspect the environment's health, metadata, schemas, and content identity.
-kiln openenv inspect --environment http://127.0.0.1:8990
-
-# Page an optional dataset-backed Task API without loading the full catalog.
-kiln openenv tasks --environment http://127.0.0.1:8990 --split train
-
-# Run seed-matched candidate episodes and immediately train a LoRA.
-kiln openenv train \
-  --environment http://127.0.0.1:8990 \
-  --groups 16 \
-  --group-size 4 \
-  --max-steps 8 \
-  --output-adapter counter-agent
-
-# Follow a dashboard/API-owned workflow through training and evaluation.
-kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
-
-# Materialize only a manifest-declared artifact and verify it independently.
-kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd \
-  environment_eval_receipt --output receipt.json
-```
-
-Task catalogs are native in the CLI, dashboard, and `POST /v1/openenv/tasks`.
-Provider-less HTTP 501 is reported as unsupported, not incompatible. OpenEnv
-does not define how a catalog row selects a WebSocket episode, so Kiln keeps
-rows as bounded, untrusted discovery data and uses explicit reset options plus
-deterministic seeds for portable training and exact replay.
-
-Protected deployments are native too. Direct CLI commands accept
-`--credential-env TOKEN_VARIABLE`; dashboard/API runs name an origin-scoped
-`[openenv.credentials.<id>]` handle through `credential_ids`. Kiln applies the
-bearer token to both HTTP discovery and the WebSocket upgrade while keeping the
-token, its environment-variable name, and server handle out of rollout and
-replay artifacts. Environment identity records only `authentication: bearer`.
-
-The dashboard and API expose this held-out evaluation as `environment_eval`.
-Adding `gate` requires significant paired improvement plus optional mean-return
-thresholds. Kiln retains baseline and candidate dataset/replay/summary bundles
-and a content-addressed `kiln.openenv-environment-evaluation.v1` decision
-receipt.
-
-Every run first publishes canonical GRPO JSONL, an exact content-addressed
-environment replay transcript, and a summary receipt. `kiln openenv verify`
-cross-checks the bundle offline; `kiln openenv replay` re-executes every
-captured environment exchange. Candidates in a group share the same
-environment reset and seed;
-environment step rewards determine episode return; `done`, max-step cutoffs,
-invalid model actions, and OpenEnv protocol errors remain distinct. The
-shared reset object can be replaced by an ordered object per environment for
-heterogeneous portfolios. Kiln strips caller-supplied seeds, assigns groups
-round-robin, and publishes a receipt-verifiable reset-plan digest; every listed
-endpoint must be exercised. Rollouts carry environment name, URL, canonical
-complete-discovery digest, action-schema hash, reset hash, exact behavior-policy revision, seed,
-steps, return, and termination identity directly into Kiln's scored-payload
-hash.
-
-Inspection also compiles each environment's advertised action JSON Schema
-before Kiln opens a session. Schema dialect selection follows the schema's
-declaration, internal references are supported, and external HTTP or filesystem
-references are rejected rather than resolved. Every model action is validated
-against that compiled contract before `step`; a mismatch never reaches the
-environment and is retained as `invalid_model_action` with bounded
-keyword/JSON-Pointer diagnostics.
-
-The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
-lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
-OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
-turns, while capacity saturation triggers bounded fresh-session acquisition.
-Every session connection repeats OpenEnv's status-only `/health` precondition
-immediately before the WebSocket upgrade.
-Kiln continues pumping Ping/Pong control frames and periodic read-only `state`
-exchanges while the model is generating an action, so slow policies do not
-lose their non-resumable episode even when a server renews resource leases only
-for application data. A timeout,
-malformed or unsolicited application frame, wrong response type, or transport
-failure permanently poisons that socket; Kiln never risks assigning a late
-lock-step response to the wrong action.
-After the final episode, Kiln enters an explicit `revalidating` phase and
-re-reads every stable discovery surface for every endpoint. A canonical digest
-binds the complete raw metadata, schema, advertised environment inventory, and
-OpenAPI documents—including extension fields that typed display models do not
-project—while typed metadata, authentication, URLs, and schemas remain directly
-comparable. All must match the identities that started collection. A mid-run redeploy becomes the typed
-`environment_identity_changed` failure at `identity_verification`; mixed-identity
-episodes never reach an artifact or trainer. Exact live replay applies the same
-complete discovery comparison rather than accepting a matching schema alone.
-Collection charges reset data and every action, observation, error, and final
-state against a 512 MiB aggregate retained-representation budget as they
-arrive. Candidate data is moved into the canonical group rather than cloned;
-dataset, replay, and summary artifacts remain capped at 256 MiB each, reset
-files are bounded before reading, and hashes stream without group-sized
-buffers. Exhaustion aborts the run before any partial artifact bundle is
-published.
-Server downloads are manifest-gated rather than filename-gated. Kiln hashes
-bounded regular files before publishing their links, then rechecks the exact
-byte count and SHA-256 on the same opened descriptor before every stream.
-Drift, replacement, symlinks, truncation, or growth fail closed; successful
-responses expose the digest as a strong `ETag` and forbid intermediary caches.
-The persisted CLI lifecycle follows those returned links, rechecks response
-length, headers, and SHA-256, and atomically publishes no partial destination.
-Completed train runs also retain the native `train_receipt` and
-`adapter_manifest` beside the collection bundle, and project their admitted
-`kiln.openenv-training-data.v1` lineage directly in run status. The run remains
-auditable without joining another API or depending on the adapter directory's
-lifetime.
-When an observation offers a non-empty `input_text`, Kiln pastes it verbatim as
-the model-facing prompt; the complete wire observation remains in rollout and
-replay provenance, and the discovered JSON action schema still governs the
-response. `input_text` remains an optional profile, never a protocol
-requirement; observations without it use the complete wire JSON. OpenEnv GRPO
-defaults to thinking mode: Kiln retains the generated `reasoning_content` plus
-the final answer as the trainable action trajectory, but parses and sends only
-the final `content` JSON to the environment. The template-owned `<think>`
-opener stays in the prompt mask, so gradients begin on the model's first
-reasoning token. Kiln does not infer or manufacture a thinking cutoff: an
-OpenEnv run omits the budget by default and explicitly disables inherited
-server limits. Set `thinking_budget_tokens` (API/dashboard) or
-`--thinking-budget-tokens` (CLI) only when an intentional cutoff is part of the
-experiment. If the policy never exits thinking, Kiln retains the unfinished
-reasoning for diagnosis but discards that completion from GRPO. Groups with no
-usable final actions or no reward variation are skipped with explicit warnings;
-they cannot contribute a policy-gradient update. Reproducible pull-request and push lanes discover and
-reset every environment published by the pinned oracle—currently twenty-two
-text-profiled servers, including eight one-step math families. A weekly edge
-lane derives the inventory again from upstream `main`, making additions and
-protocol drift visible without hard-coded Kiln environment lists. Discovered
-string actions, exact integer rewards, deterministic resets, and frozen
-terminal observations are exercised over real WebSockets alongside
-representative multi-step episodes and collect/train/verify/replay end to end.
-See the [OpenEnv Training Guide](docs/guides/OPENENV_GUIDE.md)
-for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
-and troubleshooting.
+- [docs/guides/OPENENV_GUIDE.md](docs/guides/OPENENV_GUIDE.md) — multi-environment training, task catalogs, protected credentials, ECHO behavior, artifacts, and troubleshooting.
+- [docs/training/OPENENV_REPLAY_REFERENCE.md](docs/training/OPENENV_REPLAY_REFERENCE.md) — replay and verify the exact environment exchanges a run used (512 MiB collection budget, 256 MiB artifact caps).
 
 ## The GRPO Loop
 
-This is the killer feature. Generate completions, score them with your own reward function, and feed the results back. The model learns what "good" means for your use case.
+This is the killer feature: generate completions, score them with your own
+reward function, and feed the results back — the model learns what "good"
+means for your use case. The default `POST /v1/train/grpo` submission uses
+`behavior_policy="no_importance_correction"`; for drift-corrected training,
+`kiln rollout-generate` requests exact token/action provenance from the real
+batching path, validates the seed, adapter, prompt, scored content, and usage
+before scoring, and atomically writes JSONL for `behavior_policy="recorded"`.
 
-```python
-import openai
-import requests
-
-client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
-
-# 1. Generate candidates
-responses = [
-    client.chat.completions.create(
-        model="Qwen3.5-4B",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
-    )
-    for _ in range(8)
-]
-
-# 2. Score them however you want — regex, unit tests, another model, human eval
-scored = [{"text": r.choices[0].message.content, "reward": my_score(r)} for r in responses]
-
-# 3. Submit — the default server trains and hot-swaps atomically
-requests.post("http://localhost:8420/v1/train/grpo", json={
-    "groups": [{
-        "messages": [{"role": "user", "content": prompt}],
-        "completions": scored,
-    }]
-})
-
-# 4. Next inference already uses the improved weights
-```
-
-The compact example above intentionally uses the default
-`behavior_policy="no_importance_correction"`. For drift-corrected training,
-use `kiln rollout-generate`: it requests exact token/action provenance from the
-real batching path, validates the seed, adapter, prompt, scored content, and
-usage before scoring, and atomically writes JSONL for
-`behavior_policy="recorded"`. See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for
-the recorded-policy workflow and worked verifiable-reward examples (math,
-JSON, code).
+See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for the loop, the recorded-policy workflow, and worked verifiable-reward examples (math, JSON, code).
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
@@ -387,104 +162,28 @@ See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for full ECHO usage (
 
 For saturated tasks where reward-only GRPO is low signal, kiln-train also
 accepts off-policy teacher distillation data: prompt messages plus a teacher
-response, optionally with per-token teacher top-logprobs for reverse-KL. The
-same agentic `trajectory` shape can be attached so action tokens receive OPD
-supervision while observation tokens stay masked out of it. Numeric teacher
-logits require a canonical first-line manifest copied from the registered
-teacher's `off_policy_manifest`; Kiln rejects a missing or different identity.
-ECHO env-CE can be composed with OPD and receipts count action and environment
-tokens separately.
-
-See [docs/training/OPD_TEACHER_JSONL.md](docs/training/OPD_TEACHER_JSONL.md) for the JSONL
-schema and the `reverse_kl` vs `cross_entropy` objective contract.
-
+response, optionally with per-token teacher top-logprobs for reverse-KL.
 OPD publishes immutable exact `.kiln-checkpoint` bundles every 25 committed
-optimizer steps by default and on cooperative cancellation. Resume binds the
-adapter and optimizer tensors, separate optimizer-step and source/sample
-candidate cursors, RNG streams, diagnostics, effective configuration, exact
-prompt/dataset identity, and authoritative teacher content revision. Use
-`kiln train status --job-id JOB_ID` to get the basename, then resubmit the
-identical request with `config.resume_checkpoint` or
-`kiln train opd --resume-checkpoint BASENAME`. See
-[Native Training Checkpoints](docs/training/training-checkpoints.md#opd).
+optimizer steps by default. See [docs/training/OPD_TEACHER_JSONL.md](docs/training/OPD_TEACHER_JSONL.md) for the JSONL schema and the `reverse_kl` vs `cross_entropy` objective contract, and [Native Training Checkpoints](docs/training/training-checkpoints.md#opd) for resume semantics.
 
 ### Remote vLLM teachers
 
 Remote numeric prompt-logprobs are accepted only from an identity-aware vLLM
-process launched with [`scripts/vllm_teacher.py`](scripts/vllm_teacher.py).
-The launcher snapshots the model and optional static adapter, binds their exact
-content plus tokenizer/runtime limits, the resolved Python executable, and the
-installed vLLM/torch/Transformers/tokenizers content into
-`system_fingerprint`, then re-hashes the runtime in a fresh child immediately
-before spawn. Dynamic LoRA mutation is disabled and stock `vllm-*`
-fingerprints are rejected.
-
-`--max-provenance-read-mib-per-second` applies one cumulative schedule to the
-launcher-owned snapshot, model, adapter, and installed-runtime content reads.
-The fresh child runtime recheck receives the same ceiling. Omit it only when
-the host has an independently reviewed unlimited-I/O policy; qualification
-inputs should select it explicitly when bounded provenance reads are required.
-
-```bash
-python3 scripts/vllm_teacher.py \
-  --model-path=/models/Qwen3.5-4B \
-  --served-model-id=qwen35-teacher \
-  --max-top-k=32 \
-  --max-model-len=32768 \
-  --max-prompt-logprob-candidates=1000000 \
-  --max-provenance-read-mib-per-second=256 \
-  -- --host=127.0.0.1 --port=8000
-
-curl -X POST http://localhost:8420/v1/teachers \
-  -H 'content-type: application/json' \
-  -d '{"alias":"qwen35@vllm","kind":"remote","provider":"vllm","model_id":"qwen35-teacher","url":"http://127.0.0.1:8000"}'
-```
-
-Kiln probes K=1 and the advertised maximum K during registration, verifies the
-complete numeric vocabulary against the loaded student, persists the canonical
-identity, and repeats the probe at every job start before GPU ownership or a
-cache lookup. Off-host URLs require HTTPS and a server-owned `credential_id`
-configured under `[teachers.credentials]`; API callers can never choose the
-secret environment-variable name. `GET /v1/teachers` reports `status`,
-`usable`, `identity_revision`, bounds, and the exact off-policy manifest.
-On first startup after upgrading, Kiln removes legacy `api_key_env` fields from
-`teachers.json`; those entries stay unusable until they are explicitly deleted
-and re-registered with a configured credential handle and fresh identity.
-See [docs/contracts/VLLM_TEACHER_IDENTITY.md](docs/contracts/VLLM_TEACHER_IDENTITY.md).
+process launched with [`scripts/vllm_teacher.py`](scripts/vllm_teacher.py):
+the launcher snapshots the model and optional static adapter into
+`system_fingerprint`, re-hashes the runtime in a fresh child before spawn, and
+can bound every provenance content read with
+`--max-provenance-read-mib-per-second`. Dynamic LoRA mutation is disabled and stock `vllm-*` fingerprints are rejected; registration probes K=1 and the advertised maximum K against the loaded student.
+See [docs/contracts/VLLM_TEACHER_IDENTITY.md](docs/contracts/VLLM_TEACHER_IDENTITY.md) for the full identity, registration, and recovery contract.
 
 ## The Eval Loop
 
-Training is half the story; the other half is knowing whether your last training run actually helped. Under the default `stable` profile, Kiln's eval system runs in the same process against the same model weights, so the full train/eval/activate loop needs no restart or special mode. A drained `maintenance` process can train but cannot evaluate until restarted in `stable`. Both workflows use the same first-class artifacts: registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
-
-```bash
-# 1. Upload an SFT JSONL — Kiln will use it as the source of truth for examples
-curl -F name=customer-support -F format=sft_chat -F file=@my-tickets.jsonl \
-  http://localhost:8420/v1/eval/datasets/upload
-
-# 2. Synthesize an eval suite from it (auto-detect picks the right scorer per example)
-curl -X POST http://localhost:8420/v1/eval/datasets/customer-support/synthesize \
-  -H 'content-type: application/json' \
-  -d '{"suite_name":"support-eval","strategy":"final_assistant",
-       "scorer":{"kind":"auto_detect"},
-       "sampling":{"max_examples":100,"max_prompt_chars":32768,"max_target_chars":4096,"dedupe":true},
-       "force":true,"run_against":["v1"]}'
-
-# 3. Compare two adapters head-to-head
-curl -X POST http://localhost:8420/v1/eval/compare \
-  -H 'content-type: application/json' \
-  -d '{"suite":"support-eval","adapters":["v1","v2"]}'
-
-# 4. Drill into per-example outcomes at /ui/ — pass/fail/invalid badges with prompt + target + got
-#    side-by-side, scorer detail, failure reruns, and strict byte replay for a completed run.
-
-# Or verify a completed run from the terminal; this exits nonzero unless every bound identity
-# and raw decoder continuation matches byte-for-byte.
-kiln-eval replay --job eval_123 --json
-```
-
-The judgment flywheel runs entirely on your machine — no frontier LLM, no API keys, no telemetry leaving the box. Click two replies in the playground, save them as an A/B preference, compile your picks into SFT data, train a small judge LoRA on them, then use that LoRA as the `judge_adapter` in any `LlmJudge` scorer. The judge gets better the more you use it; bad judgments are removable from the dataset and a retrain wipes their influence.
-
-See [docs/guides/EVAL_GUIDE.md](docs/guides/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, strict replay contract, and judge-LoRA workflow.
+Training is half the story; the other half is knowing whether your last
+training run actually helped. Under the default `stable` profile, Kiln's eval
+system runs in the same process against the same model weights — registered
+suites, drillable per-example outcomes, A/B comparisons, and a judgment
+flywheel that turns your A/B picks into a local judge LoRA, with strict byte
+replay of completed runs. See [docs/guides/EVAL_GUIDE.md](docs/guides/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, the strict replay contract, and the judge-LoRA workflow.
 
 ## Quick Start
 
@@ -801,117 +500,37 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 
 The table below is a curated workflow index. The generated
 [HTTP operation contract](contracts/kiln-http-api-v1.openapi.json) is the
-complete route, transport, status, header, and error inventory. Field-level
+complete route, transport, status, header, and error inventory; field-level
 wire semantics live in the generated
 [inference](contracts/kiln-inference-v1.schema.json),
 [observability](contracts/kiln-observability-v1.schema.json),
-[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json), and
+[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json),
 [eval and judgment](contracts/kiln-evals-v1.schema.json), and
 [training and agent control plane](contracts/kiln-control-plane-v1.schema.json)
-schemas; those
-contracts distinguish required, nullable, omitted, closed, and deliberately
-open inputs and include validated examples for every public entrypoint.
+schemas, and the [site's API reference](docs/site/api.html) walks through the
+main endpoints.
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets, bounded `ignore_eos`, and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
-| POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget and bounded `ignore_eos` controls but no recorded behavior-policy probabilities |
-| POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed (optionally with a `post_eval` hook) under normal `stable` serving or drained `maintenance` |
-| POST | `/v1/train/hf/sft/exports` | Atomically publish an immutable, identity-bound SFT bundle with the pinned HF/TRL runner |
-| POST | `/v1/train/hf/grpo/exports` | Atomically publish an immutable recorded-GRPO bundle from inline groups or server-local canonical JSONL |
-| GET | `/v1/train/hf/exports` | List server-owned HF/TRL export summaries |
-| GET | `/v1/train/hf/exports/{name}` | Revalidate and return one complete export manifest |
-| GET | `/v1/train/hf/exports/{name}/download` | Revalidate and stream one `.kiln-hf` bundle as tar.gz |
-| DELETE | `/v1/train/hf/exports/{name}` | Durably delete an immutable server-owned export, optionally identity-conditional with `If-Match` |
-| POST | `/v1/train/hf/peft/imports/{name}` | Stream, fully verify, resident-validate, and atomically publish one `.kiln-hf-import` PEFT result |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under normal `stable` serving or drained `maintenance` (optionally with a `post_eval` hook in `stable`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
-| POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
-| POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |
-| GET | `/v1/train/status` | Training queue, job status, and exact effective seeds |
+| POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget and bounded `ignore_eos` controls |
+| POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed (optionally with a `post_eval` hook) |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions; supports the `agentic_groups` shape with multi-turn `trajectory` fields and the default ECHO env-CE term |
+| POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, with exact checkpoints every 25 committed optimizer steps |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job and its exact effective seed |
-| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (effective seed, base-weight shard identity, loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
-| GET | `/v1/train/queue` | List queued training jobs |
-| DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
-| DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
-| POST | `/v1/distill/refresh` | Fail-closed DistillRefresh submission pending exact SFT+OPD phase plans, exact SFT rows, and maximum sequential working-set reservation |
-| POST | `/v1/distill/pump` | Continual-learning distillation pump job with an exact effective seed |
-| GET / POST | `/v1/corrections` | Durable corrections store — the basket survives the browser; pi can file corrections |
-| DELETE | `/v1/corrections/{request_id}` | Remove a correction |
-| POST | `/v1/corrections/mark_trained` | Mark correction rows as trained into an adapter (kept as history) |
-| GET / POST | `/v1/teachers` | Teacher registry; remote registration performs authoritative identity and capability probes |
-| DELETE | `/v1/teachers/{alias}` | Remove a registered teacher |
-| GET | `/v1/cache/stats` | Off-thread, serialized validation and summary of identity-bound cache-v3 entries |
-| GET | `/v1/cache/export` | Stream a deterministic validated export (16 GiB source / 1M-file limit); concurrent scans and archive import are rejected |
-| POST | `/v1/agent/traces/discover` | Index pi/agent session traces for training |
-| GET | `/v1/agent/traces` | List discovered agent session traces |
-| POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill), returning effective seeds keyed by job ID |
-| POST | `/v1/agent/judge_distill` | Distill a judge LoRA from agent traces and return its exact effective seed |
-| GET / POST | `/v1/agent/runs` | Embedded pi runs — the server spawns `pi --mode rpc`, streams the trajectory, auto-indexes the session as a trace |
-| GET | `/v1/agent/runs/status` | Embedded-run gate state, pi availability, capacity |
-| GET | `/v1/agent/runs/{id}` | One run record (status, counters, session link) |
-| GET | `/v1/agent/runs/{id}/events` | Live event feed for a run (`?after=<seq>` poll cursor) |
-| POST | `/v1/agent/runs/{id}/steer` | Queue a steering message into a live run |
-| POST | `/v1/agent/runs/{id}/follow_up` | Queue a follow-up task into a live run |
-| POST | `/v1/agent/runs/{id}/abort` | Abort a queued or running run |
 | GET | `/v1/adapters` | List saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision |
-| GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
-| POST | `/v1/adapters/load` | Load an adapter from disk, or explicitly reload its already-live revision at the request barrier, and return the exact content revision |
-| POST | `/v1/adapters/unload` | Unload active adapter |
-| DELETE | `/v1/adapters/{name}` | Delete an idle adapter; active or physically loaded adapters return 409 |
-| POST | `/v1/adapters/upload` | Stage and atomically publish a multipart tar.gz adapter import |
-| GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
-| POST | `/v1/adapters/merge` | Stage and atomically publish an adapter merge (weighted_average, TIES, or concatenation modes) |
-| POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge with an exact effective seed |
-| GET | `/v1/recipes` | List built-in recipes with per-recipe static workload/optimizer admission and an unavailable reason |
-| POST | `/v1/recipes/run` | Queue a typed training recipe and return effective seeds keyed by job ID |
-| GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
-| GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
 | POST | `/v1/eval/run` | Submit an eval and materialize one effective seed (registered suite or inline) |
-| POST | `/v1/eval/compare` | Run a suite head-to-head with identical derived seeds across adapters |
-| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, base-weight and execution identities, and headline results |
-| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/base-weight/execution identity, status, outcomes, or cancel/delete |
-| POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run failures with the original effective seed by default |
-| POST | `/v1/eval/datasets/upload` | Multipart upload of an SFT/GRPO JSONL dataset |
-| GET / DELETE | `/v1/eval/datasets/{name}` | Dataset manifest / delete |
-| GET | `/v1/eval/datasets/{name}/rows` | Stream first N rows (used by the SFT submit form's dataset picker) |
-| POST | `/v1/eval/datasets/{name}/preview` | Preview synthesized examples before committing |
-| POST | `/v1/eval/datasets/{name}/synthesize` | Decompose a dataset into an eval suite |
-| GET / POST | `/v1/judgments` | List or create judgment datasets |
-| DELETE | `/v1/judgments/{name}` | Delete a judgment dataset |
-| POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
-| DELETE | `/v1/judgments/{name}/rows/{id}` | Prune a bad row (then retrain to wipe its influence) |
-| POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for training a judge LoRA |
-| POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
-| GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, including serving-profile source, typed model-startup policy and observations, the absolute shared cache root and source, batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
-| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, typed config hashes and runtime policies, batching, thinking defaults, SFT checkpoint-boundary policy, cache counts, and batched recurrent-state ownership/lifecycle counters; enabled only with typed `server.debug_model_state=true` or `server.eval_mode=true` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
-| GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
-| GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |
-| GET | `/health` | Server readiness and diagnostics, including bounded base-weight and execution-identity summaries plus the immutable SFT checkpoint-boundary policy; maintenance or missing/invalid real-backend execution provenance returns 503 |
-| GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
-| GET | `/metrics` | Prometheus metrics |
 
 ### Performance timing
 
 Set `include_performance: true` on `POST /v1/chat/completions` to receive
-`metadata.performance`. Batching-engine responses separate `actor_queue_ms`
-(API enqueue to admission start), `actor_admission_ms` (slot preparation),
-and `actor_prefill_wall_ms` (admission completion to first sampled-token
-readiness) from accumulated model `prefill_ms`, `decode_ms`, TTFT, and total
-latency. The three actor fields are `null` on paths that do not use the batching
-actor. Both real-model streaming paths publish a performance object on the
-terminal chat chunk; an explicit request opt-in also emits the existing
-`kiln.token_timing` object for each model token, with a bounded path source,
-producer-ready/delivered, handler-received, and delivery queue timing. Omission
-follows the server metadata default but never opts a stream into custom
-per-token events.
-The request-local ITL percentiles, bounded stall attribution, exact timing
-boundaries, nullable phase coverage, request-owned batching-engine GPU-lock and
-synchronization timings, rolling endpoint, and Prometheus contract are
-documented in [`docs/serving/LATENCY_OBSERVABILITY.md`](docs/serving/LATENCY_OBSERVABILITY.md).
+`metadata.performance`; batching-engine responses separate the actor's
+`actor_queue_ms`, `actor_admission_ms`, and `actor_prefill_wall_ms` phases
+from model prefill/decode/TTFT totals. The request-local ITL percentiles,
+bounded stall attribution, exact timing boundaries, rolling endpoint, and
+Prometheus contract are documented in [`docs/serving/LATENCY_OBSERVABILITY.md`](docs/serving/LATENCY_OBSERVABILITY.md).
 
 ### Prompt logprobs
 
@@ -1145,116 +764,36 @@ endpoint.
 
 ### Chat adapter selection
 
-`POST /v1/chat/completions` treats adapter selection as a per-request choice unless you call the adapter management endpoints:
-
-| Request field | Behavior |
-|---|---|
-| `adapter` omitted | Use the current server default adapter without changing it. |
-| `"adapter": null` | Use the base model for this request only. |
-| `"adapter": ""` | Use the base model for this request only. |
-| `"adapter": "<name>"` | Use that named adapter for this request only; the name must be a loaded/available adapter directory under `adapter_dir`. |
-
-Only `POST /v1/adapters/load` and `POST /v1/adapters/unload` change the
-server default adapter reported by `GET /v1/adapters`. A successful load
-returns `content_revision`; `GET /v1/adapters` publishes the authoritative
-`loaded_adapter_identity` tuple, and `/health` plus debug state expose
-`loaded_adapter_revision`. Completion responses carry the same value in
-`x-kiln-loaded-adapter-revision` (`base` when no LoRA is loaded).
-
-The load body is `{"name":"<adapter>","allow_quarantined":false,"reload":false}`;
-both booleans default to false. Set `reload` to true to re-read and republish an
-already-live adapter from disk. The exact revision is loaded outside the actor
-barrier, then the weight flip and affected-cache invalidation wait for active
-requests to finish. Ordinary repeated loads remain no-ops. During the ordered
-boundary, health and trusted debug state report
-`actor_barrier_adapter_active=true`; Prometheus exposes
-`kiln_batching_engine_actor_barrier_adapter_active`. The corresponding resize
-fields use `actor_barrier_resize_active`. These are bounded live gauges, not
-proof that an individual request waited; use that request's nullable
-`metadata.performance.latency.phases.adapter_ms` for causal attribution.
-
-The revision is a canonical SHA-256 over the exact PEFT config and safetensor
-identities consumed by the loader. It is published with the runner's weight
-flip, copied into queued inference work, prefix-cache keys, and deterministic
-response-cache keys, and checked again before queued prefill. Same-name
-rewrites therefore cannot reuse old KV or responses. Cache purges advance a
-generation fence and revoke in-flight owner claims, so a late old request
-cannot restore an invalidated entry. Chat requests log adapter runtime
-transitions with the old adapter, new adapter, request id, and transition
-reason.
+`POST /v1/chat/completions` treats adapter selection as a per-request choice:
+an omitted `adapter` uses the server default, `null` or `""` uses the base
+model for that request only, and a name targets that loaded adapter for that
+request. Only `POST /v1/adapters/load` and `/unload` change the server
+default; a successful load returns `content_revision`, a canonical SHA-256
+over the exact PEFT config and safetensor identities, published in the
+`x-kiln-loaded-adapter-revision` response header and copied into prefix-cache
+and response-cache keys so same-name rewrites cannot reuse stale entries.
+See the [HTTP operation contract](contracts/kiln-http-api-v1.openapi.json) and the [site's API reference](docs/site/api.html) for full load/reload/quarantine and composition semantics.
 
 ### Adapter publication and conflicts
 
-All adapter-changing operations share one serialized revision barrier. Uploads
-and merges prepare dot-prefixed staging directories and become visible with one
-rename; an incomplete artifact never appears in `GET /v1/adapters`. Delete and
-rewrite operations refuse to touch bytes that the runner still has physically
-loaded. `DELETE /v1/adapters/{name}` returns 409 `adapter_active` for the server
-default and 409 `adapter_loaded` for any physically loaded revision; call
-`POST /v1/adapters/unload` and retry. A failed post-eval gate uses the same
-barrier, swaps a loaded rejected adapter to base, then renames it to `.failed`.
-Per-request composition also resolves exact source revisions and performs
-synthesis, atomic cache publication, live swap, and eviction under this
-barrier. Its cache identity includes names, scales, and source revisions, so a
-same-name source rewrite cannot reuse a stale composed adapter.
+All adapter-changing operations share one serialized revision barrier: uploads
+and merges stage dot-prefixed directories and become visible with one rename,
+delete and rewrite operations refuse to touch bytes the runner still has
+physically loaded, and a failed post-eval gate renames the rejected adapter to
+`.failed`. Training that publishes into a name another publisher changed fails
+with `adapter_revision_conflict` and preserves the newer revision.
 
-Training writes weights, receipts, replay data, lineage, and checkpoints under
-a hidden staging root. At job start Kiln captures the target content revision
-and a filesystem-local starting snapshot. At completion it compares the target
-again: an intervening upload, delete, gate action, or other publisher wins, the
-training job fails with `adapter_revision_conflict`, and that newer revision is
-preserved. For an ungated same-name target that is already loaded, the final
-directory replacement, fresh weight flip, loaded identity, and cache purge run
-inside one drained inference barrier. This reload is required even when
-`auto_load=false`, because the old bytes were already serving under that name.
-When `post_eval.min_accuracy` is set, a loaded same-name rewrite is rejected
-before GPU training instead of serving unapproved weights; unload it or choose
-a versioned `config.output_name`.
-
-SFT, GRPO, and OPD can also publish immutable exact `.kiln-checkpoint` directories
-directly beneath the adapter registry while the final adapter remains staged.
-They restore optimizer, cursor/RNG, and objective-specific reference state, not
-just PEFT weights; admission validates the complete bundle and exact data route
-before GPU work. Training checkpoint planning identity v3 includes the resolved
-SFT checkpoint-boundary policy. SFT uses that policy for sparse boundary replay;
-GRPO and OPD do not execute that SFT route, but retain the shared planning
-identity, so policy or schema drift rejects exact resume instead of silently
-changing the runtime contract. See [Native Training Checkpoints](docs/training/training-checkpoints.md)
-for API, CLI, browser, cancellation, teacher-identity, and resume semantics.
-
-The historically named `replay.jsonl`, `lineage.json`, and `kiln-replay`
-surfaces are narrower: `kiln-replay verify` recomputes request-lineage hashes
-only. It does not load a model, retrain, compare tensors or outputs, or prove
-reproducibility. Use `.kiln-checkpoint` for exact continuation and see
-[Request-Lineage Integrity](docs/contracts/REPLAY_INTEGRITY.md) for the precise boundary.
+- [docs/contracts/ADAPTER_MANIFEST.md](docs/contracts/ADAPTER_MANIFEST.md) — the adapter manifest schema (adapter/config/receipt hashes, base-weight shard manifest, kiln commit, training-data hash) and `kiln adapters restore` verification.
+- [docs/training/training-checkpoints.md](docs/training/training-checkpoints.md) — exact `.kiln-checkpoint` bundles, resume semantics, and the planning identity shared by SFT/GRPO/OPD.
+- [docs/contracts/REPLAY_INTEGRITY.md](docs/contracts/REPLAY_INTEGRITY.md) — the narrower `kiln-replay` request-lineage boundary.
 
 ## Architecture
 
-```
-Single Rust binary:
-  HTTP (axum) ─── Scheduler (continuous batching, chunked prefill)
-                      │
-                  Block Manager (paged KV cache)
-                      │
-                  Engine (model forward + LoRA)
-                  ├── 24× Gated DeltaNet layers (linear attention, O(1) state)
-                  └──  8× GQA layers (full attention + KV cache)
-                      │
-                      ├── Training worker (background thread, shares GPU)
-                      │   ├── SFT (cross-entropy on LoRA parameters)
-                      │   ├── GRPO (advantage-weighted policy gradient)
-                      │   └── OPD (identity-bound teacher distillation)
-                      │
-                      └── Eval worker (background thread, shares GPU)
-                          ├── Suite registry + dataset registry + judgment store on disk
-                          ├── Pluggable scorers (auto-detect, exact, regex, JSON,
-                          │   numeric, MCQ, contains, tool_call, code, llm_judge, all/any)
-                          └── Post-training auto-eval hook
-```
-
-Everything runs in one process. Training and evaluation share the already-loaded model — no second copy in VRAM, no Python sidecar, no frontier-LLM dependency for judging.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
+Everything runs in one Rust binary: an axum HTTP front, a continuous-batching
+scheduler with paged KV cache, the Qwen3.5-4B hybrid engine (24 Gated DeltaNet
+layers + 8 full-attention layers), and background training and eval workers
+that share the already-loaded model — no second copy in VRAM, no Python
+sidecar. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
 ## Project Structure
 
@@ -1278,455 +817,60 @@ crates/
 
 ## Configuration
 
-Kiln uses a typed TOML config file. Environment overrides are resolved during startup. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See the complete [Configuration Reference](docs/contracts/CONFIGURATION.md) for every field, default, validation rule, and currently supported override, and use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. `kiln config --file kiln.toml --json` emits every post-precedence typed startup leaf with source, environment spellings, redaction, hash, and restart semantics; a running server publishes its immutable startup snapshot in `GET /v1/config` under `effective_configuration`. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/serving/SERVING_PROFILES.md).
+Kiln uses a typed TOML config file; unknown fields and malformed environment
+overrides stop startup instead of silently falling back to defaults.
 
-| Setting | Env Var | Default | Description |
-|---|---|---|---|
-| `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
-| `paths.cache_root` | `KILN_PATHS_CACHE_ROOT` | OS account cache directory | Immutable root shared by autotune, Vulkan pipeline, and transposed-weight caches. Relative values are anchored to the startup working directory; unset `HOME`/`XDG_CACHE_HOME` cannot redirect it. `kiln config` and `GET /v1/config.paths` report the absolute path and source |
-| `server.port` | `KILN_SERVER_PORT` | 8420 | Server listen port |
-| `server.serving_profile` | `KILN_SERVER_SERVING_PROFILE` | `stable` | Immutable process-lifetime GPU ownership policy: `stable`, `experimental`, or `maintenance`; malformed values stop startup, and health/config report the source and every effective policy field |
-| `server.http_send_buffer_bytes` | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
-| `server.stream_stall_grace_ms` | `KILN_SERVER_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
-| `server.max_batch_tokens` | `KILN_SERVER_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; admission and resumable prefill share the remainder. Invalid values stop startup; health/debug report value and source |
-| `server.max_prefill_tokens_per_cycle` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` | 256 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). On ROCm actor serving, it must equal the effective streaming-prefill tile, direct streaming must begin no later than that boundary, and `max_batch_tokens` must fit that tile plus effective decode width; unsafe combinations stop startup instead of changing deterministic output by route. The checked Strix Halo Vulkan development profile uses 128; concurrent Vulkan serving at 256 is not qualified. Health/debug report the effective value and source |
-| `server.max_prefill_layers_per_cycle` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
-| `server.max_decode_batch` | `KILN_SERVER_MAX_DECODE_BATCH` | `auto` (backend policy) | Concurrent decode-row ceiling (`auto` or 1–65536). Invalid values stop startup. Deterministic mode and `max_batch_tokens` may lower it; startup, health, config, debug, and `kiln_batching_engine_max_decode_batch` report the final effective value. Wider values require the machine-local offline decode-width campaign plus exact-source correctness, soak, and benchmark evidence; the campaign emits a receipt and never mutates configuration |
-| `batching.mode` | `KILN_BATCHING_MODE` | `auto` (backend policy) | Select the production batching actor: `auto`, `enabled`, or `disabled`. Auto enables it on CUDA, ROCm, Vulkan, and CPU and disables it on Metal. Restart required |
-| `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that issues one forward per ready row instead of one true batched forward. It normally reduces throughput. Restart required |
-| `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Defer a queued same-adapter strict descendant while its active shorter prefix can become reusable; independent rows remain admissible. Restart required |
-| `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` (backend policy) | Prompts admitted per actor cycle before returning to decode (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width. Restart required |
-| `batching.actor_cycle_idle_ms` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` | 0 | Intentional 0–60000 ms cooperative wait after actor cycles that advanced model work. Zero is unpaced. Nonzero lowers sustained accelerator duty cycle at an explicit throughput/ITL cost; it runs only after synchronous accelerator return, polls control commands within 5 ms, and requires restart |
-| `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` (enabled on real backends) | Fallback worker for actor-absent direct streaming effectively-greedy requests only. Sampled, non-streaming, and actor-routed requests bypass it. Restart required |
-| `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` (backend policy) | Fallback cohort width (`auto` or 1–65536), always clamped to effective decode width. Auto is CUDA 1, CPU/ROCm/Metal 8, Vulkan 64. Restart required |
-| `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical input fails startup. Restart required |
-| `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` (backend policy) | Allow different decode positions in one fallback cohort. Auto is true on Metal/Vulkan and false elsewhere. Restart required |
-| `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` (backend policy) | `auto`, `enabled`, or `disabled`. Auto dispatches at 256 prompt tokens on ROCm, 2048 on CUDA/Metal, and never on CPU/Vulkan. Enabled applies to every non-empty prompt; disabled is the monolithic isolation control. ROCm actor serving rejects a mode/threshold that would delay direct splitting beyond its 256-token actor tile. Restart required |
-| `streaming_prefill.threshold_tokens` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` (backend policy) | `auto` or a positive integer. Overrides an existing CUDA/ROCm/Metal crossover but cannot enable CPU/Vulkan automatic dispatch. Restart required |
-| `streaming_prefill.tile_tokens` | `KILN_STREAMING_PREFILL_TILE_TOKENS` | `auto` (backend policy) | Base inference/non-tape tile, `auto` or a positive multiple of 64. A concrete base is inherited by specialized tiles left on auto. Restart required |
-| `streaming_prefill.tape_tile_tokens` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` (backend policy) | Tape-authoritative native-training tile, `auto` or a positive multiple of 64. Restart required |
-| `streaming_prefill.detached_full_attn_tile_tokens` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | `auto` (backend policy) | Detached materialized full-attention tile; a concrete value also controls boundary and tape-replay variants. Restart required |
-| `streaming_prefill.last_token_lm_head` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | true | Compute only the last LM-head row on the final inference tile. Restart required |
-| `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
-| `server.default_thinking_enabled` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
-| `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
-| `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
-| `server.fold_reasoning_into_content` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
-| `memory.inference_memory_fraction` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` | 0.7 | VRAM fraction for inference vs training |
-| `memory.reclaim_mode` | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic`; the serving profile can suppress it |
-| `memory.kv_autoscale` | `KILN_MEMORY_KV_AUTOSCALE` | true | Request pressure-driven physical KV resizing; effective state is profile/backend gated |
-| `memory.kv_force_blocks` | `KILN_MEMORY_KV_FORCE_BLOCKS` | 0 | Maintenance-only one-shot startup resize; positive values require `kv_autoscale=true` and the maintenance profile |
-| `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
-| `training.recompute_checkpoint_boundaries` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto` | Checkpointed SFT sparse-boundary replay: `auto`, `enabled`, or `disabled`. Auto enables replay at the configured sequence-length threshold. Restart required |
-| `training.recompute_boundary_threshold_tokens` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | 8192 | Positive sequence length where automatic SFT boundary replay begins. Ignored for dispatch when replay is explicitly enabled or disabled. Restart required |
-| `training.checkpoint_boundary_anchor_stride` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `auto` | `auto` derives the sparse anchor stride from the admitted tensor shape and cache target; a positive integer pins the segment stride. Restart required |
-| `training.checkpoint_boundary_cache_gb` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` | 6.0 | Finite positive GiB target used only to derive an automatic anchor stride. Restart required |
-| `logging.format` | `KILN_LOGGING_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
-| `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
-| `prefix_cache.max_blocks` | `KILN_PREFIX_CACHE_MAX_BLOCKS` | auto | Cap retained KV blocks for shared prefixes (auto = 50% of KV block pool) |
-| `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
-| `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL request/response log for the inference endpoints |
-| `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (rotated + gzipped, retention-capped) |
-| `request_log.max_file_bytes` | `KILN_REQUEST_LOG_MAX_FILE_BYTES` | 67108864 | Rotation threshold; values below 4096 are rejected |
-| `request_log.max_total_bytes` | `KILN_REQUEST_LOG_MAX_TOTAL_BYTES` | 2147483648 | Retention ceiling in bytes |
-| `request_log.compress` | `KILN_REQUEST_LOG_COMPRESS` | true | Gzip rotated request logs |
-| `request_log.max_capture_bytes` | `KILN_REQUEST_LOG_MAX_CAPTURE_BYTES` | 4194304 | Per-body storage cap; wire responses are unchanged |
+- Complete field reference — every field, default, validation rule, and
+  override: [docs/contracts/CONFIGURATION.md](docs/contracts/CONFIGURATION.md)
+- Deployable starting point: [`kiln.example.toml`](kiln.example.toml)
+- A running server publishes its immutable startup snapshot in
+  `GET /v1/config` under `effective_configuration`; before startup,
+  `kiln config --file kiln.toml --json` emits every post-precedence typed leaf
+  with source, environment spellings, redaction, hash, and restart semantics.
 
-Kiln resolves the logging table and its environment overrides before full
-configuration validation. Every file-read, TOML, environment, or validation
-error therefore emits `configuration_load_failed` with the selected config path
-and complete error chain in the configured pretty/JSON format before exiting.
-
-The four checkpoint-boundary overrides follow the mechanical
-`KILN_<SECTION>_<FIELD>` rule. Historical unsectioned spellings are ignored;
-malformed canonical values stop startup. Kiln converts the configured values into one
-immutable policy and gives that same value to SFT memory admission and runtime
-execution. Inspect `training.checkpoint_boundary_policy` in `GET /v1/config`,
-`GET /health`, and trusted `GET /v1/debug/model-state`, or in the dashboard's
-Runtime config → Training group.
-
-Streaming response channels are serviced by a fair delivery worker outside the
-compute actor. A full or disconnected client cannot park peer decode or control
-commands; final tokens remain ordered before `Done` or `Error`, and only the
-affected request retains its KV slot during the configured grace. Delivery
-acknowledgements from one decode forward are published to the actor atomically,
-so response handling cannot fragment a wide batch into per-row forwards.
-Current in-flight, backpressured, and pending-terminal counts are reported by
-`/health`, `/v1/debug/model-state`, and the
-`kiln_batching_engine_response_delivery_*` Prometheus gauges.
-
-`/v1/config` and `/health` expose `decode_runtime` diagnostics with the
-deterministic value and source plus the configured, backend-policy, and final
-effective decode ceilings. The effective source is one of `backend_policy`,
-`config_file`, `environment`, `deterministic`, or `max_batch_tokens`. This makes
-an intentional reproducibility run distinguishable from an accidentally
-serialized throughput run without inspecting process environment.
-
-Batching has the same startup-only provenance contract. The
-`batching` object from `GET /v1/config` contains `configuration` plus
-`actor_active` and the actual direct-fallback status at
-`direct_decode_rendezvous`; health repeats the configuration at
-`decode_runtime.batching_configuration` and fallback status at
-`decode_runtime.direct_decode_rendezvous`, while trusted debug uses
-`batching_engine.configuration` and
-`batching_engine.direct_decode_rendezvous`. The
-configuration reports mode intent, backend default, effective actor selection,
-rowwise and prefix-aware toggles, configured/backend/effective admission
-quantum, cooperative actor-cycle idle and source, direct-rendezvous
-mode/width/wait/mixed-length policy, every value source, and the backend-owned
-burst-admission decision. A worker can be active
-while `route_available=false` because actor activity shadows this fallback
-route for real chat completions. The direct route is otherwise limited to direct streaming
-effectively-greedy requests; sampled, non-streaming, and actor-routed requests
-bypass it. Under defaults, only Metal routes through the fallback because every
-real backend enables the worker but Metal alone disables the actor.
-The eight deprecated pre-consolidation aliases still parse strictly and warn,
-but new deployments should use the mechanically derived names in the table.
-Health and trusted debug expose the configured actor-cycle idle plus active,
-count, cumulative, and maximum observed wait state. Prometheus publishes the
-same five process-lifetime signals under
-`kiln_batching_engine_actor_cycle_idle_*`, allowing intentional duty-cycle
-pacing to be separated from an unexplained inference pause.
-
-Streaming prefill has a parallel startup-only provenance contract. The
-selected backend supplies automatic dispatch plus base, tape, detached,
-detached-boundary, and detached-replay tile defaults. CUDA uses 1024-token base
-and tape tiles, ROCm uses 256, Metal/Vulkan use 2048, and CPU uses 8192. Detached defaults
-are 8192 except that CUDA boundary/replay paths use 65536. An explicit base tile
-feeds any specialized `auto` field; a detached override feeds all three
-detached variants. The resolved object is at `/v1/config.streaming_prefill`,
-`/health.prefill_runtime.streaming_prefill`, and trusted debug
-`streaming_prefill`. It records configured/backend/effective values and
-sources, including inheritance, rather than collapsing prompt-dependent auto
-dispatch into a misleading boolean. Ordinary generation, prompt-logprob
-scoring, native training, local OPD teachers, MTP alignment, and the benchmark
-consume this same immutable policy and do not re-read its public environment
-names. The canonical Kiln prompt-logprob teacher identity hashes every resolved
-policy field under inference-contract v2, so changing this section changes the
-teacher revision and invalidates identity-bound logit caches and OPD resume
-bindings.
-
-The current deterministic serving contract is deliberately narrower than
-cross-backend bitwise determinism: it removes concurrent decode-shape variation
-and exposes one immutable selector to tensor/kernel implementations. It does not
-automatically set CUDA library controls such as `CUBLAS_WORKSPACE_CONFIG`, and
-not every tolerance-bounded backward kernel consumes that selector yet. Treat
-same-environment repeated training and cross-device equality as separate
-qualification gates.
-
-Real-model serving initializes paged prefill ownership without running an
-unbounded prompt forward. Each actor cycle reserves one token for every ready
-decode row, then advances partial prefills round-robin within both the remaining
-`server.max_batch_tokens` budget and the independent
-`server.max_prefill_tokens_per_cycle` ceiling. Within that token chunk, prefill
-yields after at most `server.max_prefill_layers_per_cycle` transformer layers;
-the actor retains the intermediate hidden and position state, runs the next
-ready decode cohort, and resumes without repeating completed layers. This layer
-quantum controls latency without multiplying full-model prompt passes as a
-smaller token chunk can. The actor charges a chunk's token width once, when it
-selects that chunk; later layer groups resume the same width without competing
-for a second new-token budget, shrinking the chunk, or replaying completed
-layers. Without eligible staged work, every third prefill dispatch remains
-round-robin. The other two may accelerate the shortest remaining prompt tail
-only when it is no more than four token chunks and its admission-time prompt
-work is strictly smaller than another eligible active row's. Comparing
-immutable work classes keeps an
-all-equal cohort aligned instead of creating an artificial readiness staircase,
-while a genuinely shorter interactive request can receive the bounded extra
-service even on its ordinary turn; the round-robin lane retains one third of
-dispatch capacity while shorter work is continuously eligible.
-Latency-oriented actors also keep a separate staging lane of at most four
-short prefills beyond the decode-width ordinary slots. A request is staging
-eligible only when its prompt can enter the four-chunk short-tail class after
-one prefill quantum, and staged priority owns that entry quantum. Ordinary FIFO
-capacity is counted independently, so staged arrivals cannot take a long
-prompt's ordinary slot. Eligible staged prefills
-rotate by request generation for at most four priority turns before a mandatory
-global round-robin prefill turn; decode still runs before each of those prefill
-dispatches. Once staged rows become decode-ready, a separate request-generation
-rotation prevents a decode-width cohort from hiding them. Staging is disabled
-for deterministic width one and for CUDA's throughput-oriented burst-refill
-policy.
-Cancellation and
-shutdown release partial KV ownership
-only after the backend synchronization boundary; an unsettled device failure is
-quarantined instead of recycling pages. `/health` and `/v1/debug/model-state`
-expose `active_prefill`, both effective budgets and their sources, the last token
-and layer quantum, cumulative processed layers, and actual inter-layer yields.
-Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
-`kiln_batching_engine_max_batch_tokens`,
-`kiln_batching_engine_max_prefill_tokens_per_cycle`,
-`kiln_batching_engine_max_prefill_layers_per_cycle`,
-`kiln_batching_engine_last_prefill_tokens`, and
-`kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
-series. Bounded short-tail service is counted by
-`kiln_batching_engine_short_prefill_priority_forwards_total`; staging capacity,
-occupancy, observed active width, and admissions use the
-`kiln_batching_engine_{prefill_staging_slots,max_active_requests,prefill_staging_priority_burst,active_staged_requests,max_observed_active_requests,prefill_staging_admissions_total,prefill_staging_priority_forwards_total}`
-series. Admission,
-bounded-prefill, and decode-forward wall time is also
-available as cumulative, process-maximum, and 100 ms slow-phase counters under
-`kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
-Request-scoped opt-in performance metadata additionally partitions first-token
-wall time into actor queue, slot admission, and admitted-prefill phases, so a
-high TTFT can be attributed without inferring per-request behavior from process
-aggregates.
-Qualification retains the same closed phase object as per-phase measured-window
-time totals and observation counts. A successful request that omits terminal
-phase metadata fails the mixed-load, development-soak, and endurance gates;
-unsupported nullable backend phases remain distinguishable from measured zero.
-The ROCm mixed-load gate additionally runs an isolated eight-request,
-fixed-seed sampled profile before the greedy measurement window. Its dedicated
-metrics retain aggregate and median per-request throughput, sampled-tail versus
-broad decode cost, nullable readback population, and multi-row batching proof;
-the driver drains and resets its health baseline before the ordinary workload.
-The local qualification runner gives an interrupted driver 65 seconds to clean
-its separate server group and private model snapshot before hard containment,
-removes incomplete run evidence transactionally, and exits 130 without a
-traceback. Qualification timing is ordinary wall-clock time and does not apply
-a machine-specific temperature controller.
-The same values appear in health and debug snapshots. A phase crossing 100 ms
-emits one structured `slow_batching_actor_phase` event with the bounded phase
-name and work size, which lets qualification correlate a token gap without
-logging ordinary forwards or request content.
-
-Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
-may synchronize the accelerator. `on-demand` permits explicit startup and
-training reclaim calls but does not start a timer. `automatic` also enables the
-background pressure monitor and is experimental. Invalid values stop startup;
-the resolved mode and automatic-monitor state are reported under
-`/health.decode_runtime.memory_governor`.
-
-Kiln boots with the built-in `Qwen3.5-4B` defaults profile. That profile
-preserves Qwen3.5-4B's official chat-template thinking default for ordinary
-serving: assistant turns start in thinking mode unless `enable_thinking=false`
-is passed. In eval mode, the same profile injects
-`chat_template_kwargs.enable_thinking=false` unless a request explicitly
-overrides it, so tool-agent evals and Pi-style loops get final `content`
-instead of long `reasoning_content`. Operators can also set
-`server.default_thinking_enabled = false` or
-`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` for non-eval serving. Retired
-`KILN_DEFAULT_NO_THINK` is ignored.
-
-The normative wire schema and executable cross-runtime vectors are in the
-[Thinking Budget Contract](docs/serving/THINKING_BUDGET_CONTRACT.md).
-
-Chat and batch requests also accept the vLLM-compatible `ignore_eos` boolean.
-It defaults to `false`. When `true`, tokenizer EOS ids are treated as ordinary
-generated tokens, while explicit `stop` sequences still apply and the effective
-`max_tokens` remains a hard bound. The flag is part of deterministic cache
-identity. It cannot be combined with `rollout_provenance=true` because the
-current behavior-policy provenance schema does not encode the altered EOS
-policy; Kiln rejects that combination instead of recording incomplete policy
-identity.
-
-Thinking can also be bounded without disabling it. Set
-`thinking_budget_tokens` and/or `thinking_budget_ms` on
-`POST /v1/chat/completions` or `POST /v1/completions/batch`:
-
-```json
-{
-  "messages": [{"role": "user", "content": "Solve this carefully."}],
-  "max_tokens": 512,
-  "thinking_budget_tokens": 128,
-  "thinking_budget_ms": 3000
-}
-```
-
-An omitted field inherits its corresponding server default; explicit `null`
-means unlimited for that dimension, even when the server has a default. `0`
-closes thinking immediately. When both limits are set, the first one reached
-wins. The time budget starts when the first decode candidate is ready, so queue
-and prefill time do not consume it, and it is checked between generated tokens.
-If the model emits `</think>` naturally first, Kiln leaves it alone.
-The Playground reads the effective server defaults from `GET /v1/config` and
-previews the resolved token/time pair before send, with each dimension marked
-as coming from the server or the request.
-
-When a budget applies to an open thinking block, Kiln validates closure before
-decode. The effective `max_tokens` value, after any context-window clamp, must
-fit the active tokenizer's complete `</think>` token sequence. A smaller value
-returns an invalid-request error; a value equal to the close length leaves no
-room for an answer, so reserve additional tokens for visible output. Any `stop`
-string that can match, contain, or overlap all or part of `</think>` is also
-rejected because it could terminate generation before the forced close enters
-KV history atomically. A budget larger than the completion limit is valid:
-Kiln reserves the final slots for the close and reports trigger `max_tokens`.
-
-On exhaustion, Kiln feeds the forced close-tag tokens into the model context and
-continues decoding the final answer. Those tokens count toward `max_tokens` and
-completion usage just like model-generated close-tag tokens. Budgets are inert
-when the rendered prompt did not start inside a thinking block. Time-budgeted
-requests bypass deterministic completion caches because their boundary depends
-on runtime speed; token-budgeted requests remain cacheable under a budget-aware
-cache key. Both server defaults are unlimited when omitted.
-
-Non-streaming chat choices and batch items include a `thinking_budget` outcome
-when a budget was applied:
-
-```json
-{
-  "triggered": true,
-  "trigger": "tokens",
-  "closed": true,
-  "thinking_tokens": 128,
-  "thinking_time_ms": 742
-}
-```
-
-`trigger` is `tokens`, `time`, or `max_tokens`; the last value means Kiln
-reserved the remaining completion slots for an atomic close. A natural close
-has `triggered=false` and `closed=true`. Chat and batch
-`metadata.thinking_budget` report the effective request-wide limits and whether
-each dimension came from the request (`request`), a server default
-(`server_default`), explicit request unlimited (`request_unlimited`), or no
-configured limit (`unlimited`). Batch outcomes remain completion-specific at
-`completions[].thinking_budget`; Kiln does not report a misleading aggregate
-trigger or close state at the batch root. For SSE, chat metadata and the final
-outcome are attached to the chunk containing `finish_reason`, immediately before
-the optional usage chunk and `[DONE]`. Cached responses recompute configuration
-provenance from the current request while preserving the original per-completion
-outcome. Durable request-log reassembly retains the same chat
-`metadata.thinking_budget` fields and restores the outcome at
-`response.choices[0].thinking_budget`, so streamed and non-streamed rows use the
-same mining paths.
-
-Every completed chat record returned by `/v1/stats/recent-requests` also has a
-`thinking_budget` object. It carries `configured`, the effective `max_tokens`
-and `max_time_ms` when finite, independent `tokens_source` and `time_source`,
-and `applied`. Once a terminal budget status exists it also carries
-`triggered`, `trigger`, `closed`, `thinking_tokens`, and `thinking_time_ms`.
-Outcome fields stay absent for an inert budget instead of resembling a natural
-close; `applied` stays absent only when a failure happened before applicability
-could be established. The dashboard request drill renders this configuration,
-provenance, and outcome directly.
-
-`/metrics` exports the same recorded-chat population without unbounded labels:
-
-- `kiln_thinking_budget_source_total{dimension,source}` counts token/time
-  provenance. `source` is limited to `request`, `server_default`,
-  `request_unlimited`, `unlimited`, or the defensive `unknown` fallback.
-- `kiln_thinking_budget_outcomes_total{outcome}` assigns exactly one of
-  `unconfigured`, `inert`, `natural_close`, `tokens`, `time`, `max_tokens`,
-  `unclosed`, `interrupted`, or `unresolved` to each recorded chat completion.
-- `kiln_thinking_budget_effective_tokens` and
-  `kiln_thinking_budget_effective_seconds` are fixed-bucket histograms of
-  finite effective limits. Request-supplied numbers never become labels.
-
-The Qwen3.5-4B profile expects adapters in `model.adapter_dir` when configured,
-otherwise `<model.path>/adapters`. Chat-template loading prefers
-`chat_template.jinja` next to the tokenizer and falls back to the
-`tokenizer_config.json` `chat_template` field; the supported template behavior
-includes `chat_template_kwargs.enable_thinking` and OpenAI-style tool calls.
-
-When the model emits reasoning separately, chat responses expose it as
-`choices[].message.reasoning_content` while `content` contains only the final
-answer. If final answer content is empty, response `metadata` includes
-`final_content_empty=true` and a `content_empty_reason` such as
-`reasoning_without_final_content`. Clients that cannot handle an empty
-`content` field can set request `fold_reasoning_into_content=true`, or server
-`fold_reasoning_into_content = true`, to duplicate the reasoning block into
-`content` while still keeping `reasoning_content` available.
+Related contracts the configuration feeds: [serving profiles](docs/serving/SERVING_PROFILES.md), the [thinking-budget contract](docs/serving/THINKING_BUDGET_CONTRACT.md), and the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json) shared by the server, CLI, and desktop.
 
 ## Security model
 
-Kiln has no built-in auth. The default listen address is `127.0.0.1:8420` so a fresh install isn't reachable from the network. To accept remote connections, set `server.host = "0.0.0.0"` (or `KILN_SERVER_HOST=0.0.0.0`) and front kiln with a reverse proxy (nginx, Caddy) that adds auth, or run it on a private network (WireGuard, Tailscale).
-
-**Training data is privileged.** Kiln applies a faithful gradient update to anything you POST to `/v1/train/sft` or `/v1/train/grpo` — it validates structure, not semantics. A poisoned training example will permanently influence the active adapter until you unload or reset it. Treat your training corpus as security-sensitive: do not accept training data from untrusted sources, and review examples before submission the same way you would review code before merging it.
-
-Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unload` deactivates the current adapter; after it is no longer physically loaded, `DELETE /v1/adapters/{name}` removes it from disk. The base model is unaffected — only LoRA deltas are written.
-
-Completed training runs also write `adapter_manifest.json` beside the adapter
-weights. The manifest records adapter/config/receipt hashes, parent adapter,
-model config hash, the effective SFT training-template hash, the exact
-base-weight shard manifest, kiln commit, and training data hash. Use
-`kiln adapters restore <path>/adapter_manifest.json --adapter-dir <registry>`
-to copy an adapter into a registry and verify hashes after copy. See
-[`docs/contracts/ADAPTER_MANIFEST.md`](docs/contracts/ADAPTER_MANIFEST.md) for the schema.
+Kiln has no built-in auth: the default listen address is `127.0.0.1:8420`, so a
+fresh install isn't reachable from the network — to accept remote connections,
+front kiln with a reverse proxy (nginx, Caddy) that adds auth, or run it on a
+private network (WireGuard, Tailscale). **Training data is privileged**: Kiln
+applies a faithful gradient update to anything you POST to `/v1/train/sft` or
+`/v1/train/grpo` (it validates structure, not semantics), so review training
+examples like code; bad adapters revert via `/v1/adapters/unload` + delete.
 
 Full v0.1 threat model and per-finding analysis: [`docs/audits/security-audit-v0.1.md`](docs/audits/security-audit-v0.1.md).
 
 ## Desktop App
 
-Kiln Desktop is a system-tray app that wraps the `kiln` server for people who don't want to use a CLI. It spawns and supervises the `kiln` binary as a child process, shows server status in the tray, and opens a dashboard, settings, and log viewer in native windows.
+Kiln Desktop is a system-tray app that wraps the `kiln` server for people who
+don't want to use a CLI: it spawns and supervises the `kiln` binary, shows
+server status in the tray, and opens a dashboard, settings, and log viewer in
+native windows. Windows drives the CUDA build; Linux chooses CUDA on NVIDIA
+systems and Vulkan on AMD/Intel; macOS drives the native Metal build on
+M-series hardware (Intel Macs are not supported). The installer bundles the
+wrapper only and auto-downloads the matching prebuilt `kiln` binary with SHA-256
+verification from the latest `kiln-v*` release.
 
-**Windows, Linux, and macOS (Apple Silicon).** Windows drives the CUDA build of `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on AMD/Intel systems; macOS drives the native Metal build on M-series hardware. Intel Macs are not supported.
-
-**Download — [Kiln Desktop v0.2.16](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16):**
-
-**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.16` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so the version split is intentional.
-
-See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
-
-| Platform | Installer | Size |
-|---|---|---|
-| macOS (Apple Silicon) | [Kiln.Desktop_0.2.16_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_aarch64.dmg) | 8.5 MB |
-| Windows | [Kiln.Desktop_0.2.16_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64-setup.exe) (NSIS) | 4.5 MB |
-| Windows | [Kiln.Desktop_0.2.16_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64_en-US.msi) (MSI) | 6.8 MB |
-| Linux | [Kiln.Desktop_0.2.16_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb) | 8.8 MB |
-| Linux | [Kiln.Desktop_0.2.16_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage) | 85.7 MB |
-
-The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4 or Vulkan, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. The terminal-first server release matrix also includes a Linux x86_64 ROCm 7.2.4 artifact; you can point the app at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
-
-**Dashboard** — a toolbar across the top surfaces server state, model path, VRAM usage, active LoRA adapter, training status, and the OpenAI base URL as click-to-copy pills, alongside Start / Stop / Restart Server, View Logs, and Settings buttons. A first-run empty state walks you through setting a model path, and if the kiln server crashes while the dashboard is open an error screen surfaces it with a one-click recovery path. Keyboard shortcuts cover the common actions — <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> to start, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to stop, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> to restart, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> to copy the base URL, <kbd>Ctrl/Cmd</kbd>+<kbd>L</kbd> for logs, <kbd>Ctrl/Cmd</kbd>+<kbd>,</kbd> for settings, and <kbd>?</kbd> for the full cheatsheet modal. The toolbar wraps gracefully at narrow window widths, and the kiln server's `/ui/` is embedded below.
-
-![Dashboard](docs/desktop/dashboard.png)
-
-**Settings** — pick a model path (or pull weights with the built-in HuggingFace downloader), configure the listening host and port, and tune the runtime: inference VRAM fraction, FP8 KV cache, CUDA graphs, prefix cache, and adapter directory. Startup options cover auto-start kiln on app launch, auto-restart on crash, and launch-at-login. A Check for Updates button (with the same check running automatically on launch) surfaces new `kiln-v*` releases and explains when an update is held back for CUDA driver or GPU SM-arch compatibility reasons.
-
-![Settings](docs/desktop/settings.png)
-
-**Logs** — tails the kiln server's stdout/stderr from an in-process ring buffer.
-
-![Logs](docs/desktop/logs.png)
-
-Build and dev docs for the desktop app live in [desktop/README.md](desktop/README.md).
+Full release notes, installer matrix, screenshots, and build/dev docs: [desktop/README.md](desktop/README.md#releases).
 
 ## Deployment
 
-### Docker — pull a prebuilt image
-
-Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
-
-```bash
-docker pull ghcr.io/ericflo/kiln-server:latest
-# or pin the current latest version programmatically:
-KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
-docker pull ghcr.io/ericflo/kiln-server:${KILN_VERSION}
-```
-
-Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
-
-```bash
-docker run --gpus all -p 8420:8420 \
-  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
-  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
-  ghcr.io/ericflo/kiln-server:latest serve
-```
-
-### Docker — build from source
-
-```bash
-docker build -f deploy/Dockerfile -t kiln .
-docker run --gpus all -p 8420:8420 \
-  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
-  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
-  kiln serve
-```
-
-### systemd
-
-```bash
-sudo cp target/release/kiln /usr/local/bin/
-sudo cp deploy/kiln.service /etc/systemd/system/
-sudo systemctl enable --now kiln
-```
+Kiln ships as a single static binary; run it directly, or wrap it in Docker
+or systemd. Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to
+GHCR, and `deploy/kiln.service` is the systemd unit. See
+[QUICKSTART.md — Running with Docker](QUICKSTART.md#running-with-docker) and
+[Running with systemd](QUICKSTART.md#running-with-systemd) for the pull,
+build-from-source, and unit installation walkthroughs.
 
 ## Status
 
-Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the native Metal backend (candle removed in #1082), with a fused Metal kernel family landed in v0.2.0. Phase 11 — onboarding, the first-class eval system (suites, scorers, dataset → eval synthesis, judgment flywheel, post-training auto-eval), and the dashboard overhaul (drill-in modals, live loss curves, A/B compare, ⌘K command palette) — is the active line. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for the current serving acceptance protocol and historical results.
-
-Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
+Kiln is actively developed; the current release line follows the latest
+`kiln-v*` GitHub release — see [`CHANGELOG.md`](CHANGELOG.md) for what
+landed most recently and [`BENCHMARKS.md`](BENCHMARKS.md) for the serving
+acceptance protocol and historical results. Not yet production-hardened for
+multi-tenant use; designed for single-user, single-GPU deployments.
 
 ## Prior Art
 
@@ -1740,9 +884,7 @@ Kiln builds on ideas from:
 
 ## Contributing
 
-Bug reports, performance work, kernel ports, documentation, and dev-experience polish are all welcome. Issues live at [github.com/ericflo/kiln/issues](https://github.com/ericflo/kiln/issues); read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a non-trivial PR — Kiln is a deliberate scalpel (Qwen3.5-4B only, single-binary, no Python sidecar) and a 5-minute scope conversation up front saves a 5-day rewrite later. Serving-performance changes should attach the comparable receipt described in [`BENCHMARKS.md`](BENCHMARKS.md); isolated kernel changes should include their focused microbenchmark and cite the closed-PR history first.
-
-Maintained by [@ericflo](https://github.com/ericflo). MIT-licensed.
+Bug reports, performance work, kernel ports, documentation, and dev-experience polish are all welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a non-trivial PR. Maintained by [@ericflo](https://github.com/ericflo).
 
 ## License
 
