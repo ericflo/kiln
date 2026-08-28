@@ -10311,3 +10311,107 @@ Commit: `1a3efd9dc`. Evidence:
   page (the other 3 PNGs are all embedded).
 
 Not touched: all A-1..A-11, D-1..D-14, F-1..F-4 owner items (gated).
+## Cleanup Agent (round 162) — 2026-08-28
+
+**EXECUTED — D-1 phase 1: the 17 (b)-class README.md removals (owner-approved;
+execution scope was phase 1 only).** Work commit `887e944ba` (README.md only;
+no push). Phases 2–3 of the round-157 plan remain unexecuted; the D-1 row
+stays in the owner queue for a phase 2 / all-phases decision.
+
+### What changed
+
+Every (b)-class section per the round-157 section map (L9868) was replaced by
+a stub pointing at its canonical doc, per the round-157 plan table. Splice was
+programmatic with a hard assertion on all 17 section boundaries (exact heading
+text + trailing blank line) before any write; the 8 retained (a)/(c) regions
+were verified byte-identical by region diff against HEAD.
+
+**README.md: 1751 → 893 lines (−858)** — inside the 800–900 target. Every stub
+is within ±5 lines of its plan target; every stub carries ≥1 working relative
+link; all 50 unique relative links in the new README resolve (file existence +
+GitHub-style anchor slug verified against each destination).
+
+Anchor-bearing headings kept (stub bodies 8–12 lines, per plan):
+`## Desktop App` (now L845; stub → `desktop/README.md#releases`) and
+`## Security model` (now L833; stub → `docs/audits/security-audit-v0.1.md`).
+Verified still resolving: QUICKSTART.md:37 (`README.md#desktop-app`),
+QUICKSTART.md:217 (`README.md#security-model`), README self-ref L192
+(`#desktop-app`, unchanged text — the "Path 1" Quick Start sentence).
+
+Step 1.16 (Status): "v0.1.0 shipped 2026-04-19 … Phase 11 is the active line"
+verified stale against CHANGELOG.md (current line: kiln-v0.5.2, 2026-08-01) →
+reworded to a CHANGELOG.md/BENCHMARKS.md pointer, single-user/single-GPU
+caveat retained (net +2 vs plan; within tolerance).
+
+### Per-section accounting (plan step → before → after → save)
+
+| Step | Section | Before | After | Save | Plan save |
+|---|---|---|---|---|---|
+| 1.1 | Configuration | 352 | 15 | 337 | 332 |
+| 1.2 | The OpenEnv Loop | 196 | 14 | 182 | 181 |
+| 1.3 | API | 97 | 27 | 70 | 72 |
+| 1.4 | Remote vLLM teachers | 44 | 10 | 34 | 34 |
+| 1.5 | The GRPO Loop | 43 | 12 | 31 | 33 |
+| 1.6 | Adapter publication and conflicts | 45 | 13 | 32 | 33 |
+| 1.7 | Chat adapter selection | 40 | 12 | 28 | 30 |
+| 1.8 | Deployment | 40 | 9 | 31 | 32 |
+| 1.9 | The Eval Loop | 34 | 9 | 25 | 26 |
+| 1.10 | Architecture | 28 | 8 | 20 | 22 |
+| 1.11 | Off-policy OPD teacher data | 25 | 8 | 17 | 19 |
+| 1.12 | Performance timing | 19 | 9 | 10 | 14 |
+| 1.13 | Features | 32 | 20 | 12 | 12 |
+| 1.14 | Desktop App (anchor) | 36 | 13 | 23 | 24 |
+| 1.15 | Security model (anchor) | 18 | 12 | 6 | 10 |
+| 1.16 | Status | 6 | 8 | −2 | 2 |
+| 1.17 | Contributing | 6 | 4 | 2 | 2 |
+| | **Total (b-class)** | **1061** | **203** | **858** | **888** |
+
+Sanity: (a) 151 + (b) 203 + (c) 539 = 893 = `wc -l` of the new README.
+
+### Gate verdicts (pre on committed tree / post on the new tree)
+
+| Gate | Pre | Post |
+|---|---|---|
+| `wc -l README.md` | 1751 | 893 (target 800–900) |
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths) | PASS (4564 tracked paths) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files) | PASS (646 files) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) | PASS (59 documents) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) | PASS (rc=0) |
+| full smoke (Chromium stage, built site) | — (not run pre) | PASS (rc=0) |
+
+Full-mode smoke note: the on-disk `docs/site/` does not carry the generated
+`docs/` tree (build output is not committed), so the browser stage ran against
+a fresh build — `node scripts/docs-site/build.mjs --out /tmp/…` +
+`KILN_DOCS_SITE_ROOT=<that dir>` + playwright chromium (chromium-1234) as
+`CHROME_BIN` — keeping the repo tree clean. One text-stage miss found and
+fixed in-round: the smoke's cold-reader "GRPO loop" group is an AND of
+`GRPO Loop` / `killer feature` / `generate completions` / `score them` /
+`reward function`; the first GRPO stub omitted "killer feature" (original L311:
+"This is the killer feature.") — restored in-section, line count unchanged.
+
+### Anchor/link verification (post)
+
+- `## Desktop App` and `## Security model` present; QUICKSTART.md:37/:217 and
+  the README Quick Start self-ref resolve.
+- 50/50 unique relative links resolve (code-fence-aware extraction; anchor
+  slugs checked against destination files, incl. `desktop/README.md#releases`,
+  `QUICKSTART.md#running-with-docker/#running-with-systemd`,
+  `training-checkpoints.md#opd`, `EVAL_GUIDE.md#mine-your-own-request-log`).
+- No tracked file references the removed in-body subheadings (`### Docker —
+  pull a prebuilt image`, `### Docker — build from source`, `### systemd`).
+- `git status --porcelain` after the work commit: clean (only README.md was
+  modified: 118 insertions / 976 deletions).
+
+### Lessons / follow-ups
+
+- The docs-site smoke cold-reader term groups are **AND** per group — stubs
+  replacing a README section must retain every required phrase of that
+  section's group (the GRPO loop group above).
+- README is no longer the largest tracked markdown after this split; the
+  1770-line budget exception in contracts/production-file-budget-v1.json is
+  still accurate (893 ≤ 1770) — no contract edit needed.
+- D-1 phases 2–3 (c-reconciles −409, a-moves −43) remain pending owner
+  approval for execution scope; round-157 plan table is still the exact
+  execution spec.
+- Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
