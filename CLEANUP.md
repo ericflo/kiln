@@ -8103,3 +8103,108 @@ entries), features (this round, 1 deleted / 3 evidenced-kept),
 zero-dependent crates (owner queue). Standing rule: feature/deps
 audits must check build.rs env usage and CLI invocation docs before
 declaring a feature dead.
+
+## Round 127 — fresh-eyes audit: dependency census + candle-reference triage + TODO census [2026-08-28]
+
+**Task 1 (dependency audit) — 0 deletions.** All 33 workspace crate
+manifests + root + desktop audited for unused optional / dev- /
+build-dependencies:
+- Every optional dependency is enabled by ≥1 feature (`dep:` or
+  implicit feature activation).
+- Every `[dev-dependencies]` entry is referenced from tests, examples,
+  or `#[cfg(test)]` src code.
+- Every `[build-dependencies]` entry (`cc`) is used in its crate's
+  `build.rs`; `kiln-mps` / `kiln-nvtx` build.rs use std::env only (no
+  missing build-dep); every `CARGO_FEATURE_*` env reference maps to a
+  real manifest feature.
+- No zero-reference items → nothing to delete. Campaign closed.
+
+**Task 2 (candle references) — census: 2,008 hits / 211 files.**
+- ~1,980 legitimate (KEPT): #1082 candle-removal provenance,
+  "replaces candle's X" API-compat notes (kiln-tensor method_api /
+  operators / metal_* / ops/*), "candle-free" / "no candle bridge"
+  assertions, vendored candle-metal-kernels 0.10.2 provenance, and
+  block-quoted issue bullets (kiln-optim lib.rs:7, kiln-param
+  amp_policy.rs:6, kiln-tensor stream_planner.rs:27).
+- **FIXED (comment deletions only, 6 deletions, net −6 lines, commit
+  `42e230c63`):**
+  - `kiln-model/tests/tape_forward_parity.rs` — 5 stale
+    "bridge candle inputs to kt / copy the kt output back to candle"
+    comments removed (the `kt_in` / `candle_out` helpers are identity
+    clones `t.clone()`; no candle type exists in the file).
+  - `kiln-memory/src/vram.rs` — "candle's own intermediate tensor
+    pool" clause removed from the 1.2× overhead doc (the pool no
+    longer exists).
+- **REPORT-ONLY (stale present-tense claims; fix = reword, out of
+  deletion-only scope):**
+  - Live error strings pointing at a deleted candle entry point:
+    `kiln-flce-kernel/src/kt_api.rs:67`,
+    `kiln-opd-loss-kernel/src/kt_api.rs:109` ("use the candle-typed
+    entry point" — no such entry point exists).
+  - `kiln-memory/src/vram.rs:1717-1719` ("We can't ask candle how much
+    VRAM…") and :1731 ("the LoRA Vars" — now `kiln_param::Parameter`).
+  - `kiln-tensor/src/dtype.rs:49` ("bf16 candle CPU path today"),
+    :55 ("candle-Mac path") — stale path naming (kt CPU / Metal).
+  - `kiln-tensor/src/lib.rs:13` ("until candle is removed" — condition
+    already met; semver note itself still valid).
+  - `kiln-vulkan-blas/src/cooperative_matrix.rs:28` ("candle-Mac path
+    during the migration").
+  - `tape_forward_parity.rs` stale-claim cluster (current line
+    numbers): 19-21, 199, 761-777, 1525, 1564, 1569, 1596, 1649, 1669,
+    1683-1684, 1883-1884, 1905, 1971, 2107, 2120, 2143, 2331, 2588,
+    2710 (names `try_tape_gdn_recurrent_cuda`; only `_kt` exists),
+    2867, 3379; plus helper names `kt_in` / `candle_out` (L76-81) and
+    `to_candle` closure (L1641).
+
+**Task 3 (TODO/FIXME/XXX/HACK census) — 29 live TODO markers; 0 FIXME;
+0 HACK; 0 true XXX.**
+- 24× `TODO(#1082, phase 4 Metal/Vulkan)` in `kiln-tensor/src/ops/`
+  (flip, concat, log_variants, argmax, repeat, cross_entropy, rope,
+  broadcast, scatter_add, layernorm, trig, hyperbolic, chunk_split) —
+  all LIVE: named kernels do not exist yet (e.g. `metal_flip_dim0`:
+  0 defs) and the bodies still fall through to the CPU path.
+- `kiln-model/src/forward/model_dispatch.rs:3212`
+  `TODO(phase2 continuous batching)` — live (graphs are batch-1 only).
+- `kiln-tensor/src/ops/log_softmax.rs:93` residual TODO (a
+  `vk_log_softmax_lastdim` kernel would replace the host bounce) —
+  live.
+- `kiln-tensor/src/metal_rt/commands.rs:303` perf TODO (redundant
+  allocation before drop) — live.
+- `kiln-tensor/src/vulkan_storage.rs:1708` error string "…see TODO)" —
+  live text, kept.
+- 4 false positives (test string literals, not markers):
+  `kiln-server/src/training_queue.rs:3647`,
+  `kiln-server/tests/adapter_upload.rs:76`,
+  `kiln-eval/src/scorers/tool_call.rs:1407` + `:1416`.
+- No stale "already-done" TODOs → no deletions per the task rule.
+
+**Gates.** `cargo check -p kiln-memory` OK; `cargo check -p kiln-model
+--tests` OK (default features). `cargo check -p kiln-model --tests
+--features cuda` not possible on this host (no `nvcc`; cudarc
+build.rs panics) — CI full build is authoritative. `cargo clippy -p
+kiln-memory` clean; `cargo clippy -p kiln-model --tests` exit 0 (3
+pre-existing style warnings, all in unmodified files). rustfmt parse
+check on both edited files: no parse errors.
+`python3 scripts/check_production_file_budget.py` pass (646 files);
+`python3 scripts/check_repository_artifacts.py` pass (4563 tracked
+paths). `cargo metadata --no-deps` OK (no manifest changes this
+round). `git status` clean.
+
+**Commits.** `42e230c63` (6 stale candle-claim comment deletions,
+net −6 lines). This ledger entry lands as its own follow-up commit.
+
+**Owner queue (additions).**
+- **#15 — stale-claim reword pass** (all rewords; the deletion-only
+  rule deferred them): tape_forward_parity.rs cluster (~22 comment
+  sites + 3 helper names), `vram.rs` "ask candle" / "LoRA Vars",
+  `dtype.rs` "candle CPU path" / "candle-Mac path" naming,
+  `kt_api.rs:67` / `:109` error strings (flce + opd-loss kernel
+  crates). 5 files total.
+- **#16 — rename candidates** (pub API / identifiers, owner decision):
+  `cross_entropy_from_logits_grad_candle` (kt-native body, candle
+  name; `tape_forward.rs:826` self-calls it "a misnomer") →
+  `..._grad_kt`; `candle_cache` param names in
+  `forward.rs:710-748` (`PagedKvCache` is the kt alias post-drop);
+  `kt_in` / `candle_out` / `to_candle` test helpers.
+- Phase-4 Metal/Vulkan op kernels (the 24 ops TODOs) remain the real
+  pending work behind the kiln-tensor ops TODOs.
