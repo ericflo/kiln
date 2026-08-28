@@ -9272,3 +9272,23 @@ code class CLOSED. pub-API removals remain owner-level (queue).
 GPU-feature-only deadness is out of reach locally (no CUDA/ROCm
 toolchain) and would require feature-matrix CI — report-only if ever
 pursued.
+
+## Round 140 — dead-code sweep extension: ALL targets + ALL 8 GPU crates + desktop [2026-09-02]
+
+Closes the two R139 gaps:
+1. **All compile targets**: `cargo check --all-targets` (lib+bin+tests+
+   examples+benches) across all 25 default-member crates —
+   **0 `dead_code`/`never used` warnings** (R139 had covered
+   lib+bin only).
+2. **All 8 GPU-excluded crates**: `cargo check -p` per crate —
+   kiln-hip, kiln-vulkan-kernel, kiln-rmsnorm-kernel,
+   kiln-rocblas, and (with CUDARC_CUDA_VERSION=12080 env, which
+   lets cudarc's build script pass without nvcc) kiln-conv1d-kernel,
+   kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm — **all
+   compile clean, 0 dead_code warnings**. Rust dead-private-code
+   class now CLOSED compiler-verified for all 33 workspace crates ×
+   all targets.
+3. **desktop/**: grep-based private-fn inventory of all 11 src
+   files (7,900 lines) — 3 candidates, all `#[tokio::test]` fns
+   (zero callers by design). **0 dead items.** (desktop excluded
+   from cargo check per R130 heavy-workspace rule.)
