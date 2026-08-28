@@ -7577,3 +7577,30 @@ would compile but fail at runtime. The example's own comment calls
 authoritative verification "a separate handshake". Owner decision:
 implement the discovery handshake in the example (net addition) or
 delete the example (net removal); campaign will not choose.
+
+## Cleanup Agent (round 124 — lane-integrity sweep (compile errors, all lanes))
+
+**Date:** 2026-08-28
+
+Motivated by the round-123 discovery (cuda-lane test call sites had
+rotted silently because CI has no cuda lane). Swept EVERY crate ×
+EVERY lane it supports, `--all-targets` (tests + examples + benches),
+counting compile ERRORS (not warnings):
+
+- **vulkan lane** (kiln-train, kiln-model, kiln-tensor,
+  kiln-server, kiln-opd-loss-kernel): **0 errors**. (kernel crates
+  have no `vulkan` feature — not applicable; measured as N/A.)
+- **rocm lane** (same five + kiln-gdn/rmsnorm/flash-attn/conv1d/
+  rocblas): **0 errors** — except kiln-tensor's 6 E0599, resolved by
+  the documented `--features rocm,hardware-qualification` set
+  (round 123 ledger). (kiln-blas has no `rocm` feature — N/A.)
+- **cuda lane**: kiln-train `--tests --lib` clean (round 123); the
+  one remaining error is owner item #13 (cuda_opd_remote.rs
+  example).
+- **metal lane**: not buildable on this host (Apple-only deps); CI's
+  macOS/Metal lane is green → compiles.
+
+**CONCLUSION: zero silent compile rot in any lane** except owner
+item #13. Standing rule added: after any signature change, re-verify
+`--all-targets` in EVERY lane the touched crate supports, not just
+the one being measured.
