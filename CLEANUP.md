@@ -9473,3 +9473,15 @@ Scanned all 5 desktop UI HTML files for defined-but-unused CSS classes:
   (http-api 111 paths, openenv full suite, runtime-env 448 reads,
   thinking-budget, config-schema 117 fields, source-parsing inventory).
 - 0 anomalies; env-read surface closed.
+
+## Round 150 — bench-results + qualification index verification [2026-09-02]
+
+- bench-results/README.md (wave-5 inventory): 38/38 claimed files exist,
+  8/8 regenerate scripts exist, docs/backend-latency-fixtures.json
+  present, all 32 top-level tracked entries + 3 subdirectories covered
+  by the README — 0 missing, 0 phantom.
+- qualification/README.md (wave-5 inventory): all 8 subdirectory counts
+  exact (receipts 163, workloads 29, server-launch 20, oracle-results
+  17, server-config 15, schema 8, runtime 2, oracles 1); 255 content
+  files + README = 256 on disk — consistent.
+- 0 anomalies; both remaining wave-5 indexes verified accurate.
