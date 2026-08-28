@@ -8058,3 +8058,48 @@ enforcers), deploy/ (wave 5), benchmarks/ (wave 5), bench-results/
 (wave 5), qualification/ (wave 5), desktop/ (pre-existing),
 capabilities/ (pre-existing, owner-managed), assets/ (this wave).
 `adapters/` = gitignored local runtime dir (no README by design).
+
+## Round 126 — dead-config campaign closure: feature audit + zero-dependent crates [2026-08-28]
+
+**Finding 1 (DELETED).** `kiln-rocblas` feature `rocm = ["hipblaslt"]`
+was a "convenience alias" with ZERO references anywhere (crates, root
+manifest, docs, scripts, CI, source — `kiln-rocblas/rocm` grep = 0;
+crate-internal `feature = "rocm"` cfg refs = 0). The real consumer
+(kiln-tensor:91) enables `features = ["hipblaslt"]` directly.
+Deleted the alias (−2 lines: entry + comment). All crates are
+`publish = false` private workspace crates → no external users of the
+alias. Verification: `cargo metadata --no-deps` OK; CI full build is
+authoritative.
+
+**Finding 2 (ADJUDICATED — KEPT with evidence).** 3 other
+zero-consumer features:
+- `kiln-mps/probe` — CLI-live: `cargo run -p kiln-mps --features probe`
+  builds the Metal probe binary (build.rs-driven, not cfg-referenced —
+  invisible to naive scans). KEEP.
+- `kiln-vulkan-blas/vulkan` — CLI-live: enables the matmul dispatch
+  path for `cargo test -p kiln-vulkan-blas --features vulkan`. KEEP.
+- `kiln-graph-cuda/cuda` — documented "reserved for the real cudarc-
+  backed capture pipeline" scaffold. KEEP (owner may prune with the
+  crate, see below).
+
+**Finding 3 (OWNER QUEUE #14 — zero-dependent crates).** Audit of all
+33 workspace crates' dependent sets:
+- `kiln-mps` (543 lines): zero dependents. Intentional standalone
+  Metal probe binary crate (candle-removal #1082, probe tooling).
+- `kiln-graph-cuda` (167 lines, 2 files): zero dependents. Explicit
+  scaffold reserved for the cudarc capture pipeline.
+- `kiln-vulkan-blas` (621 lines): zero dependents. Standalone
+  matmul-dispatch crate (vk-harmonization PR3).
+- `kiln-rocblas`: 1 dependent (kiln-tensor) — live, NOT queued.
+All four are CI-tested workspace members and intentional
+tools/scaffolds per their own comments and the archive plans.
+Deletion of a whole crate is an architectural owner decision (larger
+than round-110's API deletions). **Queued, not deleted.** Owner
+options per crate: keep (future tier) / fold into consumer / delete
+(net −543 / −167 / −621 lines incl. tests).
+
+**Dead-config campaign CLOSED:** workspace deps (wave 6, −8 inert
+entries), features (this round, 1 deleted / 3 evidenced-kept),
+zero-dependent crates (owner queue). Standing rule: feature/deps
+audits must check build.rs env usage and CLI invocation docs before
+declaring a feature dead.

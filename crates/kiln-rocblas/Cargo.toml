@@ -15,8 +15,6 @@ probe = ["dep:kiln-hip"]
 # Builds the production `HipblasLtMatmulHandle` (hipBLASLt context + matmul
 # executor). Pulls kiln-hip for the driver types (RocmContext / RocmSlice).
 hipblaslt = ["dep:kiln-hip"]
-# Convenience alias matching kiln-tensor's `rocm` feature edge.
-rocm = ["hipblaslt"]
 
 [dependencies]
 # Bounded HIP runtime bindings — the sole ROCm substrate dependency, pinned by
