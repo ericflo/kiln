@@ -8326,3 +8326,41 @@ round; config.rs unchanged). `git status` clean.
 
 **Commits.** Parent HEAD at entry time: `07c05f6d0`. This ledger entry
 lands as its own commit (no code/data deletions warranted).
+
+## Round 129-prep — campaign state consolidation (orchestrator-verified clean audits) [2026-08-28]
+
+**Contract-surface integrity — CLOSED (green).** All four contract
+gate scripts pass locally against current HEAD:
+- `check_http_api_contract.py`: 111 paths / 125 operations / 144
+  payload components (0 migration pending) / 55 inference / 172
+  observability / 84 artifact / 90 eval / 164 control-plane defs.
+- `check_openenv_contract.py`: full clause set matches.
+- `check_runtime_env_contract.py`: 448 reads / 19 mutations match.
+- `check_thinking_budget_contract.mjs`: schema + docs match.
+Config schema: `check_config_schema.py --self-test` PASS (117 fields /
+3 dynamic templates / 112 env overrides).
+
+**CI path-filter integrity — CLOSED (clean).** 111 path filters across
+13 workflows all resolve to real files/dirs (6 apparent misses were
+glob patterns; glob-verified 11/4/9/5/5 matches). No stale filters
+from past tree moves (skills/ → .agents/ left no dead filter).
+
+**Configured-but-unenforced tooling — CLOSED (none).** cargo-deny
+(deny.toml) runs in ci.yml; SLSA/provenance (about.toml) present in
+server-release.yml, ci.yml, runpod-image.yml.
+
+**Navigation completeness — CLOSED.** Every tracked top-level tree has
+a README: assets(1/3) benchmarks(1/62) bench-results(1/39)
+capabilities(1/1226) contracts(1/16) crates(1/2054) deploy(1/10)
+desktop(1/34) docs(1/612) qualification(1/256) scripts(1/195). Root
+files (19) all functional (SLSA about.toml/hbs, deny.toml,
+rust-toolchain.toml, kiln.example.toml, 9 root docs, build files).
+
+**Owner queue (18 items, awaiting owner decisions):**
+#1-#9 round-122/123 lint/API judgment (13 sub-items), #12 max_seqlen_k,
+#13 RemoteTeacher::new example, #14 zero-dependent crates (kiln-mps /
+kiln-graph-cuda / kiln-vulkan-blas — keep/fold/delete), #15 stale-claim
+reword pass (5 files, ~22 sites + 2 error strings), #16 candle-named
+pub fns/params (cross_entropy_from_logits_grad_candle, etc.),
+#17 openenv.credentials example doc missing, #18 [agent] header
+comment convention.
