@@ -201,55 +201,11 @@ pub(super) fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
     label_mask.get(1..).is_some_and(|m| m.iter().any(|&v| v))
 }
 
-/// Compute cross-entropy loss on masked positions.
-///
-/// `logits`: [1, seq_len, vocab_size] — model output
-/// `input_ids`: token IDs (used as labels, shifted by 1)
-/// `label_mask`: which positions to include in the loss
-///
-/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native.
-///
-/// (#1082 candle-drop) This is a value-only reader: it returns the scalar loss
-/// for logging / the gradient-checkpoint final-boundary readback. The
-/// *differentiable* CE root is `try_tape_cross_entropy_from_logits_kt` recorded
-/// DIRECTLY by the SFT/GRPO/OPD `with_tape_authoritative_scope_kt` closures — it
-/// does NOT go through here. The old candle `[1, T, V]` bridge + candle
-/// log-sum-exp/gather composite + the candle `try_tape_cross_entropy_cuda`
-/// adapter are deleted; unsupported backend/dtype combinations are rejected by
-/// the backend tape route plus `TrainingPrecisionPolicy`. The kt CE math itself
-/// is covered by `tape_forward_parity`
-/// (`tape_forward_cross_entropy_matches_reference`,
-/// `tape_backward_cross_entropy_matches_analytic_gradient`).
-#[cfg(any(
-    feature = "cuda",
-    feature = "metal",
-    feature = "vulkan",
-    feature = "rocm"
-))]
-pub(super) fn cross_entropy_loss(
-    logits: &KtTensor,
-    input_ids: &[u32],
-    label_mask: &[bool],
-    _device: &Device,
-) -> Result<f64> {
-    let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-        logits, input_ids, label_mask,
-    )?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "cross_entropy_loss: kt CE-from-logits declined (requires CUDA BF16 [1, T, V] \
-             logits; F32/CPU cross-entropy was dropped in the candle drop, #1082)"
-        )
-    })?;
-    Ok(loss_kt.to_scalar::<f32>()? as f64)
-}
-
 /// Analytic SFT tail seed: `d loss / d hidden` for final RMSNorm + tied
 /// LM-head + next-token cross-entropy.
 ///
-/// This mirrors [`cross_entropy_loss`] / FLCE shifted-label semantics while
-/// chunking over vocab so the full `[T, V]` logits tensor is never
-/// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
+/// This mirrors FLCE shifted-label semantics while chunking over vocab so the
+/// full `[T, V]` logits tensor is never materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
 pub(super) fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
     // (#1082) kt `Device` has no per-device `synchronize()` (candle-only API);
