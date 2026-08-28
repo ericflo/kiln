@@ -7528,3 +7528,52 @@ verified and stale entries dropped (the old "kiln-train TMA ×5" and
 - `pub` API deletions require explicit owner sign-off (rounds 109/
   110 precedent); everything in this queue is crate-internal or
   test-scoped, so no public API changes are proposed anywhere.
+
+## Cleanup Agent (round 123 — kiln-train cuda-lane call-site repair)
+
+**Date:** 2026-08-28
+
+**CORRECTION to round 122 queue:** item #11 (kiln-train "E0061 ×5,
+feature wiring") was mischaracterized — they were E0061
+argument-count mismatches (4×) + one E0063 missing field (1×), i.e.
+call sites that rotted against updated signatures (CI has no cuda
+lane, so silent). 4 of 5 are now FIXED below; 1 remains as owner
+item #13.
+
+**FIXED (2 commits, net +4 lines, zero deletions, hunks verified):**
+- grpo_tape_shim.rs:3738/3758/3772 (commit 38db3fb56): added the
+  missing kl-reference log-prob args. Argument mapping follows the
+  in-file CPU twin test `grpo_normed_hidden_chunked_matches_full_
+  logits_cpu` (:3426, compiles in CI, passing): behavior=`&ref_kt`,
+  kl_reference=`&ref_kt` (ref_kt = plp − 0.1); the 6 already-fixed
+  call sites in the file use the same pair.
+- examples/cuda_sft_file.rs:355 (commit a61cb8671): added
+  `detect_anomaly: false` — matches SftConfig::default() (lib.rs:
+  1285) and the field's "disabled by default" doc; no CLI flag
+  exposed.
+- Gates (orchestrator re-verified): default 534/0; cuda lane
+  `clippy --tests --lib` clean; fmt clean; budget + artifacts pass;
+  tree clean. Cuda test binaries link-fail on this host (no CUDA
+  runtime — pre-existing host constraint; tests self-skip via
+  cuda_is_available() even with a toolkit).
+**CORRECTION to round 122 queue (item #10):** kiln-tensor E0599 ×6
+is NOT an owner-design issue — it is a measurement artifact.
+kiln-tensor already defines `hardware-qualification =
+["kiln-hip/hardware-qualification"]` (Cargo.toml:122), and the test
+code gates on `any(test, feature = "hardware-qualification")`. With
+the correct feature set, `cargo clippy -p kiln-tensor --features
+rocm,hardware-qualification --all-targets` → **0 errors, 1 warning
+(items_after_test_module, already queued)**. Standing measurement
+rule: kiln-tensor rocm lane must be measured with
+`--features rocm,hardware-qualification`.
+
+**NEW OWNER ITEM #13 (replaces the "E0061" of item #11):**
+examples/cuda_opd_remote.rs:289 (E0063) — `RemoteTeacherConfig`
+initializer predates the identity-pin requirement:
+`RemoteTeacher::new` (remote_teacher.rs:149-153) REQUIRES
+`expected_identity: Some(...)` ("discover and pin the authoritative
+remote teacher identity before use"). `expected_identity: None`
+would compile but fail at runtime. The example's own comment calls
+authoritative verification "a separate handshake". Owner decision:
+implement the discovery handshake in the example (net addition) or
+delete the example (net removal); campaign will not choose.
