@@ -7364,3 +7364,30 @@ kt_api.rs:521/1241/1876/2203/2269/2340 — cheap mechanical win),
 kiln-tensor 1/6, kiln-rocblas 1/1, kiln-core 3 (type_complexity ×2 +
 too_many_arguments, tokenizer.rs:449/602/785). 120 dead-code
 adjudication. 121 judgment classes.
+
+## Cleanup Agent (round 119 — tail-crate lint closure: rmsnorm + rocblas + server)
+
+**Date:** 2026-08-28
+
+**Closed (mechanical, inline by orchestrator):**
+- kiln-rmsnorm-kernel: manual_is_multiple_of ×6 (kt_api.rs:521/1241/1876/2203/2269/2340) → rocm lane in-crate 6 → 0. Tests 4/0 (rocm lane).
+- kiln-rocblas: unnecessary_cast ×1 (hipblaslt_handle.rs:663, identical-type `as *mut c_void` dropped; `c_void` still used ×11) → rocm lane 1 → 0. Tests 31/0.
+- kiln-server: drop_non_drop ×1 (tests/real_model_integration.rs:1003, `drop(add_tensor)` of a non-Drop closure) → rocm-lane spans 9 → 7.
+**Measurement correction (important):** the "kiln-tensor rocm 1/6" from
+round 116b was mislabeled — 5 of those 6 spans are the **pre-existing
+E0599 hard errors** in kiln-tensor's `--all-targets` TEST target
+(rocm_matmul.rs:201/321/1251/1291/1300, paged_decode_meta.rs:974 —
+kiln-hip gates `Auto`/`qualified()` behind the
+`hardware-qualification` feature, off when kiln-hip builds as a
+dependency of kiln-tensor's tests). Owner-design queue (since the
+original E0599 finding); not lint debt. kiln-tensor's TRUE lint
+remainder is 1: items_after_test_module (cuda_storage.rs:2338,
+structural — report-only).
+
+**Report-only remainder (round 119):** kiln-server TMA (10/7) at
+real_model_integration.rs:1463 + await_holding_mutex ×3 (1999/2029/
+2059). kiln-tensor items_after_test_module (cuda_storage.rs:2338).
+
+**Gates:** per-crate tests green (rmsnorm 4/0, rocblas 31/0,
+kiln-server rocm-lane test target compiles); clippy spans per above;
+fmt clean; budget + artifacts pass.
