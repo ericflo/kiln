@@ -128,7 +128,7 @@ Expected spend: ~30 min on A6000 ≈ $0.25 (PR #527 §"Recommended next H").
 
 ## Verdict
 
-Machine-readable record: [`docs/archive/phase-c/phase-c29-v2/verdict.json`](phase-c29-v2/verdict.json).
+Machine-readable record: [`docs/archive/phase-c/phase-c29-v2/verdict.json`](../archive/phase-c/phase-c29-v2/verdict.json).
 
 | field | value |
 | --- | --- |

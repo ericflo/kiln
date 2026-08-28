@@ -7723,3 +7723,60 @@ policy explicitly retains raw dumps in git history only.
 Commit: `334252575` (single logical change: 2,141 staged removals + scoped
 .gitignore section + rewritten docs/audits/README.md); this ledger entry lands
 as the small follow-up commit sanctioned by the protocol.
+## Cleanup Agent (wave 2) — 2026-08-27
+
+**Organizational wave — docs/ index + dangling-link repair.**
+
+**Created** `docs/README.md` (69 lines) — the missing docs-tree index. All 38
+pre-existing top-level `docs/*.{md,json}` files (36 `.md` + 2 `.json`) appear
+exactly once under five categories: Quickstart & guides (6); Training
+workflows (9); Serving, latency & benchmarks (5); Configuration, provenance &
+artifact contracts (10); Verification, qualification & policy (6). All three
+generated files are marked `GENERATED — do not hand-edit` with their
+generator cited, and each cited script was verified to exist
+(`scripts/generate_backend_capability_report.py`,
+`scripts/check_runtime_env_contract.py`, `scripts/check_source_parsing_tests.py`).
+Subdirectory section covers `archive/` (12 families, each with its own
+README), `audits/` (own README), `desktop/`, `papers/`, and flags `plans/`,
+`public/`, `site/` as owner-managed surfaces not to link into as editable.
+Verified: scripted coverage check (every top-level file exactly once), every
+directory-prefixed path ref and markdown link in the index resolves, 69 lines
+< 120 budget. Root README.md and all 36 docs untouched.
+
+**Fixed** 1 verified dangling relative href in an audit receipt (the one
+wave 1 flagged as known-bad and left out of scope):
+`docs/audits/phase7-h15b-stratified-c29-v2.md:131` —
+`[...](phase-c29-v2/verdict.json)` → `[...](../archive/phase-c/phase-c29-v2/verdict.json)`
+(href only, prose untouched; target verified on disk at
+`docs/archive/phase-c/phase-c29-v2/verdict.json`).
+
+**Remaining unresolvable relative hrefs in `docs/audits/` (8, NOT fixed —
+fixing would require restoring intentionally-untracked/removed files, and
+href-only edits cannot make them resolve):**
+
+- `PHASE11_PRELAUNCH_OPS_CHECKLIST.md:69–71` — `../site/img/audits/{landing-mobile,landing-desktop,demo-desktop}.png`.
+  Historical Puppeteer captures: `docs/site/img` existed in git history
+  (site v1 overhaul, #1011) but no longer exists — the captures were purged.
+  Raw evidence per audits/ policy; restoring 3 PNGs to `docs/site/`
+  (owner-managed) is out of scope.
+- `pr1383-qwen35-base-production-tool-call-eval-2026-05-24.md:39–43` — five
+  `.log` files under
+  `pr1383-qwen35-base-production-tool-call-eval-2026-05-24/`
+  (trace_suite2, base_eval, server, cuda_build, qwen3_fix_test2). Gitignored
+  raw run captures (confirmed via `git check-ignore`); the two tracked JSON
+  siblings in that dir do resolve. Present on owner's local machine, absent
+  here; 404 on GitHub is by design per the audits/ README raw-evidence policy.
+
+**Verification (read/grep/git only, per round-125 protocol — no cargo/build/test):**
+
+- `python3 scripts/check_production_file_budget.py` → PASS (646 files,
+  5000-line default, 14 reviewed exceptions) before and after.
+- `python3 scripts/check_repository_artifacts.py` → PASS (4,553 → 4,554
+  tracked paths after the new index).
+- Re-scan of all `docs/audits/**/*.md` relative links: 9 unresolvable before
+  (the 8 above + the verdict.json href), 8 after.
+- `git status` clean after commits.
+
+Commits: `528fbe926` (wave 2a — docs/README.md) and the wave-2b commit
+(href repair), into which this ledger entry was folded via the protocol's
+sanctioned `--amend` (so it has no stable hash of its own to record).
