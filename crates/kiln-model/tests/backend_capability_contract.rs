@@ -34,7 +34,7 @@ fn assert_supplemental_command(gate: &Value, scope_fragment: &str, command_fragm
 
 #[test]
 fn generated_capability_report_uses_typed_support_states() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -79,7 +79,7 @@ fn generated_capability_report_uses_typed_support_states() {
 
 #[test]
 fn generated_capability_report_lists_backend_source_modules() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -256,7 +256,7 @@ fn generated_capability_report_lists_backend_source_modules() {
 
 #[test]
 fn generated_capability_report_lists_request_descriptors() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1214,7 +1214,7 @@ fn training_acceleration_profile_policy_routes_vulkan_startup_log() {
 
 #[test]
 fn generated_capability_report_lists_streaming_prefill_backend_policy() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1256,7 +1256,7 @@ fn generated_capability_report_lists_streaming_prefill_backend_policy() {
 
 #[test]
 fn generated_capability_report_lists_training_precision_policy() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1321,7 +1321,7 @@ fn generated_capability_report_lists_training_precision_policy() {
 
 #[test]
 fn generated_capability_report_lists_training_loss_policy() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1481,7 +1481,7 @@ fn generated_capability_report_lists_training_loss_policy() {
 
 #[test]
 fn generated_capability_report_exposes_no_decode_fallback_override() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1500,7 +1500,7 @@ fn generated_capability_report_exposes_no_decode_fallback_override() {
 
 #[test]
 fn generated_capability_report_lists_optimizer_dispatch_policy() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1622,7 +1622,7 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
 
 #[test]
 fn generated_capability_report_does_not_overclaim_host_fallback_coverage() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1666,7 +1666,7 @@ fn generated_capability_report_does_not_overclaim_host_fallback_coverage() {
 
 #[test]
 fn generated_capability_report_gates_replay_contract() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1735,7 +1735,7 @@ fn generated_capability_report_gates_replay_contract() {
 #[test]
 fn generated_capability_report_lists_replay_authority() {
     let root = workspace_root();
-    let report_path = root.join("docs/backend-capability-report.json");
+    let report_path = root.join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1803,7 +1803,7 @@ fn generated_capability_report_lists_replay_authority() {
 
 #[test]
 fn generated_capability_report_keeps_cuda_and_rocm_route_policy_typed() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1855,7 +1855,7 @@ fn generated_capability_report_keeps_cuda_and_rocm_route_policy_typed() {
 
 #[test]
 fn generated_capability_report_gates_matmul_linear_contract() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -1938,7 +1938,7 @@ fn generated_capability_report_gates_matmul_linear_contract() {
 
 #[test]
 fn generated_capability_report_tracks_one_step_training_proof_gate() {
-    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report_path = workspace_root().join("docs/contracts/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
     )
@@ -2192,8 +2192,8 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
         String::from_utf8_lossy(&self_test.stderr)
     );
 
-    let markdown_path = root.join("docs/backend-capability-report.md");
-    let json_path = root.join("docs/backend-capability-report.json");
+    let markdown_path = root.join("docs/contracts/backend-capability-report.md");
+    let json_path = root.join("docs/contracts/backend-capability-report.json");
     let markdown_before =
         fs::read_to_string(&markdown_path).expect("capability report markdown should be readable");
     let json_before =

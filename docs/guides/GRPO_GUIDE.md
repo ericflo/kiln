@@ -6,9 +6,9 @@ publishes the resulting adapter, and records enough evidence to audit the
 policy change.
 
 The generated [Training and Agent Control Plane API
-Schema](../contracts/kiln-control-plane-v1.schema.json) owns request and
+Schema](../../contracts/kiln-control-plane-v1.schema.json) owns request and
 response fields. The generated [HTTP API
-contract](../contracts/kiln-http-api-v1.openapi.json) owns routes, status codes,
+contract](../../contracts/kiln-http-api-v1.openapi.json) owns routes, status codes,
 and error shapes. This guide owns the workflow and the decisions around it.
 
 If the reward and state transition come from an OpenEnv server, use
@@ -34,7 +34,7 @@ training, or adapter transitions.
 
 Serving profiles are GPU-ownership policies, not hardware selectors. They do
 not contain device-name, vendor-ID, or model-specific route allowlists. See
-[Serving Profiles](SERVING_PROFILES.md).
+[Serving Profiles](../serving/SERVING_PROFILES.md).
 
 Before a real run, confirm:
 
@@ -316,7 +316,7 @@ private read-only snapshot before queue publication. Named `grpo_groups`
 datasets use the persisted `train` partition by default and accept an explicit
 `dataset_split`. Held-out post-eval rejects content or declared source-group
 overlap. See [Dataset Splits and Train/Eval
-Separation](DATASET_SPLITS.md).
+Separation](../contracts/DATASET_SPLITS.md).
 
 For recorded mode, do not hand-edit completions, prompts, sampling controls, or
 provenance. Kiln replays the template invocation with its pinned tokenizer and
@@ -415,7 +415,7 @@ kiln train grpo \
 An exact checkpoint restores adapter and optimizer tensors, reference state,
 cursor, RNG streams, loss and diagnostic history, and runtime planning. A PEFT
 adapter is a warm-start or serving artifact, not a resume point. See [Native
-Training Checkpoints](training-checkpoints.md).
+Training Checkpoints](../training/training-checkpoints.md).
 
 ## Promotion
 
@@ -452,8 +452,8 @@ comparison and promotion semantics.
 ## See also
 
 - [ECHO Guide](ECHO_GUIDE.md)
-- [Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md)
-- [Native Training Checkpoints](training-checkpoints.md)
+- [Dataset Splits and Train/Eval Separation](../contracts/DATASET_SPLITS.md)
+- [Native Training Checkpoints](../training/training-checkpoints.md)
 - [Evaluation Guide](EVAL_GUIDE.md)
-- [Quickstart](../QUICKSTART.md)
+- [Quickstart](../../QUICKSTART.md)
 - [DeepSeekMath](https://arxiv.org/abs/2402.03300)

@@ -42,14 +42,14 @@ function fixtureManifest() {
     ],
     documents: [
       {
-        source: 'docs/CONFIGURATION.md',
+        source: 'docs/contracts/CONFIGURATION.md',
         slug: 'configuration',
         title: 'Configuration',
         section: 'start',
         description: 'Complete configuration reference.',
       },
       {
-        source: 'docs/GUIDE.md',
+        source: 'docs/contracts/GUIDE.md',
         slug: 'guide',
         title: 'Guide',
         section: 'start',
@@ -73,14 +73,14 @@ async function createFixture() {
   await write(resolve(site, 'js/docs.js'), 'void 0;\n');
   await write(manifestPath, `${JSON.stringify(fixtureManifest(), null, 2)}\n`);
   await write(
-    resolve(root, 'docs/CONFIGURATION.md'),
+    resolve(root, 'docs/contracts/CONFIGURATION.md'),
     '# Original configuration title\n\n## Load order\n\n[Guide](GUIDE.md#deep-dive)\n\n![Diagram](diagram.png)\n\n```sh\nkiln config\n```\n\n````python\nCODE_BLOCK = re.compile(r"```python\\n(.*?)```")\nsrc = m.group(1) if m else text\n````\n',
   );
   await write(
-    resolve(root, 'docs/GUIDE.md'),
+    resolve(root, 'docs/contracts/GUIDE.md'),
     '# Guide\n\n## Deep dive\n\n[Configuration](CONFIGURATION.md#load-order)\n\n[Same heading](#deep-dive)\n\n## Deep dive\n',
   );
-  await write(resolve(root, 'docs/diagram.png'), 'diagram');
+  await write(resolve(root, 'docs/contracts/diagram.png'), 'diagram');
   await write(resolve(root, 'Cargo.toml'), '[workspace]\n');
   return { root, site, manifestPath };
 }
@@ -210,7 +210,7 @@ test('build copies the static site and emits complete deterministic docs', async
   assert.match(configuration, /<meta name="twitter:image:alt" content="Kiln — Serve it\. Teach it\. Watch it get better\./);
   assert.match(configuration, /<h1 id="original-configuration-title">Configuration<\/h1>/);
   assert.match(configuration, /href="\.\.\/guide\/#deep-dive"/);
-  assert.match(configuration, /src="\.\.\/_assets\/docs\/diagram\.png"/);
+  assert.match(configuration, /src="\.\.\/_assets\/docs\/contracts\/diagram\.png"/);
   assert.match(configuration, /class="docs-breadcrumbs"/);
   assert.match(configuration, /class="docs-sidebar"/);
   assert.match(configuration, /class="docs-toc"/);
@@ -237,7 +237,7 @@ test('build copies the static site and emits complete deterministic docs', async
   assert.equal(index[0].url, '../index.html');
   assert.deepEqual(index.slice(1).map((entry) => entry.slug), ['configuration', 'guide']);
   assert.match(index[1].content, /Load order/);
-  assert.equal(await readFile(resolve(first, 'docs/_assets/docs/diagram.png'), 'utf8'), 'diagram');
+  assert.equal(await readFile(resolve(first, 'docs/_assets/docs/contracts/diagram.png'), 'utf8'), 'diagram');
 
   const sitemap = await readFile(resolve(first, 'sitemap.xml'), 'utf8');
   assert.match(sitemap, /https:\/\/example\.test\/kiln\//);
@@ -245,7 +245,7 @@ test('build copies the static site and emits complete deterministic docs', async
   const llms = await readFile(resolve(first, 'llms.txt'), 'utf8');
   assert.match(llms, /^# Kiln\n\n> Kiln is a pure-Rust, single-GPU server/m);
   assert.match(llms, /\[Product\]\(https:\/\/example\.test\/kiln\/index\.html\): Product guide\./);
-  assert.match(llms, /\[Configuration\]\(https:\/\/raw\.githubusercontent\.com\/example\/kiln\/refs\/heads\/main\/docs\/CONFIGURATION\.md\): Complete configuration reference\./);
+  assert.match(llms, /\[Configuration\]\(https:\/\/raw\.githubusercontent\.com\/example\/kiln\/refs\/heads\/main\/docs\/contracts\/CONFIGURATION\.md\): Complete configuration reference\./);
   assert.match(llms, /\[Documentation search index\]\(https:\/\/example\.test\/kiln\/docs\/search-index\.json\)/);
   assert.deepEqual(await treeDigest(first), await treeDigest(second));
 });
@@ -563,7 +563,7 @@ test('OpenAPI documents render every operation, transport, owner, and payload st
 test('broken Markdown anchors fail before publication', async () => {
   const fixture = await createFixture();
   await write(
-    resolve(fixture.root, 'docs/CONFIGURATION.md'),
+    resolve(fixture.root, 'docs/contracts/CONFIGURATION.md'),
     '# Configuration\n\n[Broken](GUIDE.md#not-a-heading)\n',
   );
   await assert.rejects(

@@ -4,7 +4,7 @@
 > predates structured local qualification and keeps a compact result tied to a
 > separately retained raw log. New correctness, performance, capacity, and
 > endurance evidence belongs in `scripts/qualification/`; see
-> [Local hardware qualification](qualification.md).
+> [Local hardware qualification](../policies/qualification.md).
 
 A legacy latency artifact answers one narrow question: did a named
 microbenchmark, on its named hardware and source, satisfy its own reviewed
@@ -13,7 +13,7 @@ backend support gate, or a product default.
 
 ## Current Legacy Gate State
 
-`docs/backend-latency-fixtures.json` currently reports
+`docs/contracts/backend-latency-fixtures.json` currently reports
 `status: "fixture_required"`.
 
 | Backend | Fixture state | Meaning |
@@ -32,7 +32,7 @@ Check the non-strict manifest state with:
 
 ```bash
 python3 scripts/check_backend_latency_fixtures.py \
-  docs/backend-latency-fixtures.json
+  docs/contracts/backend-latency-fixtures.json
 ```
 
 The strict command fails until every required fixture has a reviewed artifact
@@ -40,7 +40,7 @@ and locked thresholds:
 
 ```bash
 python3 scripts/check_backend_latency_fixtures.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   --require-covered
 ```
 
@@ -80,7 +80,7 @@ Artifact schema version 3 is a closed JSON object:
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
   "status": "passed",
-  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest": "docs/contracts/backend-latency-fixtures.json",
   "manifest_schema_version": 1,
   "fixture_spec_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
   "hardware": "Apple Silicon Metal fixture",
@@ -190,7 +190,7 @@ Run the selected command, capture its log, and write the artifact in one step:
 
 ```bash
 python3 scripts/run_backend_latency_fixture.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   metal_apple_silicon_matmul_qwen35_4b
 ```
 
@@ -198,7 +198,7 @@ To materialize from an already captured log:
 
 ```bash
 python3 scripts/write_backend_latency_result_artifact.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   metal_apple_silicon_matmul_qwen35_4b \
   /absolute/path/to/raw-benchmark.log
 ```
@@ -255,7 +255,7 @@ After reviewing the artifact and raw log, add explicit headroom:
 
 ```bash
 python3 scripts/lock_backend_latency_thresholds.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   --headroom 0.10 \
   --fixture-id metal_apple_silicon_matmul_qwen35_4b
 ```
@@ -273,7 +273,7 @@ Use `--check` to preview validation without writing. Then run the strict gate:
 
 ```bash
 python3 scripts/check_backend_latency_fixtures.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   --require-covered
 ```
 

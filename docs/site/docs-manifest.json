@@ -83,7 +83,7 @@
       "description": "Configure typed TOML and mechanically derived environment overrides; understand precedence, validation, and backend-owned policy such as SFT loss routing."
     },
     {
-      "source": "docs/CONFIGURATION.md",
+      "source": "docs/contracts/CONFIGURATION.md",
       "slug": "configuration-complete",
       "title": "Complete configuration reference",
       "section": "start",
@@ -200,7 +200,7 @@
       "description": "Define direct argv launch, working and log directories, readiness checks, startup and shutdown bounds, and accepted exits for an owned benchmark server."
     },
     {
-      "source": "docs/SERVING_BENCHMARK_PROTOCOL.md",
+      "source": "docs/serving/SERVING_BENCHMARK_PROTOCOL.md",
       "slug": "serving-benchmark-protocol",
       "title": "Serving benchmark protocol",
       "section": "serving",
@@ -208,7 +208,7 @@
       "description": "Bind a workload, own the server process, measure wall-clock performance, interpret each metric, and retain comparable evidence."
     },
     {
-      "source": "docs/SERVING_PROFILES.md",
+      "source": "docs/serving/SERVING_PROFILES.md",
       "slug": "serving-profiles",
       "title": "Serving profiles",
       "section": "serving",
@@ -216,7 +216,7 @@
       "description": "Use the complete stable product by default, drained maintenance when needed, and experimental only for backend qualification."
     },
     {
-      "source": "docs/LATENCY_OBSERVABILITY.md",
+      "source": "docs/serving/LATENCY_OBSERVABILITY.md",
       "slug": "latency-observability",
       "title": "Latency observability",
       "section": "serving",
@@ -224,7 +224,7 @@
       "description": "Choose the correct request, stream, rolling, or Prometheus view; interpret TTFT, ITL, phases, and stalls without mixing metric populations."
     },
     {
-      "source": "docs/THINKING_BUDGET_CONTRACT.md",
+      "source": "docs/serving/THINKING_BUDGET_CONTRACT.md",
       "slug": "thinking-budgets",
       "title": "Thinking budgets",
       "section": "serving",
@@ -239,7 +239,7 @@
       "description": "Look up request, server-default, effective, outcome, recent-record, source, and trigger fields for thinking budgets."
     },
     {
-      "source": "docs/NATIVE_SFT_PROFILE.md",
+      "source": "docs/training/NATIVE_SFT_PROFILE.md",
       "slug": "native-sft-profile",
       "title": "Native SFT profile",
       "section": "training",
@@ -247,7 +247,7 @@
       "description": "Understand the fixed native online-LoRA update, backend-owned loss route, memory admission, receipt, and checkpoint identity."
     },
     {
-      "source": "docs/sft-ingestion.md",
+      "source": "docs/training/sft-ingestion.md",
       "slug": "sft-ingestion",
       "title": "SFT ingestion and row identity",
       "section": "training",
@@ -255,7 +255,7 @@
       "description": "Determine which SFT rows are admitted, how content identity and deduplication work, and what failures and receipts record."
     },
     {
-      "source": "docs/sft-tokenization.md",
+      "source": "docs/training/sft-tokenization.md",
       "slug": "sft-tokenization",
       "title": "SFT tokenization and loss",
       "section": "training",
@@ -263,7 +263,7 @@
       "description": "Follow canonical chat rendering, assistant-only labeling, masking, truncation, and parity verification."
     },
     {
-      "source": "docs/training-checkpoints.md",
+      "source": "docs/training/training-checkpoints.md",
       "slug": "training-checkpoints",
       "title": "Native training checkpoints",
       "section": "training",
@@ -271,7 +271,7 @@
       "description": "Understand checkpoint contents, publication, cancellation, validation, resume, promotion, and recovery, including route-bound SFT planning identity."
     },
     {
-      "source": "docs/GRPO_GUIDE.md",
+      "source": "docs/guides/GRPO_GUIDE.md",
       "slug": "grpo",
       "title": "GRPO training guide",
       "section": "training",
@@ -279,14 +279,14 @@
       "description": "Build scored groups, submit and observe GRPO, inspect artifacts, resume safely, and audit the result."
     },
     {
-      "source": "docs/OPENENV_GUIDE.md",
+      "source": "docs/guides/OPENENV_GUIDE.md",
       "slug": "openenv",
       "title": "OpenEnv training",
       "section": "training",
       "description": "Discover OpenEnv servers, collect seed-matched stateful episodes, train with native GRPO and ECHO, then verify or exactly replay the content-addressed environment transcript."
     },
     {
-      "source": "docs/OPENENV_REPLAY_REFERENCE.md",
+      "source": "docs/training/OPENENV_REPLAY_REFERENCE.md",
       "slug": "openenv-replay",
       "title": "OpenEnv replay and recovery",
       "section": "training",
@@ -302,7 +302,7 @@
       "description": "Look up environment discovery identity, episode outcomes, recovery statistics, dataset/replay hashes, exact transcript, verification report, and summary receipt published by kiln openenv."
     },
     {
-      "source": "docs/ECHO_GUIDE.md",
+      "source": "docs/guides/ECHO_GUIDE.md",
       "slug": "echo",
       "title": "ECHO guide",
       "section": "training",
@@ -310,7 +310,7 @@
       "description": "Understand when ECHO applies, construct environment-feedback requests, choose an operating mode, and interpret diagnostics and limits."
     },
     {
-      "source": "docs/DATASET_SPLITS.md",
+      "source": "docs/contracts/DATASET_SPLITS.md",
       "slug": "dataset-splits",
       "title": "Dataset splits and train/eval separation",
       "section": "training",
@@ -318,7 +318,7 @@
       "description": "Create deterministic group-aware splits, prevent contamination, synthesize held-out data, and preserve training-data provenance."
     },
     {
-      "source": "docs/EVAL_GUIDE.md",
+      "source": "docs/guides/EVAL_GUIDE.md",
       "slug": "evals",
       "title": "Eval guide",
       "section": "training",
@@ -342,7 +342,7 @@
       "description": "Look up native training, distillation, preflight, agent, trace, recipe, correction, job, and adapter-library operations and state transitions."
     },
     {
-      "source": "docs/HF_TRL_INTEROP.md",
+      "source": "docs/training/HF_TRL_INTEROP.md",
       "slug": "hf-trl-interoperability",
       "title": "HF/TRL export and PEFT import",
       "section": "interop",
@@ -358,7 +358,7 @@
       "description": "Look up adapter discovery and mutation, immutable exports, verified imports, audit receipts, and teacher identity fields."
     },
     {
-      "source": "docs/OPD_TEACHER_JSONL.md",
+      "source": "docs/training/OPD_TEACHER_JSONL.md",
       "slug": "opd-teacher-jsonl",
       "title": "OPD teacher JSONL",
       "section": "interop",
@@ -366,7 +366,7 @@
       "description": "Create and validate an identity-bound offline teacher corpus for OPD training."
     },
     {
-      "source": "docs/VLLM_TEACHER_IDENTITY.md",
+      "source": "docs/contracts/VLLM_TEACHER_IDENTITY.md",
       "slug": "vllm-teacher-identity",
       "title": "Immutable vLLM teacher identity",
       "section": "interop",
@@ -374,35 +374,35 @@
       "description": "Launch, register, and qualify an exact remote vLLM teacher without turning one machine's choices into portable defaults."
     },
     {
-      "source": "docs/ADAPTER_MANIFEST.md",
+      "source": "docs/contracts/ADAPTER_MANIFEST.md",
       "slug": "adapter-manifest",
       "title": "Adapter manifests and restore",
       "section": "integrity",
       "description": "Move and verify an adapter as a content-bound file set, then check compatibility before activation."
     },
     {
-      "source": "docs/BASE_WEIGHT_PROVENANCE.md",
+      "source": "docs/contracts/BASE_WEIGHT_PROVENANCE.md",
       "slug": "base-weight-provenance",
       "title": "Base-weight identity and compatibility",
       "section": "integrity",
       "description": "Compare exact model-shard content without confusing names, paths, or one matching hash with full resume compatibility."
     },
     {
-      "source": "docs/EXECUTION_PROVENANCE.md",
+      "source": "docs/contracts/EXECUTION_PROVENANCE.md",
       "slug": "execution-provenance",
       "title": "Execution identity and provenance",
       "section": "integrity",
       "description": "Read, compare, and preserve Kiln's startup-owned executable, runtime, model, configuration, precision, and kernel identity."
     },
     {
-      "source": "docs/REPLAY_INTEGRITY.md",
+      "source": "docs/contracts/REPLAY_INTEGRITY.md",
       "slug": "request-lineage-integrity",
       "title": "Request-lineage verification",
       "section": "integrity",
       "description": "Verify the historical hashed request chain without mistaking it for training replay, output reproduction, or authenticated provenance."
     },
     {
-      "source": "docs/TRAIN_RECEIPT_SCHEMA.md",
+      "source": "docs/training/TRAIN_RECEIPT_SCHEMA.md",
       "slug": "training-receipt-schema",
       "title": "Training receipts",
       "section": "integrity",
@@ -433,35 +433,35 @@
       "description": "Interpret a run receipt’s source, environment, model, workload, case outcomes, evidence hashes, verdict authority, and trust limits."
     },
     {
-      "source": "docs/qualification.md",
+      "source": "docs/policies/qualification.md",
       "slug": "hardware-qualification",
       "title": "Local hardware qualification",
       "section": "operations",
       "description": "Run, validate, compare, and publish a reproducible hardware qualification with explicit pass criteria and failure triage."
     },
     {
-      "source": "docs/backend-latency-result-schema.md",
+      "source": "docs/contracts/backend-latency-result-schema.md",
       "slug": "backend-latency-evidence",
       "title": "Legacy backend latency evidence",
       "section": "operations",
       "description": "Maintain or retire the machine-bound legacy fixture pipeline without confusing its thresholds with qualification, support policy, or portable performance."
     },
     {
-      "source": "docs/RUNTIME_ENVIRONMENT_INVENTORY.md",
+      "source": "docs/contracts/RUNTIME_ENVIRONMENT_INVENTORY.md",
       "slug": "runtime-environment-inventory",
       "title": "Runtime environment inventory",
       "section": "operations",
       "description": "Find every direct environment read and mutation, its owner and class, and the migration or test boundary around it."
     },
     {
-      "source": "docs/ARTIFACT_RETENTION.md",
+      "source": "docs/policies/ARTIFACT_RETENTION.md",
       "slug": "artifact-retention",
       "title": "Repository artifact retention",
       "section": "operations",
       "description": "Decide which evidence belongs in Git, which raw artifacts remain external, and how limits, exceptions, archival, and recovery work."
     },
     {
-      "source": "docs/VERIFICATION_TEST_INVENTORY.md",
+      "source": "docs/policies/VERIFICATION_TEST_INVENTORY.md",
       "slug": "verification-test-inventory",
       "title": "Source-parsing test debt",
       "section": "operations",
@@ -475,35 +475,35 @@
       "description": "Set up development, scope a change, run the right checks, update documentation, and prepare the work for review."
     },
     {
-      "source": "docs/ci-policy.md",
+      "source": "docs/policies/ci-policy.md",
       "slug": "ci-policy",
       "title": "CI and local qualification policy",
       "section": "operations",
       "description": "Know which inexpensive checks run in hosted CI, which accelerator qualifications stay local, why jobs skip, and what evidence to retain."
     },
     {
-      "source": "docs/VERIFICATION_POLICY.md",
+      "source": "docs/policies/VERIFICATION_POLICY.md",
       "slug": "verification-policy",
       "title": "Verification policy",
       "section": "operations",
       "description": "Choose the required behavioral, typed, structured, or hardware evidence; understand ownership, exceptions, and the zero-source-text-test rule."
     },
     {
-      "source": "docs/release-version-policy.md",
+      "source": "docs/policies/release-version-policy.md",
       "slug": "release-version-policy",
       "title": "Release version policy",
       "section": "operations",
       "description": "Update version references from their canonical owners and use drift checks without rewriting historical evidence."
     },
     {
-      "source": "docs/SUBSTRATE_QUICKSTART.md",
+      "source": "docs/guides/SUBSTRATE_QUICKSTART.md",
       "slug": "tensor-substrate-quickstart",
       "title": "Tensor substrate quickstart",
       "section": "operations",
       "description": "Create a backend-portable tensor operation and verify its device, dtype, shape, numerical, and error contracts."
     },
     {
-      "source": "docs/backend-capability-report.md",
+      "source": "docs/contracts/backend-capability-report.md",
       "slug": "backend-capabilities",
       "title": "Backend capability report",
       "section": "operations",

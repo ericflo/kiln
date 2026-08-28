@@ -213,9 +213,9 @@ Request-supplied numeric limits never become labels.
 
 The versioned authorities are:
 
-- [`contracts/thinking-budget-v1.schema.json`](../contracts/thinking-budget-v1.schema.json)
+- [`contracts/thinking-budget-v1.schema.json`](../../contracts/thinking-budget-v1.schema.json)
   for request, effective, outcome, terminal, and recent-request wire shapes;
-- [`contracts/thinking-budget-v1.conformance.json`](../contracts/thinking-budget-v1.conformance.json)
+- [`contracts/thinking-budget-v1.conformance.json`](../../contracts/thinking-budget-v1.conformance.json)
   for executable resolution, server-default, valid-record, legacy, and
   invalid-record vectors.
 

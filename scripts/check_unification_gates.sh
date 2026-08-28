@@ -33,5 +33,5 @@ run_step "$PYTHON_BIN" scripts/lock_backend_latency_thresholds.py --self-test
 run_step "$PYTHON_BIN" scripts/check_backend_latency_fixtures.py --self-test
 run_step "$PYTHON_BIN" scripts/plan_backend_latency_fixture_dispatch.py --self-test
 run_step "$PYTHON_BIN" scripts/check_backend_latency_fixtures.py \
-  docs/backend-latency-fixtures.json \
+  docs/contracts/backend-latency-fixtures.json \
   --require-covered

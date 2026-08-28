@@ -7,10 +7,10 @@ publishes a training job to the queue, it checks a post-training eval declared
 as held out against the data admitted for that job.
 
 This guide explains the policy and workflow. The generated
-[eval and judgment schema](../contracts/kiln-evals-v1.schema.json) and
-[training control-plane schema](../contracts/kiln-control-plane-v1.schema.json)
+[eval and judgment schema](../../contracts/kiln-evals-v1.schema.json) and
+[training control-plane schema](../../contracts/kiln-control-plane-v1.schema.json)
 define individual fields. The generated
-[HTTP API contract](../contracts/kiln-http-api-v1.openapi.json) defines route,
+[HTTP API contract](../../contracts/kiln-http-api-v1.openapi.json) defines route,
 status, and media-type details.
 
 ## Recommended workflow

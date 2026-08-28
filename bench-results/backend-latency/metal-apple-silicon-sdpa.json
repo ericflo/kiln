@@ -8,7 +8,7 @@
   "git_commit": "41be1ac90acbcedb6105a20d6f4ca9baf186d57c",
   "git_tracked_dirty": false,
   "hardware": "Apple Silicon Metal fixture",
-  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest": "docs/contracts/backend-latency-fixtures.json",
   "manifest_schema_version": 1,
   "metrics": {
     "decode_sq1_sk4096_ms": 0.561028,

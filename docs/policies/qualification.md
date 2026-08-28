@@ -108,7 +108,7 @@ semantic checks for placeholder delivery, canonical ordering, bounded
 execution, metric ownership, variant compatibility, and cross-backend
 comparison policy.
 
-See the [qualification workload contract](../qualification/schema/workload-v1.schema.json)
+See the [qualification workload contract](../../qualification/schema/workload-v1.schema.json)
 for the field-by-field reference.
 
 ## What the Runner Owns
@@ -137,7 +137,7 @@ After execution, the runner:
 - records cleanup and containment evidence; and
 - writes a new receipt without replacing an existing one.
 
-The [case-result contract](../qualification/schema/case-result-v1.schema.json)
+The [case-result contract](../../qualification/schema/case-result-v1.schema.json)
 documents the command-to-runner boundary. A command case-result file is not the
 qualification verdict.
 
@@ -179,7 +179,7 @@ runtime, prompt, generation settings, and concurrency envelope. Their drivers
 own one server process group, bound readiness and request time, reject
 listener or process residue, and retain strict result and receipt documents.
 
-Use the [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md) for the
+Use the [Serving Benchmark Protocol](../serving/SERVING_BENCHMARK_PROTOCOL.md) for the
 measurement and publication contract. A host-specific serving receipt may
 record device IDs, memory capacity, and architecture names; none of those
 values becomes a portable server default.
@@ -217,7 +217,7 @@ content changes only when a consumer possesses the referenced bytes and
 actually recomputes them. Establish provenance and custody separately before
 treating a receipt as trusted evidence.
 
-See the [qualification receipt contract](../qualification/schema/receipt-v1.schema.json)
+See the [qualification receipt contract](../../qualification/schema/receipt-v1.schema.json)
 for every field and trust boundary.
 
 ## Compare Equivalent Receipts
@@ -274,16 +274,16 @@ are historical snapshots, not current defaults or a device allowlist.
 
 | Evidence area | Retained examples | Scope |
 | --- | --- | --- |
-| Platform boundary | [CUDA/WSL2 environment](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1.json), [Metal/macOS environment](../qualification/receipts/metal/macbook-air-m1/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1.json) | Probe and containment evidence only |
-| Core correctness | [CUDA](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1.json), [Metal](../qualification/receipts/metal/macbook-air-m1/20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1.json), [ROCm](../qualification/receipts/rocm/strix-halo/20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1.json), [Vulkan](../qualification/receipts/vulkan/strix-halo/20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json) | Declared tensor, matmul, graph, or training subset only |
-| Memory lifecycle | [CUDA](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1.json), [Metal](../qualification/receipts/metal/macbook-air-m1/20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1.json) | Controlled admission, allocation-failure, reclaim, and cleanup cases |
-| Serving capacity | [CUDA passing c1–c4](../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1.kiln.json), [CUDA first-nonfit search](../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1.kiln.json), [Metal c19/c20 boundary](../benchmarks/receipts/metal/macbook-air-m1/20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-capacity-boundary-search-v1.kiln.json) | Fixed model, prompt, output, configuration, timeout, and memory gate |
-| Endurance | [CUDA](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1.json), [Metal passing](../qualification/receipts/metal/macbook-air-m1/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json), [Metal failed counterevidence](../qualification/receipts/metal/macbook-air-m1/20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json) | Declared eight-hour mixed-load envelope only |
-| Targeted serving closure | [ROCm](../qualification/receipts/rocm/strix-halo/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json), [Vulkan](../qualification/receipts/vulkan/strix-halo/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1.json) | Two-request KV-growth correctness fixture, not performance evidence |
+| Platform boundary | [CUDA/WSL2 environment](../../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1.json), [Metal/macOS environment](../../qualification/receipts/metal/macbook-air-m1/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1.json) | Probe and containment evidence only |
+| Core correctness | [CUDA](../../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1.json), [Metal](../../qualification/receipts/metal/macbook-air-m1/20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1.json), [ROCm](../../qualification/receipts/rocm/strix-halo/20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1.json), [Vulkan](../../qualification/receipts/vulkan/strix-halo/20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json) | Declared tensor, matmul, graph, or training subset only |
+| Memory lifecycle | [CUDA](../../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1.json), [Metal](../../qualification/receipts/metal/macbook-air-m1/20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1.json) | Controlled admission, allocation-failure, reclaim, and cleanup cases |
+| Serving capacity | [CUDA passing c1–c4](../../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1.kiln.json), [CUDA first-nonfit search](../../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1.kiln.json), [Metal c19/c20 boundary](../../benchmarks/receipts/metal/macbook-air-m1/20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-capacity-boundary-search-v1.kiln.json) | Fixed model, prompt, output, configuration, timeout, and memory gate |
+| Endurance | [CUDA](../../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1.json), [Metal passing](../../qualification/receipts/metal/macbook-air-m1/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json), [Metal failed counterevidence](../../qualification/receipts/metal/macbook-air-m1/20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json) | Declared eight-hour mixed-load envelope only |
+| Targeted serving closure | [ROCm](../../qualification/receipts/rocm/strix-halo/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json), [Vulkan](../../qualification/receipts/vulkan/strix-halo/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1.json) | Two-request KV-growth correctness fixture, not performance evidence |
 | Hosted build checkpoint | [GitHub Actions run 30498143581](https://github.com/ericflo/kiln/actions/runs/30498143581) | Compile and test evidence; hosted CUDA and ROCm lanes did not execute hardware |
 
 For current performance claims and comparable benchmark rows, use
-[Benchmarks](public/BENCHMARKS.md). The evidence table above exists to show how
+[Benchmarks](../public/BENCHMARKS.md). The evidence table above exists to show how
 scope is bounded, not to summarize current speed.
 
 ## Numerical Oracles

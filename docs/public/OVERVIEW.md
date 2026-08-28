@@ -53,10 +53,10 @@ guidance.
 | Stage | What Kiln does | Where to continue |
 |---|---|---|
 | Serve | Runs chat, completion, streaming, batching, and adapter-aware requests | [API guide](https://ericflo.github.io/kiln/api.html) |
-| Observe | Records latency phases, request lineage, outputs, and runtime state | [Latency observability](../LATENCY_OBSERVABILITY.md) |
+| Observe | Records latency phases, request lineage, outputs, and runtime state | [Latency observability](../serving/LATENCY_OBSERVABILITY.md) |
 | Teach | Accepts SFT, GRPO, OPD, and related training jobs | [GRPO guide](https://ericflo.github.io/kiln/grpo.html) |
 | Evaluate | Runs local suites, comparisons, judgments, and replay | [Evals guide](https://ericflo.github.io/kiln/evals.html) |
-| Promote | Saves, validates, loads, and selects LoRA adapters | [Adapter manifest](../ADAPTER_MANIFEST.md) |
+| Promote | Saves, validates, loads, and selects LoRA adapters | [Adapter manifest](../contracts/ADAPTER_MANIFEST.md) |
 
 ## Documentation map
 

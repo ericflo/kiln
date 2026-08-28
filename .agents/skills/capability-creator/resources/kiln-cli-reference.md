@@ -221,7 +221,7 @@ cuda_sft_file \
 ### `train_receipt.json` (issue 8)
 
 Trainer-owned. Written next to every trained adapter. Schema documented in
-`docs/TRAIN_RECEIPT_SCHEMA.md`. Cap scripts read this directly; no
+`docs/training/TRAIN_RECEIPT_SCHEMA.md`. Cap scripts read this directly; no
 log-grepping.
 
 Key fields by section:

@@ -21,15 +21,15 @@ load-bearing scripts referenced by `.github/workflows/`.
 - `check_openenv_contract.py` (CI) — validate the checked-in OpenEnv artifact contract without third-party packages.
 - `check_release_versions.py` (CI) — guard user-facing examples against stale release-version and CLI drift.
 - `check_runtime_defaults.mjs` (CI) — cross-check `contracts/runtime-defaults-v1.json` against server, eval-CLI, and desktop sources.
-- `check_runtime_env_contract.py` (CI) — ratchet direct environment access in crate-owned source; also writes `docs/RUNTIME_ENVIRONMENT_INVENTORY.md`.
+- `check_runtime_env_contract.py` (CI) — ratchet direct environment access in crate-owned source; also writes `docs/contracts/RUNTIME_ENVIRONMENT_INVENTORY.md`.
 - `check_server_ui_smoke.mjs` (CI) — headless smoke of the server dashboard UI (markup, styles, JS demo fixtures).
-- `check_source_parsing_tests.py` (CI) — inventory and ratchet tests that inspect implementation source as text; writes `docs/VERIFICATION_TEST_INVENTORY.md`.
+- `check_source_parsing_tests.py` (CI) — inventory and ratchet tests that inspect implementation source as text; writes `docs/policies/VERIFICATION_TEST_INVENTORY.md`.
 - `check_thinking_budget_contract.mjs` (CI) — validate the thinking-budget schema/conformance vectors and the generated doc block.
 
 ## Contract & schema generators
 
 - `generate_artifact_schema.py` (CI) — generate `contracts/kiln-artifacts-v1.schema.json` (adapter, HF/TRL, receipt, and teacher APIs).
-- `generate_backend_capability_report.py` — generate `docs/backend-capability-report.md` (+ `.json`) from the live source tree.
+- `generate_backend_capability_report.py` — generate `docs/contracts/backend-capability-report.md` (+ `.json`) from the live source tree.
 - `generate_control_plane_schema.py` (CI) — generate `contracts/kiln-control-plane-v1.schema.json` (training, agent, and product control-plane APIs).
 - `generate_eval_schema.py` (CI) — generate `contracts/kiln-evals-v1.schema.json` (eval, dataset-synthesis, and judgment APIs).
 - `generate_observability_schema.py` (CI) — generate the closed read-only serving and observability JSON Schema.

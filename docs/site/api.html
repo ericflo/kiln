@@ -654,7 +654,7 @@ kiln serve --config kiln.toml</code></pre>
           broad actor and narrower backend totals must be ranked within their layer rather than
           summed as a critical path. The complete phase, overlap, reason-set,
           nullability, rolling-statistics, and Prometheus contract is documented in
-          <a href="https://github.com/ericflo/kiln/blob/main/docs/LATENCY_OBSERVABILITY.md">Latency Observability</a>.
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/serving/LATENCY_OBSERVABILITY.md">Latency Observability</a>.
         </p>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           The ROCm mixed-load qualification runs an isolated fixed-seed sampled profile before its
@@ -1143,7 +1143,7 @@ kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.j
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           For request schemas, reset-task alignment, math and arcade action examples, lifecycle semantics,
           replay verification, and recovery, see the <a href="docs/openenv/">OpenEnv guide</a>,
-          <a href="https://github.com/ericflo/kiln/blob/main/docs/OPENENV_REPLAY_REFERENCE.md">replay reference</a>,
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/training/OPENENV_REPLAY_REFERENCE.md">replay reference</a>,
           and generated <a href="docs/http-api/">HTTP contract</a>.
         </p>
       </article>
@@ -1180,7 +1180,7 @@ kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.j
           Plain HTTP and credential-free registration are loopback-only. Off-host endpoints require HTTPS and
           a server-owned <code>credential_id</code> configured under <code>[teachers.credentials]</code>; API
           callers never submit an environment-variable name or secret. See the
-          <a href="https://github.com/ericflo/kiln/blob/main/docs/VLLM_TEACHER_IDENTITY.md">immutable teacher guide</a>.
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/contracts/VLLM_TEACHER_IDENTITY.md">immutable teacher guide</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           OPD checkpoint status separates <code>teacher_identity_revision</code>, which is comparable with <code>GET /v1/teachers</code>, from <code>teacher_content_revision</code>, which binds the exact live source, materialized logit rows, or composite algorithm. Re-registering the same alias with different model, tokenizer, adapter, runtime, protocol, or scoring bounds does not authorize resume. The dashboard prepares an OPD resume only when the exact usable identity revision is registered, deliberately leaves prompts blank for the operator to reinsert, and lets server admission reconstruct and verify the content revision.

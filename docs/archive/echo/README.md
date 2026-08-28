@@ -19,7 +19,7 @@ landed in the live tree.
   `crates/kiln-train/src/trajectory.rs` / `trajectory_mask.rs` (the masking
   layer) are live modules, still cited by the code's own doc comments.
 - ECHO is **on by default** in `LossConfig::default()` (λ=0.05) — documented
-  product behavior in README ("ECHO-by-default") and `docs/ECHO_GUIDE.md`;
+  product behavior in README ("ECHO-by-default") and `docs/guides/ECHO_GUIDE.md`;
   CHANGELOG carries the "Unreleased — ECHO" section.
 - Landing commits: `8a9181a70` (#1502 ECHO fail-fast + honest receipts),
   `7c746208d` (#1512 ECHO-by-default on the fused GRPO tape root),

@@ -5,9 +5,9 @@ inference path used for serving. A suite defines prompts, targets, generation
 settings, and scoring. A run records raw completions, one reduced outcome per
 example, aggregate metrics, and the provenance needed to compare or replay it.
 
-Use the generated [eval and judgment schema](../contracts/kiln-evals-v1.schema.json)
+Use the generated [eval and judgment schema](../../contracts/kiln-evals-v1.schema.json)
 for field types, defaults, bounds, and response shapes. Use the generated
-[HTTP API contract](../contracts/kiln-http-api-v1.openapi.json) for methods,
+[HTTP API contract](../../contracts/kiln-http-api-v1.openapi.json) for methods,
 paths, status codes, media types, and errors.
 
 All examples assume a server at `http://localhost:8420`. The browser UI exposes
@@ -27,7 +27,7 @@ Normal eval and training use the default profile:
 maintenance-mode training, restart in `stable` to load and evaluate the saved
 unmerged adapter. `experimental` is reserved for backend development and is
 not required for this workflow. See
-[Serving profiles](SERVING_PROFILES.md).
+[Serving profiles](../serving/SERVING_PROFILES.md).
 
 ## Choose a workflow
 
@@ -156,7 +156,7 @@ curl --fail-with-body -sS -X POST \
 ```
 
 Synthesis from `train` is available for diagnostics, but it does not make the
-result held out. The [dataset split guide](DATASET_SPLITS.md) defines identity,
+result held out. The [dataset split guide](../contracts/DATASET_SPLITS.md) defines identity,
 contamination, migration, and training-provenance behavior.
 
 ## Author a suite
@@ -606,7 +606,7 @@ Control thinking per suite or example:
 An omitted budget inherits the server setting, `null` means unlimited for that
 dimension, and `0` requests immediate closure. If both token and time limits
 are active, the first reached wins. See the
-[thinking-budget contract](THINKING_BUDGET_CONTRACT.md).
+[thinking-budget contract](../serving/THINKING_BUDGET_CONTRACT.md).
 
 ### Tools
 
@@ -689,7 +689,7 @@ policies, model revisions, or nondeterministic operations.
 Production admission snapshots `kiln.base-weight-shards.v1`, including every
 resident safetensors shard identity. Jobs, terminal archives, results, CLI
 JSON, and the dashboard preserve it. See
-[base-weight provenance](BASE_WEIGHT_PROVENANCE.md).
+[base-weight provenance](../contracts/BASE_WEIGHT_PROVENANCE.md).
 
 ### Execution provenance
 
@@ -698,7 +698,7 @@ backend/device/runtime evidence, executable and optional source identity,
 model/tokenizer/template identities, precision policy, compiled features, and
 effective configuration/environment digests. It proves the integrity of the
 declared envelope, not driver correctness. See
-[execution provenance](EXECUTION_PROVENANCE.md).
+[execution provenance](../contracts/EXECUTION_PROVENANCE.md).
 
 ## Strict byte replay
 

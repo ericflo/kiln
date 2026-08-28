@@ -2305,7 +2305,7 @@
       "supplemental_commands": []
     },
     {
-      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/contracts/backend-latency-fixtures.json --require-covered",
       "coverage_blockers": [
         "manifest status is 'fixture_required', expected 'covered'",
         "metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
@@ -2322,8 +2322,8 @@
         "vulkan_strix_halo_decode_microbench.full_token_resident_paged_us: max threshold is not finite numeric"
       ],
       "evidence": [
-        "docs/backend-latency-fixtures.json",
-        "docs/backend-latency-result-schema.md",
+        "docs/contracts/backend-latency-fixtures.json",
+        "docs/contracts/backend-latency-result-schema.md",
         "scripts/check_unification_gates.sh",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
@@ -2340,8 +2340,8 @@
       ],
       "evidence_missing": [],
       "evidence_present": [
-        "docs/backend-latency-fixtures.json",
-        "docs/backend-latency-result-schema.md",
+        "docs/contracts/backend-latency-fixtures.json",
+        "docs/contracts/backend-latency-result-schema.md",
         "scripts/check_unification_gates.sh",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
@@ -2365,15 +2365,15 @@
       "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
       "coverage_blockers": [],
       "evidence": [
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
         "scripts/generate_backend_capability_report.py",
         "scripts/check_unification_gates.sh"
       ],
       "evidence_missing": [],
       "evidence_present": [
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
         "scripts/generate_backend_capability_report.py",
         "scripts/check_unification_gates.sh"
       ],
@@ -2879,16 +2879,16 @@
       "evidence": [
         "docs/archive/backend-engine-unification/backend-engine-unification-plan.md",
         "scripts/generate_backend_capability_report.py",
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "evidence_missing": [],
       "evidence_present": [
         "docs/archive/backend-engine-unification/backend-engine-unification-plan.md",
         "scripts/generate_backend_capability_report.py",
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "genuine": true,
@@ -3734,10 +3734,10 @@
         "hardware latency fixture manifest and result schema"
       ],
       "evidence": [
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
-        "docs/backend-latency-fixtures.json",
-        "docs/backend-latency-result-schema.md",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
+        "docs/contracts/backend-latency-fixtures.json",
+        "docs/contracts/backend-latency-result-schema.md",
         "scripts/check_unification_gates.sh",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
@@ -3750,10 +3750,10 @@
       ],
       "evidence_missing": [],
       "evidence_present": [
-        "docs/backend-capability-report.md",
-        "docs/backend-capability-report.json",
-        "docs/backend-latency-fixtures.json",
-        "docs/backend-latency-result-schema.md",
+        "docs/contracts/backend-capability-report.md",
+        "docs/contracts/backend-capability-report.json",
+        "docs/contracts/backend-latency-fixtures.json",
+        "docs/contracts/backend-latency-result-schema.md",
         "scripts/check_unification_gates.sh",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",

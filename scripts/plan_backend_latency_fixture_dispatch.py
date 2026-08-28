@@ -17,7 +17,7 @@ from write_backend_latency_result_artifact import ArtifactError, load_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "docs" / "backend-latency-fixtures.json"
+DEFAULT_MANIFEST = ROOT / "docs" / "contracts" / "backend-latency-fixtures.json"
 WORKFLOW_FILE = "perf-regression-nightly.yml"
 DEFAULT_ARTIFACT_DOWNLOAD_DIR = "/tmp/kiln-backend-latency"
 
@@ -176,7 +176,7 @@ def lock_threshold_command(fixture_id: str) -> str:
         [
             "python3",
             "scripts/lock_backend_latency_thresholds.py",
-            "docs/backend-latency-fixtures.json",
+            "docs/contracts/backend-latency-fixtures.json",
             "--fixture-id",
             fixture_id,
         ]
@@ -188,7 +188,7 @@ def covered_gate_command() -> str:
         [
             "python3",
             "scripts/check_backend_latency_fixtures.py",
-            "docs/backend-latency-fixtures.json",
+            "docs/contracts/backend-latency-fixtures.json",
             "--require-covered",
         ]
     )

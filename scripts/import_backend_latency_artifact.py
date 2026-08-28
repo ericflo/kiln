@@ -452,7 +452,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--manifest",
-        default="docs/backend-latency-fixtures.json",
+        default="docs/contracts/backend-latency-fixtures.json",
         help="Path to backend-latency-fixtures.json",
     )
     parser.add_argument(

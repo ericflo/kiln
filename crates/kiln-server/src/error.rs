@@ -845,7 +845,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "eval_invalid_request",
             message: format!("Invalid eval request: {detail}"),
-            hint: "Send either a registered suite name OR an inline suite document. See docs/EVAL_GUIDE.md for the schema.",
+            hint: "Send either a registered suite name OR an inline suite document. See docs/guides/EVAL_GUIDE.md for the schema.",
             retry_after_seconds: None,
         }
     }

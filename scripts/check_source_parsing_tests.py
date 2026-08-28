@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = Path("contracts/source-parsing-test-inventory-v1.json")
-REPORT_PATH = Path("docs/VERIFICATION_TEST_INVENTORY.md")
+REPORT_PATH = Path("docs/policies/VERIFICATION_TEST_INVENTORY.md")
 RATCHET_KEYS = (
     "max_test_count",
     "max_read_site_count",

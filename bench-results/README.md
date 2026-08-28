@@ -54,6 +54,6 @@ Five fixture result artifacts in `bench-results/backend-latency/`
 `backend-latency/rocm-gfx1151-matmul.json`,
 `backend-latency/vulkan-strix-halo-decode.json`. The tracked fixture manifest that
 references them as `result_artifact` entries — with locked numeric
-thresholds — is `docs/backend-latency-fixtures.json`; the two are
+thresholds — is `docs/contracts/backend-latency-fixtures.json`; the two are
 separate artifacts and must not be confused. Both are validated by
 `scripts/check_backend_latency_fixtures.py`.

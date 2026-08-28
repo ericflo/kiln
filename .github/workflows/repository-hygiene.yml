@@ -31,7 +31,7 @@ jobs:
           qualification=true
           if [ -n "$CI_BASE_SHA" ] && [[ ! "$CI_BASE_SHA" =~ ^0+$ ]] && git cat-file -e "$CI_BASE_SHA^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "$CI_BASE_SHA" "$GITHUB_SHA")
-            if ! grep -Eq '^(crates/|qualification/|benchmarks/receipts/|bench-results/backend-latency/|contracts/(production-file-budget|repository-artifact-policy|runtime-env-direct-reads|source-parsing-test-inventory)-v1\.json|scripts/(qualification/|check_repository_artifacts\.py|check_runtime_env_contract\.py|check_source_parsing_tests\.py|.*backend_latency.*\.py|bench-concurrent-batch\.py|run-serving-benchmark-campaign\.py)|docs/backend-latency-|\.github/workflows/(qualification-contract|repository-hygiene)\.yml)' <<<"$changed"; then
+            if ! grep -Eq '^(crates/|qualification/|benchmarks/receipts/|bench-results/backend-latency/|contracts/(production-file-budget|repository-artifact-policy|runtime-env-direct-reads|source-parsing-test-inventory)-v1\.json|scripts/(qualification/|check_repository_artifacts\.py|check_runtime_env_contract\.py|check_source_parsing_tests\.py|.*backend_latency.*\.py|bench-concurrent-batch\.py|run-serving-benchmark-campaign\.py)|docs/contracts/backend-latency-|\.github/workflows/(qualification-contract|repository-hygiene)\.yml)' <<<"$changed"; then
               qualification=false
             fi
           fi

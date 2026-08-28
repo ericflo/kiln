@@ -146,7 +146,7 @@ when N ≥ 2, never path arithmetic.
 
 Every trainer (`cuda_grpo_ablation`, `cuda_sft_file`, `cuda_opd_remote`)
 writes `train_receipt.json` next to the adapter (kiln #8). Schema in
-`docs/TRAIN_RECEIPT_SCHEMA.md`. Key fields:
+`docs/training/TRAIN_RECEIPT_SCHEMA.md`. Key fields:
 
 ```json
 {

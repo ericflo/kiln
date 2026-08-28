@@ -5,7 +5,7 @@ checkpoints. A resume continues the same optimizer run; it is not a convenient
 way to reuse weights under a different configuration.
 
 The generated [Training and Agent Control Plane API
-Schema](../contracts/kiln-control-plane-v1.schema.json) is the source of truth
+Schema](../../contracts/kiln-control-plane-v1.schema.json) is the source of truth
 for request and response fields. This guide explains the operational contract:
 what Kiln saves, when it saves it, what must match, and how to recover safely.
 
@@ -309,7 +309,7 @@ when post-training evaluation cannot be enqueued.
 
 Use the training job's linked evaluation IDs and promotion outcome to
 distinguish “adapter was trained” from “adapter was promoted.” See [Evaluation
-Guide](EVAL_GUIDE.md) for suite and comparison semantics.
+Guide](../guides/EVAL_GUIDE.md) for suite and comparison semantics.
 
 ## Recovery checklist
 
@@ -337,7 +337,7 @@ deletion. Archive any checkpoint you must retain before deleting its adapter.
 The older `replay.jsonl` and `lineage.json` audit trail is not a checkpoint.
 `kiln-replay verify` checks request-lineage hash integrity; it does not rerun
 training or compare losses, tensors, or outputs. See [Request-Lineage
-Integrity](REPLAY_INTEGRITY.md).
+Integrity](../contracts/REPLAY_INTEGRITY.md).
 
 ## Current support and qualification
 
@@ -359,6 +359,6 @@ byte-identical training across different devices, backends, builds, drivers, or
 machines.
 
 For the complete identity schemas, see [Base-Weight
-Provenance](BASE_WEIGHT_PROVENANCE.md), [Execution
-Provenance](EXECUTION_PROVENANCE.md), and the [Native SFT
+Provenance](../contracts/BASE_WEIGHT_PROVENANCE.md), [Execution
+Provenance](../contracts/EXECUTION_PROVENANCE.md), and the [Native SFT
 Profile](NATIVE_SFT_PROFILE.md).

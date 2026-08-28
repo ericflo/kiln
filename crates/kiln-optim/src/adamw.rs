@@ -7,7 +7,7 @@
 //!
 //! This type is the portable CPU reference and host checkpoint-state path.
 //! Production accelerator updates use the backend `OptimizerBackend` fused
-//! kernels and the precision contract in `docs/NATIVE_SFT_PROFILE.md`.
+//! kernels and the precision contract in `docs/training/NATIVE_SFT_PROFILE.md`.
 //!
 //! # Determinism
 //!

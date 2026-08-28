@@ -82,7 +82,7 @@ backend's capability and request-shape checks pass. The route batches one
 prompt token per active row and retains KV and recurrent state on the Vulkan
 device. Admission has no device-name, host-name, or receipt-based exception.
 Portable defaults remain portable; hardware-specific experiments and results
-belong in the [benchmark report](public/BENCHMARKS.md) and
+belong in the [benchmark report](../public/BENCHMARKS.md) and
 [serving benchmark protocol](SERVING_BENCHMARK_PROTOCOL.md), not in this
 profile's product policy.
 

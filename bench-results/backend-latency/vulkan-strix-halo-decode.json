@@ -8,7 +8,7 @@
   "git_commit": "d9259b5977719500a1d0fee9ee668f13f726a351",
   "git_tracked_dirty": false,
   "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S Graphics (RADV STRIX_HALO, gfx1151)",
-  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest": "docs/contracts/backend-latency-fixtures.json",
   "manifest_schema_version": 1,
   "metrics": {
     "full_step_resident_us": 1558.556033,

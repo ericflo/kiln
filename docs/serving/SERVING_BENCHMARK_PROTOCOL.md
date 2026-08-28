@@ -44,7 +44,7 @@ UUID, temperature sensor, or single architecture unless the case is explicitly
 a hardware regression fixture. Even then, the identity belongs to the fixture
 and its receipt—not to Kiln's product routing.
 
-The [workload schema](../qualification/schema/workload-v1.schema.json) is the
+The [workload schema](../../qualification/schema/workload-v1.schema.json) is the
 machine-readable authority for variants, variables, case order, timeouts,
 output assertions, metrics, and comparison policy.
 
@@ -80,7 +80,7 @@ and a bounded PID count. Unsupported isolation is reported explicitly rather
 than silently substituted.
 
 An owned-server recipe uses the
-[launch schema](../qualification/schema/serving-benchmark-server-launch-v1.schema.json).
+[launch schema](../../qualification/schema/serving-benchmark-server-launch-v1.schema.json).
 Its `command` is a direct argv vector, not a shell command. Startup waits for
 `/v1/models`; shutdown verifies both the process group and listener.
 
@@ -147,9 +147,9 @@ layer/path attribution drivers use:
 
 The current evidence contracts are:
 
-- [ROCm Hugging Face next-token result](../qualification/schema/rocm-hf-next-token-oracle-v2.schema.json);
-- [ROCm/HF path attribution result](../qualification/schema/rocm-hf-path-attribution-v2.schema.json); and
-- [ROCm/HF layer attribution result](../qualification/schema/rocm-hf-layer-attribution-v2.schema.json).
+- [ROCm Hugging Face next-token result](../../qualification/schema/rocm-hf-next-token-oracle-v2.schema.json);
+- [ROCm/HF path attribution result](../../qualification/schema/rocm-hf-path-attribution-v2.schema.json); and
+- [ROCm/HF layer attribution result](../../qualification/schema/rocm-hf-layer-attribution-v2.schema.json).
 
 Version 1 results that contain machine-specific temperature policy are
 historical records and are not accepted by the current validators.
@@ -168,9 +168,9 @@ Before publication:
 5. compare only like-for-like workload rows; and
 6. state the exact host/backend scope of the result.
 
-The [case-result schema](../qualification/schema/case-result-v1.schema.json)
+The [case-result schema](../../qualification/schema/case-result-v1.schema.json)
 defines one case outcome. The
-[receipt schema](../qualification/schema/receipt-v1.schema.json) binds the
+[receipt schema](../../qualification/schema/receipt-v1.schema.json) binds the
 campaign as a whole.
 
 Historical machine-specific receipts may remain for auditability. Current

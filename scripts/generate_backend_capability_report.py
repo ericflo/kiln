@@ -19,8 +19,8 @@ except ModuleNotFoundError:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_MD = ROOT / "docs" / "backend-capability-report.md"
-REPORT_JSON = ROOT / "docs" / "backend-capability-report.json"
+REPORT_MD = ROOT / "docs" / "contracts" / "backend-capability-report.md"
+REPORT_JSON = ROOT / "docs" / "contracts" / "backend-capability-report.json"
 REPORT_AUDITED_ON = "2026-07-30"
 
 BACKENDS = {
@@ -647,13 +647,13 @@ def finite_number(value: Any) -> bool:
 
 
 def hardware_latency_coverage_blockers() -> list[str]:
-    manifest_path = ROOT / "docs" / "backend-latency-fixtures.json"
+    manifest_path = ROOT / "docs" / "contracts" / "backend-latency-fixtures.json"
     if not manifest_path.is_file():
-        return ["docs/backend-latency-fixtures.json is missing"]
+        return ["docs/contracts/backend-latency-fixtures.json is missing"]
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return [f"docs/backend-latency-fixtures.json is unreadable: {exc}"]
+        return [f"docs/contracts/backend-latency-fixtures.json is unreadable: {exc}"]
 
     blockers: list[str] = []
     status = manifest.get("status")
@@ -1327,11 +1327,11 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "hardware_latency_thresholds",
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
             "status": "fixture_required" if hardware_latency_blockers else None,
-            "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+            "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/contracts/backend-latency-fixtures.json --require-covered",
             "coverage_blockers": hardware_latency_blockers,
             "evidence": [
-                "docs/backend-latency-fixtures.json",
-                "docs/backend-latency-result-schema.md",
+                "docs/contracts/backend-latency-fixtures.json",
+                "docs/contracts/backend-latency-result-schema.md",
                 "scripts/check_unification_gates.sh",
                 "scripts/run_backend_latency_fixture.py",
                 "scripts/write_backend_latency_result_artifact.py",
@@ -1353,8 +1353,8 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "status": None,
             "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
             "evidence": [
-                "docs/backend-capability-report.md",
-                "docs/backend-capability-report.json",
+                "docs/contracts/backend-capability-report.md",
+                "docs/contracts/backend-capability-report.json",
                 "scripts/generate_backend_capability_report.py",
                 "scripts/check_unification_gates.sh",
             ],
@@ -2427,8 +2427,8 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             "evidence": [
                 "docs/archive/backend-engine-unification/backend-engine-unification-plan.md",
                 "scripts/generate_backend_capability_report.py",
-                "docs/backend-capability-report.md",
-                "docs/backend-capability-report.json",
+                "docs/contracts/backend-capability-report.md",
+                "docs/contracts/backend-capability-report.json",
                 "crates/kiln-model/tests/backend_capability_contract.rs",
             ],
             "report_sections": [
@@ -2673,10 +2673,10 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "hardware latency fixture manifest and result schema",
             ],
             "evidence": [
-                "docs/backend-capability-report.md",
-                "docs/backend-capability-report.json",
-                "docs/backend-latency-fixtures.json",
-                "docs/backend-latency-result-schema.md",
+                "docs/contracts/backend-capability-report.md",
+                "docs/contracts/backend-capability-report.json",
+                "docs/contracts/backend-latency-fixtures.json",
+                "docs/contracts/backend-latency-result-schema.md",
                 "scripts/check_unification_gates.sh",
                 "scripts/run_backend_latency_fixture.py",
                 "scripts/write_backend_latency_result_artifact.py",
@@ -2826,7 +2826,7 @@ def markdown(data: dict[str, Any]) -> str:
             ],
             [
                 "How fast is a backend?",
-                "Not here. Use the [benchmark guide](public/BENCHMARKS.md) and dated result artifacts; "
+                "Not here. Use the [benchmark guide](../public/BENCHMARKS.md) and dated result artifacts; "
                 "this report contains no tokens-per-second result.",
             ],
         ],

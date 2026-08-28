@@ -14,7 +14,7 @@ reported. A bare PEFT directory installed through the generic adapter upload
 route has not passed these checks.
 
 The generated [Artifact lifecycle API
-schema](../contracts/kiln-artifacts-v1.schema.json) is the source of truth for
+schema](../../contracts/kiln-artifacts-v1.schema.json) is the source of truth for
 HTTP fields and validation constraints. This guide explains the workflow and
 its trust boundary.
 

@@ -129,8 +129,8 @@ gh run view <run-id> --repo ericflo/kiln --log-failed
 **Findings:**
 - **What it is:** Opening paragraph is clear — "pure-Rust single-GPU LLM inference + live LoRA training in one process," Qwen3.5-4B, OpenAI-compatible API on :8420.
 - **Install:** Visible above the fold (`cargo build --release --features cuda` and platform-specific recipes).
-- **GRPO killer feature:** Dedicated section with a working Python example POSTing to `/v1/train/grpo`, hot-swap LoRA explanation, and link to `docs/GRPO_GUIDE.md`.
-- **Cross-links present and live:** `QUICKSTART.md`, `ARCHITECTURE.md`, `docs/GRPO_GUIDE.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, `docs/site/demo/`.
+- **GRPO killer feature:** Dedicated section with a working Python example POSTing to `/v1/train/grpo`, hot-swap LoRA explanation, and link to `docs/guides/GRPO_GUIDE.md`.
+- **Cross-links present and live:** `QUICKSTART.md`, `ARCHITECTURE.md`, `docs/guides/GRPO_GUIDE.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, `docs/site/demo/`.
 - **Desktop release reference:** `desktop-v0.2.2` link is current — verified via `gh release list --repo ericflo/kiln`, no newer desktop tag yet.
 - **Length:** ~2,471 words. Long for a README but front-loaded so the cold-reader path stays under one screen.
 

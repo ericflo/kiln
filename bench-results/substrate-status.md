@@ -280,7 +280,7 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.39 | safetensors save path | ✓ |
 | 1.40 | Parameter::content_hash method | ✓ |
 | 1.42 | full training step demo (tensor + autograd + param + optim) | ✓ |
-| 1.44 | docs/SUBSTRATE_QUICKSTART.md — contributor entry point | ✓ |
+| 1.44 | docs/guides/SUBSTRATE_QUICKSTART.md — contributor entry point | ✓ |
 | 1.45 | cross_entropy loss CPU DeviceOp | ✓ |
 | 1.46 | tied-weight integration test (anti-pattern 17) | ✓ |
 | 1.47 | kiln-param ReplayBuffer (off-policy RL data plumbing) | ✓ |

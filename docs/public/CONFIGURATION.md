@@ -74,5 +74,5 @@ This page is an operational guide, not a duplicate of generated contracts.
 
 - [Complete typed configuration reference](https://ericflo.github.io/kiln/docs/configuration-complete/)
 - [Machine-readable configuration schema](https://github.com/ericflo/kiln/blob/main/contracts/kiln-config-v1.schema.json)
-- [Serving profiles](../SERVING_PROFILES.md)
+- [Serving profiles](../serving/SERVING_PROFILES.md)
 - [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html)

@@ -5,9 +5,9 @@ live replay, protocol-error, capacity, and conformance boundaries for OpenEnv
 training. The runtime contract is OpenEnv discovery plus a stateful WebSocket
 session. It does not depend on any particular environment implementation.
 
-For the normal workflow, start with the [OpenEnv training guide](OPENENV_GUIDE.md).
+For the normal workflow, start with the [OpenEnv training guide](../guides/OPENENV_GUIDE.md).
 The machine-readable record types live in
-[`contracts/kiln-openenv-v1.schema.json`](../contracts/kiln-openenv-v1.schema.json).
+[`contracts/kiln-openenv-v1.schema.json`](../../contracts/kiln-openenv-v1.schema.json).
 
 ## Artifact bundle
 

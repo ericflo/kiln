@@ -70,7 +70,7 @@ may select different kernels, but they must preserve the same public request
 contract.
 
 The generated
-[backend capability report](docs/backend-capability-report.md) is the
+[backend capability report](docs/contracts/backend-capability-report.md) is the
 source-tree inventory for current trait coverage and known gaps. It is an
 engineering report, not a promise that every route is equally fast or
 qualified on every device.
@@ -417,8 +417,8 @@ artifact to its base model, training inputs, effective configuration, and
 provenance. Canary failures can quarantine an adapter independently of backend
 health.
 
-See the [adapter manifest](docs/ADAPTER_MANIFEST.md) and
-[execution provenance](docs/EXECUTION_PROVENANCE.md) references for the exact
+See the [adapter manifest](docs/contracts/ADAPTER_MANIFEST.md) and
+[execution provenance](docs/contracts/EXECUTION_PROVENANCE.md) references for the exact
 identity contracts.
 
 ## OpenEnv rollout path
@@ -629,7 +629,7 @@ the same matrix against upstream `main`. This oracle inventory remains CI-only.
 No production setting, type, or runtime branch identifies that implementation;
 every server follows the same OpenEnv contract.
 
-See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
+See the [OpenEnv training guide](docs/guides/OPENENV_GUIDE.md) for the operator
 workflow and artifact contract.
 
 ## Training path
@@ -764,7 +764,7 @@ necessary: a slow request is not automatically a slow kernel.
 
 Do not copy configuration fields from this architecture page. Use:
 
-- [Configuration guide](docs/CONFIGURATION.md) for precedence, validation, and
+- [Configuration guide](docs/contracts/CONFIGURATION.md) for precedence, validation, and
   examples;
 - [complete configuration reference](https://ericflo.github.io/kiln/docs/configuration-complete/)
   for every supported field;
@@ -776,7 +776,7 @@ Do not copy configuration fields from this architecture page. Use:
   for health, config, metrics, and diagnostic payloads.
 
 For a claim about current backend coverage, regenerate or inspect
-`docs/backend-capability-report.md`. For a performance claim, use
+`docs/contracts/backend-capability-report.md`. For a performance claim, use
 [Benchmarks](BENCHMARKS.md) and retain its exact revision, build, device,
 driver, workload, and metric provenance. A benchmark result is evidence about
 that recorded run; it is never a device-name dispatch rule.
@@ -785,10 +785,10 @@ that recorded run; it is never a device-name dispatch rule.
 
 - [Architecture overview](docs/public/ARCHITECTURE.md) for the shorter system
   map;
-- [GRPO guide](docs/GRPO_GUIDE.md) for the generate–score–train workflow;
-- [Evals guide](docs/EVAL_GUIDE.md) for suites, scorers, comparisons, and
+- [GRPO guide](docs/guides/GRPO_GUIDE.md) for the generate–score–train workflow;
+- [Evals guide](docs/guides/EVAL_GUIDE.md) for suites, scorers, comparisons, and
   replay;
-- [Latency observability](docs/LATENCY_OBSERVABILITY.md) for phase definitions;
+- [Latency observability](docs/serving/LATENCY_OBSERVABILITY.md) for phase definitions;
 - [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) for
   operator-facing diagnosis;
 - [Security policy](SECURITY.md) for deployment and vulnerability-reporting

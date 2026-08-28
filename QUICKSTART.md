@@ -11,7 +11,7 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
-After first inference, continue to [SFT training](#6-submit-sft-training), [native OpenEnv training](docs/OPENENV_GUIDE.md), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), the [complete documentation](https://ericflo.github.io/kiln/docs/), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
+After first inference, continue to [SFT training](#6-submit-sft-training), [native OpenEnv training](docs/guides/OPENENV_GUIDE.md), the [GRPO guide](docs/guides/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), the [complete documentation](https://ericflo.github.io/kiln/docs/), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
@@ -180,7 +180,7 @@ Then start with:
 `stable` is the default and is the recommended profile for serving, training,
 evaluation, and adapter transitions. Use `maintenance` only when inference must
 be drained; `experimental` is reserved for backend qualification. See
-[Serving Profiles](docs/SERVING_PROFILES.md) before step 6.
+[Serving Profiles](docs/serving/SERVING_PROFILES.md) before step 6.
 
 By default, Kiln logs in colored "pretty" format when stderr is an interactive
 terminal and switches to structured JSON when stderr is piped or redirected
@@ -278,7 +278,7 @@ The Playground loads the effective defaults from `GET /v1/config` and previews
 the resolved pair before send, including whether each value comes from the
 server or this request.
 The versioned wire shapes and executable semantics are normative in the
-[Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
+[Thinking Budget Contract](docs/serving/THINKING_BUDGET_CONTRACT.md).
 
 ### Optional: point pi at Kiln
 
@@ -315,10 +315,10 @@ If you only wanted to get Kiln running, you can stop here: the server is up, `PO
 Next steps are optional:
 
 - Train a small adapter with [SFT](#6-submit-sft-training).
-- Run generate→score→train loops with [GRPO](docs/GRPO_GUIDE.md).
+- Run generate→score→train loops with [GRPO](docs/guides/GRPO_GUIDE.md).
 - Train directly against stateful RL environments with
-  [`kiln openenv`](docs/OPENENV_GUIDE.md).
-- Distill a registered local or vLLM teacher with [OPD](docs/training-checkpoints.md#opd).
+  [`kiln openenv`](docs/guides/OPENENV_GUIDE.md).
+- Distill a registered local or vLLM teacher with [OPD](docs/training/training-checkpoints.md#opd).
 - Use [advanced API examples](#9-advanced-api-examples) for tools, batch generation, adapter import/export, TIES merge, composition, webhooks, and troubleshooting notes.
 - Open the website [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) page if setup is not clean yet.
 
@@ -336,7 +336,7 @@ Stable keeps inference, live adapter activation, and post-training eval
 available in one process. To drain traffic deliberately, restart with
 `KILN_SERVER_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
 `stable` and run the eval before restoring traffic. The full drain procedure is
-in [Serving profiles](docs/SERVING_PROFILES.md#move-between-profiles).
+in [Serving profiles](docs/serving/SERVING_PROFILES.md#move-between-profiles).
 
 Create a training file `examples.jsonl` with chat-format examples:
 
@@ -364,7 +364,7 @@ computes loss only on serialized assistant turns. The assistant role header,
 system, user, and tool-response turns are masked. The thinking/answer/tool-call
 body, `<|im_end|>`, and trailing newline are supervised. The exact
 HF/TRL-matched token and label contract is in
-[SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md).
+[SFT Tokenization and Assistant-Only Loss](docs/training/sft-tokenization.md).
 
 Submit training via the CLI:
 
@@ -421,7 +421,7 @@ OPD already defaults to 25. For example:
 `opd-request.json` is one `/v1/train/opd` request object with `prompts`, a
 registered `teacher`, and `config`; `--teacher` may supply or override that
 alias. The complete request and resume shape is in
-[Native Training Checkpoints](docs/training-checkpoints.md#api-cli-and-browser-workflow).
+[Native Training Checkpoints](docs/training/training-checkpoints.md#api-cli-and-browser-workflow).
 
 `kiln train status --job-id JOB_ID` prints the newest immutable checkpoint
 basename. Continue with the identical file, route, adapter, and training
@@ -429,7 +429,7 @@ options plus `--resume-checkpoint BASENAME`. OPD additionally requires the
 identical prompt/dataset identity and exact registered teacher revision. Resume
 validates the complete adapter/optimizer/reference/loop state and checksums
 before continuation; it is not a weights-only warm start. See
-[Native Training Checkpoints](docs/training-checkpoints.md).
+[Native Training Checkpoints](docs/training/training-checkpoints.md).
 
 Exact checkpoints also bind training checkpoint planning identity v3. That
 identity includes the process's resolved SFT checkpoint-boundary policy, so a
@@ -671,7 +671,7 @@ The JSONL stores `text`, `reward`, and exact
 `kiln.rollout-provenance.v1` data for every completion. Missing or malformed
 provenance, a mismatched seed/adapter/prompt/content identity, incomplete action
 coverage, or inconsistent usage fails before the scorer runs. See
-[the GRPO guide](docs/GRPO_GUIDE.md#recommended-recorded-policy-workflow) for
+[the GRPO guide](docs/guides/GRPO_GUIDE.md#recommended-recorded-policy-workflow) for
 runnable task, template, scorer, and training-submission examples.
 
 For direct API clients, add `"rollout_provenance": true` to one
@@ -692,16 +692,16 @@ This endpoint does not emit per-token behavior provenance. Use it only with
 `behavior_policy: "no_importance_correction"`, or use `rollout-generate` for
 recorded importance correction.
 
-For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md).
+For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md).
 
 The training request's `config.is_level` selects token PPO (default), sequence
 GSPO, or CISPO. Token PPO and GSPO use `clip_epsilon` with optional
 `clip_eps_high`; CISPO instead uses the absolute upper-only
 `cispo_max_weight` cap (default `5.0`) and deliberately has no lower floor.
-See the [tuning reference](docs/GRPO_GUIDE.md#tuning-knobs) before changing
+See the [tuning reference](docs/guides/GRPO_GUIDE.md#tuning-knobs) before changing
 these objective-level controls.
 
-For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for the typed `config.loss.echo` object, CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), and the receipt-grade `env_ce_drop_pct` diagnostic.
+For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for the typed `config.loss.echo` object, CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), and the receipt-grade `env_ce_drop_pct` diagnostic.
 
 ```bash
 curl -s http://localhost:8420/v1/completions/batch \
@@ -913,12 +913,12 @@ Held-out is the default and rejects exact, normalized, source-row, group, or
 session overlap with the admitted training corpus before queue publication.
 Use `data_scope: "train-set-eval"` only for a labeled training-data diagnostic;
 it cannot set `min_accuracy`. See
-[`docs/DATASET_SPLITS.md`](docs/DATASET_SPLITS.md) for registered dataset
+[`docs/contracts/DATASET_SPLITS.md`](docs/contracts/DATASET_SPLITS.md) for registered dataset
 partitions, split controls, migration, provenance, and limitations.
 
 **The judgment flywheel** turns your A/B picks into a *local* judge LoRA — no frontier-LLM dependency. Open `/ui/` → Evals → Judgments, generate side-by-side replies for a prompt, click `A`/`B`/`Tie` (or `S` to skip). After ~20 judgments, click "Compile to SFT" to produce a training dataset, run `kiln train sft` on it to get a judge adapter, then point any future eval at it via `Scorer::LlmJudge { judge_adapter: "support-judge-v1" }`.
 
-See [`docs/EVAL_GUIDE.md`](docs/EVAL_GUIDE.md) for the full scorer reference, the `kiln-eval` CLI (`list`, `register`, `run`, `compare`, `probe`), and recipes for tool-call evals, code-writing evals, and JSON-shape gates.
+See [`docs/guides/EVAL_GUIDE.md`](docs/guides/EVAL_GUIDE.md) for the full scorer reference, the `kiln-eval` CLI (`list`, `register`, `run`, `compare`, `probe`), and recipes for tool-call evals, code-writing evals, and JSON-shape gates.
 
 ## CLI Reference
 
@@ -1025,7 +1025,7 @@ complete field, nullability, unknown-field, constraint, and example reference.
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.9](#99-training-completion-webhooks)). |
-| GET / POST | `/v1/eval/suites` | List or register eval suites (full reference: [`docs/EVAL_GUIDE.md`](docs/EVAL_GUIDE.md)) |
+| GET / POST | `/v1/eval/suites` | List or register eval suites (full reference: [`docs/guides/EVAL_GUIDE.md`](docs/guides/EVAL_GUIDE.md)) |
 | POST | `/v1/eval/run` | Submit an eval (registered suite or inline) — see [§10](#10-evaluate-your-adapter) |
 | POST | `/v1/eval/compare` | Run a suite across multiple adapters head-to-head |
 | GET | `/v1/eval/jobs` / `/v1/eval/jobs/{id}` | List eval jobs or fetch one with full per-example outcomes |
@@ -1041,7 +1041,7 @@ complete field, nullability, unknown-field, constraint, and example reference.
 
 ## Configuration
 
-Kiln uses a typed TOML config file. The complete [Configuration Reference](docs/CONFIGURATION.md) documents every field, exact default, validation rule, environment override, provenance, and restart requirement. Use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
+Kiln uses a typed TOML config file. The complete [Configuration Reference](docs/contracts/CONFIGURATION.md) documents every field, exact default, validation rule, environment override, provenance, and restart requirement. Use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
 
 Key settings:
 
@@ -1114,7 +1114,7 @@ be active but unroutable while the actor is active. The route applies only to
 actor-absent direct streaming effectively-greedy requests; sampled,
 non-streaming, and actor-routed work bypasses it. The complete strict grammar,
 deprecated aliases, backend matrices, decode-width clamps, and debug shape are in the
-[Configuration Reference](docs/CONFIGURATION.md).
+[Configuration Reference](docs/contracts/CONFIGURATION.md).
 
 Streaming prefill is also immutable startup policy. `auto` uses backend
 dispatch and tiles; concrete thresholds and tiles are strict decimal values,
@@ -1191,5 +1191,5 @@ sudo systemctl enable --now kiln
 - **Architecture**: Read the [architecture guide](https://ericflo.github.io/kiln/architecture.html) for the single-model design, scheduler, cache, and training flow.
 - **Demo**: Watch the [demo/asciicast](https://ericflo.github.io/kiln/demo/) to see the UI and common commands in context.
 - **Troubleshooting**: Use the [troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) for setup, GPU, model-path, and server-health issues.
-- **GRPO guide**: Follow [`docs/GRPO_GUIDE.md`](docs/GRPO_GUIDE.md) for generate→score→train workflows.
+- **GRPO guide**: Follow [`docs/guides/GRPO_GUIDE.md`](docs/guides/GRPO_GUIDE.md) for generate→score→train workflows.
 - **Release notes and terms**: Check [`CHANGELOG.md`](CHANGELOG.md) for version history and [`LICENSE`](LICENSE) for project licensing.

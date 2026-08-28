@@ -86,7 +86,7 @@ requires process restart; a malformed request does not.
 ## Go deeper
 
 - [HTTP API guide](https://ericflo.github.io/kiln/api.html)
-- [Latency observability](../LATENCY_OBSERVABILITY.md)
-- [Adapter manifest](../ADAPTER_MANIFEST.md)
-- [Execution provenance](../EXECUTION_PROVENANCE.md)
+- [Latency observability](../serving/LATENCY_OBSERVABILITY.md)
+- [Adapter manifest](../contracts/ADAPTER_MANIFEST.md)
+- [Execution provenance](../contracts/EXECUTION_PROVENANCE.md)
 - [Full architecture source](https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md)

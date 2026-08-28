@@ -343,7 +343,7 @@ configuration, and skipped model-name validation fail before spawn.
 ## Register the teacher with Kiln
 
 The generated [Artifact Lifecycle API
-Schema](../contracts/kiln-artifacts-v1.schema.json) is authoritative for
+Schema](../../contracts/kiln-artifacts-v1.schema.json) is authoritative for
 teacher request and response fields.
 
 A credential-free teacher must use an exact loopback URL, and Kiln itself must
@@ -500,7 +500,7 @@ defaults.
 ### CUDA bootstrap fixture
 
 [The RTX 4090 bootstrap launch
-document](../qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json)
+document](../../qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json)
 is an explicit historical fixture. It selects a copied interpreter, private
 snapshot and cache parents, inherited benchmark process-group ownership, BF16,
 a 32,768-token context and batch-token bound, 64 sequence slots, 75% device
@@ -520,13 +520,13 @@ and verifies the selected accelerator before startup.
 These artifacts describe one host and one historical investigation:
 
 - [Runtime
-  manifest](../qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-text-v2.json)
+  manifest](../../qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-text-v2.json)
 - [Private-cache launch
-  document](../qualification/server-launch/vllm-rocm-strix-halo-triton-text-private-cache-v3.json)
+  document](../../qualification/server-launch/vllm-rocm-strix-halo-triton-text-private-cache-v3.json)
 - [First failed v2 startup
-  receipt](../benchmarks/receipts/rocm/strix-halo/20260718t213402-rocm-strix-halo-vllm-triton-text-v2-smoke.json)
+  receipt](../../benchmarks/receipts/rocm/strix-halo/20260718t213402-rocm-strix-halo-vllm-triton-text-v2-smoke.json)
 - [Successful private-cache v3 smoke
-  receipt](../benchmarks/receipts/rocm/strix-halo/20260718t220209-rocm-strix-halo-vllm-triton-text-private-cache-v3-smoke.json)
+  receipt](../../benchmarks/receipts/rocm/strix-halo/20260718t220209-rocm-strix-halo-vllm-triton-text-private-cache-v3-smoke.json)
 
 The manifest binds the exact vLLM, PyTorch, HIP, Transformers, tokenizers,
 installed-runtime, gfx1151, Qwen3.5-4B, and inference-option identities recorded
@@ -543,9 +543,9 @@ evidence nor a claim about another ROCm device.
 The subsequent exact-source greedy pair is retained as:
 
 - [Kiln
-  receipt](../benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.kiln.json)
+  receipt](../../benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.kiln.json)
 - [vLLM
-  receipt](../benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.vllm.json)
+  receipt](../../benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.vllm.json)
 
 On that one host and workload, vLLM measured 18.04 output tokens/s at
 concurrency 8 and 51.59 at concurrency 32; Kiln measured 8.39 and 7.12. This is
@@ -556,9 +556,9 @@ The pair failed exact-output comparison at every concurrency. The retained
 single-request divergence receipts localize the first token mismatch:
 
 - [Kiln
-  divergence](../benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.kiln.json)
+  divergence](../../benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.kiln.json)
 - [vLLM
-  divergence](../benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.vllm.json)
+  divergence](../../benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.vllm.json)
 
 Both outputs contain 64 visible tokens and agree through generated token index
 2 (`To establish a`). At index 3, Kiln emits token `25045` (` baseline`) and
@@ -596,4 +596,4 @@ the client; it does not authenticate the peer.
 
 Once registration succeeds, use the returned `off_policy_manifest` to build an
 identity-bound corpus with the [off-policy OPD teacher JSONL
-guide](OPD_TEACHER_JSONL.md).
+guide](../training/OPD_TEACHER_JSONL.md).

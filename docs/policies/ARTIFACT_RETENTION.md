@@ -2,7 +2,7 @@
 
 Kiln keeps reviewable evidence in Git and keeps raw execution output outside
 Git. The normative policy is
-[`contracts/repository-artifact-policy-v1.json`](../contracts/repository-artifact-policy-v1.json),
+[`contracts/repository-artifact-policy-v1.json`](../../contracts/repository-artifact-policy-v1.json),
 enforced by `scripts/check_repository_artifacts.py` on every push and pull
 request.
 
@@ -116,7 +116,7 @@ still apply.
 The 2026-07-13 cleanup removed raw artifacts from the current tree without
 rewriting Git history. Compact audit summaries remain in `docs/audits/` and
 `docs/archive/`. Their references to removed paths identify the original inputs;
-[`docs/audits/removed-raw-artifacts-2026-07-13-v1.json`](audits/removed-raw-artifacts-2026-07-13-v1.json)
+[`docs/audits/removed-raw-artifacts-2026-07-13-v1.json`](../audits/removed-raw-artifacts-2026-07-13-v1.json)
 is the canonical lookup from each removed path to its byte count and SHA-256.
 
 For a manifest entry with `source_commit` and `path`, restore a raw artifact to

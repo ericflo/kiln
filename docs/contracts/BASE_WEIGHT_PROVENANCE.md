@@ -145,5 +145,5 @@ manifest. Every newly admitted production job records one.
 
 See [execution provenance](EXECUTION_PROVENANCE.md) for process, backend,
 device, runtime, precision, kernel, and effective-configuration identity; see
-[native training checkpoints](training-checkpoints.md) for the rest of the
+[native training checkpoints](../training/training-checkpoints.md) for the rest of the
 exact-resume envelope.

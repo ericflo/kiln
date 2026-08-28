@@ -120,7 +120,7 @@ following object at `train_receipt.json -> data.sft_ingestion`:
 Registered named datasets additionally select a persisted `dataset_split`
 (default `train`) and expose the full dataset, split-manifest, and admitted
 corpus identities through the public training job. See
-[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for group-aware
+[Dataset Splits and Train/Eval Separation](../contracts/DATASET_SPLITS.md) for group-aware
 assignment, held-out synthesis, and post-training contamination admission.
 
 The adjacent data counters use the same admission result:

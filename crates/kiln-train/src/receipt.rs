@@ -36,7 +36,7 @@
 //! does not contain enough information to reconstruct an adapter and Kiln
 //! does not expose a receipt-to-output replay command. It can support audit
 //! and drift detection only. Exact continuation uses a validated
-//! `.kiln-checkpoint`; see `docs/REPLAY_INTEGRITY.md` for the boundary.
+//! `.kiln-checkpoint`; see `docs/contracts/REPLAY_INTEGRITY.md` for the boundary.
 //!
 //! # Why this module lives in kiln-train, not kiln-server
 //!

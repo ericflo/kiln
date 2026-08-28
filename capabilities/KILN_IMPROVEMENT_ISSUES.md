@@ -551,7 +551,7 @@ and model commit were actually used.
 
 **Implementation notes:** Added `train_receipt.json` as a stable trainer-owned
 artifact with schema version 1 and documented it in
-`docs/TRAIN_RECEIPT_SCHEMA.md`. Generic SFT, in-memory GRPO, streamed GRPO,
+`docs/training/TRAIN_RECEIPT_SCHEMA.md`. Generic SFT, in-memory GRPO, streamed GRPO,
 CUDA-native SFT, Vulkan-native SFT/GRPO, and OPD now write receipts next to
 the produced adapter. Receipts include kiln source revision/dirty state,
 model/tokenizer config hashes, base/output adapter hashes, training data
@@ -1584,7 +1584,7 @@ lengths.
   `--lengths`, `--completions`, and `--segments`, and records peak VRAM when
   `nvidia-smi` is available. `kernel_launch_count` is emitted as `null` until a
   launch counter is wired.
-- Added `docs/LONG_CONTEXT_GRPO_BENCH.md` with dry/CUDA examples and expected
+- Added `docs/training/LONG_CONTEXT_GRPO_BENCH.md` with dry/CUDA examples and expected
   compaction-workload usage.
 
 **Validation evidence:**
@@ -2444,7 +2444,7 @@ adapter provenance regardless of storage backend.
   adapter into a target adapter registry, supports `--name` and `--overwrite`,
   and verifies config, safetensors, and receipt hashes after copy before
   reporting success.
-- Documented the schema and restore workflow in `docs/ADAPTER_MANIFEST.md`
+- Documented the schema and restore workflow in `docs/contracts/ADAPTER_MANIFEST.md`
   and linked it from `README.md`.
 
 **Validation evidence:**
@@ -2518,7 +2518,7 @@ OPD for high-baseline capabilities.
 - Added a documented off-policy teacher JSONL schema with messages,
   teacher responses, optional per-action token top-logprob distributions,
   trajectory action/observation segments, and metadata. The schema is in
-  `docs/OPD_TEACHER_JSONL.md` and linked from `README.md`.
+  `docs/training/OPD_TEACHER_JSONL.md` and linked from `README.md`.
 - Added parser/preparation helpers for off-policy distillation examples:
   `OffPolicyDistillationExample`, `TeacherActionToken`,
   `TeacherTopLogprob`, `parse_off_policy_distillation_jsonl_str`,

@@ -995,7 +995,7 @@ Exact SFT, GRPO, and OPD continuation uses a validated `.kiln-checkpoint`
 inside its declared deterministic envelope. A future replay-to-output feature
 would need to bind and execute the complete model, tokenizer/template, data,
 teacher, build/runtime, precision, optimizer/RNG, and evaluation procedure.
-See [Request-Lineage Integrity](../REPLAY_INTEGRITY.md) for the shipped contract.
+See [Request-Lineage Integrity](../contracts/REPLAY_INTEGRITY.md) for the shipped contract.
 
 ### 8.12. The four desktop notifications kiln will send unprompted
 

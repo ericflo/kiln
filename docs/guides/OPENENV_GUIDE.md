@@ -59,14 +59,14 @@ kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 Bind each attempt to a non-secret idempotency key: exact retries recover the
 retained run; changed reuse fails. Run records v5 keep the cancellable FIFO and
 sealed `kiln.openenv-training-contract.v1`. Admission precedes discovery, so
-rejection spends no episodes. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission)
+rejection spends no episodes. See the [admission reference](../training/OPENENV_REPLAY_REFERENCE.md#training-admission)
 for request, artifact-integrity, capacity, and retention details.
 
 ### Protected environments
 
 Protected deployments use exact-origin bearer credentials without persisting
 secrets. Align server `credential_ids` or CLI `--credential-env` with URLs; use
-`-` for a public slot. See the [authentication boundary](OPENENV_REPLAY_REFERENCE.md#authentication-boundary).
+`-` for a public slot. See the [authentication boundary](../training/OPENENV_REPLAY_REFERENCE.md#authentication-boundary).
 
 ### Inspect
 
@@ -114,7 +114,7 @@ kiln openenv replay --summary counter.rollout-summary.json
 
 `verify` is network-free. `replay` verifies first, then compares live reset,
 action, result, and final state. Archive all three files together. See the
-[replay reference](OPENENV_REPLAY_REFERENCE.md) for drift and prefix semantics.
+[replay reference](../training/OPENENV_REPLAY_REFERENCE.md) for drift and prefix semantics.
 
 ### Collect and train
 
@@ -138,7 +138,7 @@ episodes cannot supply one append-stable probability trace, so Kiln uses
 summary v5; `capacity_reserved: false` means final capacity is rechecked. Drift
 during collection or before training fails closed; named behavior adapters are
 privately snapshotted under the mutation barrier. See the
-[admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+[admission reference](../training/OPENENV_REPLAY_REFERENCE.md#training-admission).
 
 Subsequent admission, checkpoints, cancellation, publication, and status are ordinary native GRPO; use `kiln train status`, the dashboard, and `train_receipt.json`.
 
@@ -234,7 +234,7 @@ One 512 MiB aggregate retained-representation budget covers live and published f
 
 Recoverable errors become bounded same-socket feedback; terminal errors end the
 candidate, and capacity saturation retries a fresh session. The
-[recovery reference](OPENENV_REPLAY_REFERENCE.md) lists exact outcomes, codes,
+[recovery reference](../training/OPENENV_REPLAY_REFERENCE.md) lists exact outcomes, codes,
 rewards, retry rules, and bounds.
 
 ## Security boundary
@@ -243,4 +243,4 @@ OpenEnv data is untrusted. Prefer loopback or a private network; remotely, use
 HTTPS/WSS and an origin-scoped credential. Inspect schemas, assume prompt
 injection, and retain deployment identity before promotion. Authentication
 establishes access, not environment integrity. See
-[troubleshooting](OPENENV_REPLAY_REFERENCE.md#troubleshooting) for failures.
+[troubleshooting](../training/OPENENV_REPLAY_REFERENCE.md#troubleshooting) for failures.

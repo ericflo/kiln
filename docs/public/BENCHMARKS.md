@@ -138,5 +138,5 @@ each route requires, with narrow fallbacks for capabilities it lacks.
 
 - [Raw benchmark evidence ledger](https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md)
 - [May 9 Vulkan decode qualification log](https://github.com/ericflo/kiln/blob/main/docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md)
-- [Serving benchmark protocol](https://github.com/ericflo/kiln/blob/main/docs/SERVING_BENCHMARK_PROTOCOL.md)
+- [Serving benchmark protocol](https://github.com/ericflo/kiln/blob/main/docs/serving/SERVING_BENCHMARK_PROTOCOL.md)
 - [Qualification receipts](https://github.com/ericflo/kiln/tree/main/qualification/receipts)

@@ -186,7 +186,7 @@ def test_driver_contract():
         self.assertEqual(actual, expected)
         self.assertEqual(
             inventory.render_report(actual),
-            (ROOT / "docs" / "VERIFICATION_TEST_INVENTORY.md").read_text(),
+            (ROOT / "docs" / "policies" / "VERIFICATION_TEST_INVENTORY.md").read_text(),
         )
         self.assertEqual(
             json.loads(json.dumps(actual, sort_keys=True)),

@@ -13,8 +13,8 @@ change still needs an explicit behavioral contract.
 | Which scalar types and packed formats exist? | `crates/kiln-tensor/src/dtype.rs` and `element.rs` |
 | How is an operation dispatched? | `crates/kiln-tensor/src/device_op.rs` |
 | Which operation modules are public? | `crates/kiln-tensor/src/ops/mod.rs` |
-| Which backend capabilities are reported? | [Backend capability report](backend-capability-report.md) |
-| Where does the tensor layer sit in the runtime? | [Architecture package boundaries](../ARCHITECTURE.md#package-boundaries) |
+| Which backend capabilities are reported? | [Backend capability report](../contracts/backend-capability-report.md) |
+| Where does the tensor layer sit in the runtime? | [Architecture package boundaries](../../ARCHITECTURE.md#package-boundaries) |
 
 Start with a CPU reference test. Add accelerator evidence only after the
 operation’s numerical, shape, dtype, and error behavior is unambiguous.

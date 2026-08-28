@@ -16,7 +16,7 @@ from json_schema_subset import validate_instance
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "kiln-config-v1.schema.json"
-REFERENCE_PATH = ROOT / "docs" / "CONFIGURATION.md"
+REFERENCE_PATH = ROOT / "docs" / "contracts" / "CONFIGURATION.md"
 EXAMPLE_PATH = ROOT / "kiln.example.toml"
 SECTIONS = (
     "server",

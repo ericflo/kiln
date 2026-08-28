@@ -151,7 +151,7 @@ environment variables.
 
 `model.base_weight_shard_manifest` is the authoritative base-weight content
 identity when present. `model.path` and `model.config_hash` are not substitutes.
-See [Base-weight identity](BASE_WEIGHT_PROVENANCE.md).
+See [Base-weight identity](../contracts/BASE_WEIGHT_PROVENANCE.md).
 
 The tokenizer fields separate:
 
@@ -226,7 +226,7 @@ contract. `training_data.sha256` independently identifies pre-scored input
 bytes when applicable.
 
 See [OPD teacher JSONL](OPD_TEACHER_JSONL.md) and
-[Immutable vLLM teacher identity](VLLM_TEACHER_IDENTITY.md).
+[Immutable vLLM teacher identity](../contracts/VLLM_TEACHER_IDENTITY.md).
 
 ### ECHO evidence
 
@@ -275,7 +275,7 @@ observed after trainer setup. `runtime.sft_loss_route` identifies the
 backend-owned SFT loss route. Kiln validates each present typed record on both
 write and read.
 
-See [Execution identity and provenance](EXECUTION_PROVENANCE.md).
+See [Execution identity and provenance](../contracts/EXECUTION_PROVENANCE.md).
 
 ## Integrity and interpretation
 

@@ -48,7 +48,7 @@ docs/audits/**/*.txt
 docs/audits/**/*.diff
 docs/audits/**/*.status
 # Exception: the removed-raw-artifacts manifest is a compact receipt cited by
-# docs/ARTIFACT_RETENTION.md (policy: retain compact receipts, summaries,
+# docs/policies/ARTIFACT_RETENTION.md (policy: retain compact receipts, summaries,
 # manifests, and hashes).
 !docs/audits/removed-raw-artifacts-2026-07-13-v1.json
 

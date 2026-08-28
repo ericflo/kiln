@@ -470,7 +470,7 @@ work required. Every row still receives the full seven-pass protocol.
 | `/docs/overview/` — `docs/public/OVERVIEW.md` | Define scope, audience, supported workflows, operational model, and a clear first path. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/quickstart-reference/` — `docs/public/QUICKSTART.md` | Reconcile with the product quickstart and keep commands, success signals, and next steps exact. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/configuration/` — `docs/public/CONFIGURATION.md` | Explain important defaults and precedence before linking to exhaustive fields; distinguish configuration from runtime policy. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/configuration-complete/` — `docs/CONFIGURATION.md` | Make an exhaustive reference searchable, non-duplicative, and explicit about canonical and retired names. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/configuration-complete/` — `docs/contracts/CONFIGURATION.md` | Make an exhaustive reference searchable, non-duplicative, and explicit about canonical and retired names. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/configuration-schema/` — `contracts/kiln-config-v1.schema.json` | Make field descriptions, defaults, bounds, cross-field conditions, and migration guidance understandable in isolation. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/http-api/` — `contracts/kiln-http-api-v1.openapi.json` | Make every operation's purpose, auth, transport, request, response, errors, and ownership unambiguous. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/changelog/` — `docs/public/CHANGELOG.md` | Keep release entries scannable, user-impact first, historically accurate, and free of unreleased ambiguity. | [x] | [x] | [x] | [x] | [ ] |
@@ -490,27 +490,27 @@ work required. Every row still receives the full seven-pass protocol.
 | `/docs/rocm-hf-path-attribution-result-schema/` — `qualification/schema/rocm-hf-path-attribution-v2.schema.json` | Explain which numerical path is compared, how evidence is bound, and what a result can establish. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/rocm-hf-layer-attribution-result-schema/` — `qualification/schema/rocm-hf-layer-attribution-v2.schema.json` | Clarify sequential layer comparison, error growth, identities, artifacts, and interpretation limits. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/serving-benchmark-launch-schema/` — `qualification/schema/serving-benchmark-server-launch-v1.schema.json` | Make server ownership, readiness, logging, shutdown, timeout, and accepted exits operationally exact. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/serving-benchmark-protocol/` — `docs/SERVING_BENCHMARK_PROTOCOL.md` | Turn the protocol into an executable sequence and distinguish hard requirements from rationale. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/serving-profiles/` — `docs/SERVING_PROFILES.md` | Define stable, experimental, and maintenance profiles by guarantees, tradeoffs, and intended use. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/latency-observability/` — `docs/LATENCY_OBSERVABILITY.md` | Define timing metrics once and guide readers from symptom to request-local, dashboard, and Prometheus evidence. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/thinking-budgets/` — `docs/THINKING_BUDGET_CONTRACT.md` | Explain token and wall-clock limits, resolution order, streaming behavior, and client-visible outcomes. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/serving-benchmark-protocol/` — `docs/serving/SERVING_BENCHMARK_PROTOCOL.md` | Turn the protocol into an executable sequence and distinguish hard requirements from rationale. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/serving-profiles/` — `docs/serving/SERVING_PROFILES.md` | Define stable, experimental, and maintenance profiles by guarantees, tradeoffs, and intended use. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/latency-observability/` — `docs/serving/LATENCY_OBSERVABILITY.md` | Define timing metrics once and guide readers from symptom to request-local, dashboard, and Prometheus evidence. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/thinking-budgets/` — `docs/serving/THINKING_BUDGET_CONTRACT.md` | Explain token and wall-clock limits, resolution order, streaming behavior, and client-visible outcomes. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/thinking-budget-schema/` — `contracts/thinking-budget-v1.schema.json` | Make request, resolved budget, streaming, and provenance fields precise and consistent with the narrative contract. | [x] | [x] | [x] | [x] | [ ] |
 
 ### Training and evals
 
 | Route and source | Primary copy focus | SE | LE | TV | RQ | FP |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| `/docs/native-sft-profile/` — `docs/NATIVE_SFT_PROFILE.md` | Define the fixed update, backend-owned loss route, memory admission, receipts, and checkpoint identity. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/sft-ingestion/` — `docs/sft-ingestion.md` | Explain row admission, invalid input, content identity, deduplication, and receipt consequences. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/sft-tokenization/` — `docs/sft-tokenization.md` | Make chat rendering, assistant-only labels, masking, truncation, and parity fixtures concrete. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/training-checkpoints/` — `docs/training-checkpoints.md` | Explain checkpoint contents, identity, compatibility, resume behavior, promotion, and failure recovery. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/grpo/` — `docs/GRPO_GUIDE.md` | Make group construction, scoring, updates, observability, artifacts, and promotion a coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/openenv/` — `docs/OPENENV_GUIDE.md` | Make discovery, seed-matched episode collection, environment rewards, direct training, identity, limits, and failure recovery one coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/openenv-replay/` — `docs/OPENENV_REPLAY_REFERENCE.md` | Define content-bound verification, exact live replay, protocol recovery, capacity acquisition, drift, and the implementation-neutral conformance boundary. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/native-sft-profile/` — `docs/training/NATIVE_SFT_PROFILE.md` | Define the fixed update, backend-owned loss route, memory admission, receipts, and checkpoint identity. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/sft-ingestion/` — `docs/training/sft-ingestion.md` | Explain row admission, invalid input, content identity, deduplication, and receipt consequences. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/sft-tokenization/` — `docs/training/sft-tokenization.md` | Make chat rendering, assistant-only labels, masking, truncation, and parity fixtures concrete. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/training-checkpoints/` — `docs/training/training-checkpoints.md` | Explain checkpoint contents, identity, compatibility, resume behavior, promotion, and failure recovery. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/grpo/` — `docs/guides/GRPO_GUIDE.md` | Make group construction, scoring, updates, observability, artifacts, and promotion a coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/openenv/` — `docs/guides/OPENENV_GUIDE.md` | Make discovery, seed-matched episode collection, environment rewards, direct training, identity, limits, and failure recovery one coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/openenv-replay/` — `docs/training/OPENENV_REPLAY_REFERENCE.md` | Define content-bound verification, exact live replay, protocol recovery, capacity acquisition, drift, and the implementation-neutral conformance boundary. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/openenv-schema/` — `contracts/kiln-openenv-v1.schema.json` | Define discovery identity, episode outcomes, rollout statistics, dataset hashes, and the content-addressed summary receipt. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/echo/` — `docs/ECHO_GUIDE.md` | Explain ECHO's purpose, data requirements, objective, workflow, evidence, and limitations without research shorthand. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/dataset-splits/` — `docs/DATASET_SPLITS.md` | Define split ownership, leakage prevention, train/eval separation, and promotion consequences. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/evals/` — `docs/EVAL_GUIDE.md` | Guide readers through suites, judgments, comparisons, replay, artifacts, and feedback to training. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/echo/` — `docs/guides/ECHO_GUIDE.md` | Explain ECHO's purpose, data requirements, objective, workflow, evidence, and limitations without research shorthand. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/dataset-splits/` — `docs/contracts/DATASET_SPLITS.md` | Define split ownership, leakage prevention, train/eval separation, and promotion consequences. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/evals/` — `docs/guides/EVAL_GUIDE.md` | Guide readers through suites, judgments, comparisons, replay, artifacts, and feedback to training. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/eval-api-schema/` — `contracts/kiln-evals-v1.schema.json` | Clarify eval requests, judgments, comparisons, statuses, artifacts, and error behavior. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/control-plane-api-schema/` — `contracts/kiln-control-plane-v1.schema.json` | Clarify training and agent lifecycle operations, state transitions, cancellation, receipts, and errors. | [x] | [x] | [x] | [x] | [ ] |
 
@@ -518,20 +518,20 @@ work required. Every row still receives the full seven-pass protocol.
 
 | Route and source | Primary copy focus | SE | LE | TV | RQ | FP |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| `/docs/hf-trl-interoperability/` — `docs/HF_TRL_INTEROP.md` | State exactly what crosses the Kiln/Hugging Face/TRL boundary, what does not, and how identity is preserved. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/hf-trl-interoperability/` — `docs/training/HF_TRL_INTEROP.md` | State exactly what crosses the Kiln/Hugging Face/TRL boundary, what does not, and how identity is preserved. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/artifact-api-schema/` — `contracts/kiln-artifacts-v1.schema.json` | Make artifact creation, listing, activation, deletion, identity, safety, and errors explicit. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/opd-teacher-jsonl/` — `docs/OPD_TEACHER_JSONL.md` | Define each record, ordering and tokenizer assumptions, validation, examples, and malformed-row behavior. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/vllm-teacher-identity/` — `docs/VLLM_TEACHER_IDENTITY.md` | Explain immutable teacher identity, launch provenance, architecture boundaries, and mismatch handling. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/opd-teacher-jsonl/` — `docs/training/OPD_TEACHER_JSONL.md` | Define each record, ordering and tokenizer assumptions, validation, examples, and malformed-row behavior. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/vllm-teacher-identity/` — `docs/contracts/VLLM_TEACHER_IDENTITY.md` | Explain immutable teacher identity, launch provenance, architecture boundaries, and mismatch handling. | [x] | [x] | [x] | [x] | [ ] |
 
 ### Integrity and artifacts
 
 | Route and source | Primary copy focus | SE | LE | TV | RQ | FP |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| `/docs/adapter-manifest/` — `docs/ADAPTER_MANIFEST.md` | Define required identity, compatibility, provenance, validation, activation, and rejection fields. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/base-weight-provenance/` — `docs/BASE_WEIGHT_PROVENANCE.md` | Explain how base weights are identified, verified, recorded, compared, and rejected. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/execution-provenance/` — `docs/EXECUTION_PROVENANCE.md` | Explain which runtime, device, process, build, and policy facts are captured and what they prove. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/request-lineage-integrity/` — `docs/REPLAY_INTEGRITY.md` | Make lineage, replay authority, mutation boundaries, hashes, and failure semantics understandable. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/training-receipt-schema/` — `docs/TRAIN_RECEIPT_SCHEMA.md` | Define receipt fields, lifecycle, identities, evidence, validation, and interpretation limits. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/adapter-manifest/` — `docs/contracts/ADAPTER_MANIFEST.md` | Define required identity, compatibility, provenance, validation, activation, and rejection fields. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/base-weight-provenance/` — `docs/contracts/BASE_WEIGHT_PROVENANCE.md` | Explain how base weights are identified, verified, recorded, compared, and rejected. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/execution-provenance/` — `docs/contracts/EXECUTION_PROVENANCE.md` | Explain which runtime, device, process, build, and policy facts are captured and what they prove. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/request-lineage-integrity/` — `docs/contracts/REPLAY_INTEGRITY.md` | Make lineage, replay authority, mutation boundaries, hashes, and failure semantics understandable. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/training-receipt-schema/` — `docs/training/TRAIN_RECEIPT_SCHEMA.md` | Define receipt fields, lifecycle, identities, evidence, validation, and interpretation limits. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/qualification-workload-schema/` — `qualification/schema/workload-v1.schema.json` | Make workload identity, inputs, constraints, expected evidence, and comparison rules exact. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/qualification-case-result-schema/` — `qualification/schema/case-result-v1.schema.json` | Explain case status, measurements, evidence, failures, environment identity, and comparability. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/qualification-receipt-schema/` — `qualification/schema/receipt-v1.schema.json` | Explain receipt aggregation, authority, signatures or hashes, cases, environment, and verdict. | [x] | [x] | [x] | [x] | [ ] |
@@ -540,17 +540,17 @@ work required. Every row still receives the full seven-pass protocol.
 
 | Route and source | Primary copy focus | SE | LE | TV | RQ | FP |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| `/docs/hardware-qualification/` — `docs/qualification.md` | Provide a reproducible qualification sequence, expected artifacts, pass criteria, and failure triage. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/backend-latency-evidence/` — `docs/backend-latency-result-schema.md` | Define latency evidence, metric boundaries, workload identity, environment, and valid comparisons. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/runtime-environment-inventory/` — `docs/RUNTIME_ENVIRONMENT_INVENTORY.md` | Separate recognized, direct-read, passthrough, unsafe, retired, and provenance-only environment variables. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/artifact-retention/` — `docs/ARTIFACT_RETENTION.md` | State what is retained, where, for how long, why, and how deletion or archival works. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/verification-test-inventory/` — `docs/VERIFICATION_TEST_INVENTORY.md` | Map each guarantee to tests and explain scope, platform gaps, evidence, and update responsibility. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/hardware-qualification/` — `docs/policies/qualification.md` | Provide a reproducible qualification sequence, expected artifacts, pass criteria, and failure triage. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/backend-latency-evidence/` — `docs/contracts/backend-latency-result-schema.md` | Define latency evidence, metric boundaries, workload identity, environment, and valid comparisons. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/runtime-environment-inventory/` — `docs/contracts/RUNTIME_ENVIRONMENT_INVENTORY.md` | Separate recognized, direct-read, passthrough, unsafe, retired, and provenance-only environment variables. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/artifact-retention/` — `docs/policies/ARTIFACT_RETENTION.md` | State what is retained, where, for how long, why, and how deletion or archival works. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/verification-test-inventory/` — `docs/policies/VERIFICATION_TEST_INVENTORY.md` | Map each guarantee to tests and explain scope, platform gaps, evidence, and update responsibility. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/contributing/` — `CONTRIBUTING.md` | Give a new contributor a reliable setup, change, test, documentation, and review path. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/ci-policy/` — `docs/ci-policy.md` | Explain which checks run where, why jobs skip, what local qualification proves, and how to respond to failure. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/verification-policy/` — `docs/VERIFICATION_POLICY.md` | Define evidence classes, required gates, ownership, exceptions, and the boundary between test and claim. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/release-version-policy/` — `docs/release-version-policy.md` | Define version ownership, allowed references, release drift checks, historical exceptions, and update procedure. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/tensor-substrate-quickstart/` — `docs/SUBSTRATE_QUICKSTART.md` | Get a developer from tensor creation to a verified operation while explaining device, dtype, shape, and errors. | [x] | [x] | [x] | [x] | [ ] |
-| `/docs/backend-capabilities/` — `docs/backend-capability-report.md` | Present the capability matrix with definitions, constraints, source ownership, generation date, and interpretation limits. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/ci-policy/` — `docs/policies/ci-policy.md` | Explain which checks run where, why jobs skip, what local qualification proves, and how to respond to failure. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/verification-policy/` — `docs/policies/VERIFICATION_POLICY.md` | Define evidence classes, required gates, ownership, exceptions, and the boundary between test and claim. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/release-version-policy/` — `docs/policies/release-version-policy.md` | Define version ownership, allowed references, release drift checks, historical exceptions, and update procedure. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/tensor-substrate-quickstart/` — `docs/guides/SUBSTRATE_QUICKSTART.md` | Get a developer from tensor creation to a verified operation while explaining device, dtype, shape, and errors. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/backend-capabilities/` — `docs/contracts/backend-capability-report.md` | Present the capability matrix with definitions, constraints, source ownership, generation date, and interpretation limits. | [x] | [x] | [x] | [x] | [ ] |
 
 ## 10. Shared and non-page surfaces
 

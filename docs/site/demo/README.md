@@ -6,7 +6,7 @@ This directory holds the checked-in asciicast demos for the Kiln docs site. The 
 
 All casts use the default `stable` profile, including online learning and live
 adapter transitions. Drained maintenance and backend-development behavior are
-documented in [Serving Profiles](../../SERVING_PROFILES.md).
+documented in [Serving Profiles](../../serving/SERVING_PROFILES.md).
 
 ## Casts
 

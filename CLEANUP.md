@@ -9525,3 +9525,111 @@ every decision on the 36-item owner queue is immediately executable
 as a steered round. Silent-death pattern unchanged (4 occurrences,
 all menu-style prompts); single-scope mechanical steering continues
 to work, inline salvage remains the reliable path.
+
+## Round 151 — docs/ reorganization wave (38 files → 5 theme dirs; verification complete) [2026-08-28]
+
+**Moved (orchestrator, uncommitted):** 38 top-level `docs/*.md` + 2
+docs/*.json → guides/ (6), training/ (9), serving/ (5), contracts/ (12),
+policies/ (6). 47-file reference remap + 68 inter-doc href fixes + frozen
+archive/audits/plan/public/capabilities paths corrected (path-only).
+
+**Step 1 — regeneration vs working tree:** RUNTIME_ENVIRONMENT_INVENTORY.md
+identical (delta = 2 remapped `../` links; worktree authoritative; baseline
+JSON unchanged). VERIFICATION_TEST_INVENTORY.md identical (delta = 1 remapped
+`../` link); regenerated copy reverted to worktree snapshot; baseline JSON
+unchanged. backend-capability-report.{md,json}: **divergent beyond remap** —
+script line 650 still reads old `docs/backend-latency-fixtures.json`, so fresh
+output collapses to "manifest missing" (1 blocker) vs authoritative
+`fixture_required` (13 blockers); worktree copies untouched and kept.
+
+**Step 2 — gates:** budget PASS · artifacts PASS · http_api PASS · openenv
+FAIL (old path docs/OPENENV_GUIDE.md @414) · runtime_env PASS* (only because
+an untracked old-loc byproduct exists; exit 2 without it — line 22 stale) ·
+thinking_budget PASS · config_schema --self-test FAIL (old path
+CONFIGURATION.md @19) · source_parsing FAIL (template emits bare
+VERIFICATION_POLICY.md link; worktree has remapped `../`) · latency_fixtures
+PASS · docs_site_smoke FAIL (stale paths; first hit docs/SERVING_PROFILES.md).
+
+**Step 3 — site:** build.mjs --out _site **FAIL**: 31/59 manifest sources
+missing (docs/site/docs-manifest.json unremapped); _site/ gitignored. build
+**test** FAIL 8/11: remap moved fixture CONFIGURATION.md into docs/contracts/
+but left sibling link `[Guide](GUIDE.md#deep-dive)` → "broken local Markdown
+reference" in every build test.
+
+**Step 4/5 — sweeps:** literal `docs/NAME.(md|json)` (37 unique names, excl.
+CLEANUP/CHANGELOG): **52 hits** — docs-manifest.json ×33, docs/site/{api,evals,
+grpo}.html ×10, check_docs_site_smoke.mjs ×9. Split-form Python constants:
+**12 hits** (5 gate/generator scripts + 2 qualification tests; 2 benign tmp
+self-test lines). `.github/`: **0** old-form hits; pages.yml `docs/**`
+prefixes valid. Bare-filename hrefs in docs/: 51 hits, **51/51 resolve**
+(same-dir siblings; 0 broken).
+
+**Residual (orchestrator queue):** (1) remap path constants: check_config_
+schema.py:19, check_openenv_contract.py:414-415, check_runtime_env_contract
+.py:22, generate_backend_capability_report.py:22-23,650, plan_backend_latency
+_fixture_dispatch.py:20, qualification tests ×2; (2) docs-manifest.json ×33
++ docs/site/*.html GitHub links; (3) build.test.mjs fixture link content;
+(4) source_parsing gate template links; (5) repository-hygiene.yml:34
+allowlist `docs/backend-latency-` prefix no longer matches docs/contracts/
+(qualification scope silently degrades); (6) 3 untracked old-loc byproducts
+in docs/ (RUNTIME_ENVIRONMENT_INVENTORY.md, backend-capability-report.{md,
+json}). Tree: 86 modified paths (38 renames + edits), uncommitted.
+
+## Round 152 — docs/ reorganization: reference-remap completion + wave commit [2026-08-28]
+
+Round 151's residual queue (items 1–6) plus the inter-document link web the
+move itself had broken. All fixes resolved against disk, not guessed.
+
+**Residual queue completion:** (1) split-form path constants fixed in 10 code
+sites — check_config_schema.py:19, check_openenv_contract.py:414-416,
+check_runtime_env_contract.py:22, generate_backend_capability_report.py:22-
+23,650, plan_backend_latency_fixture_dispatch.py:20,
+qualification/tests/test_runtime_env_contract.py:16,
+qualification/tests/test_source_parsing_tests.py:189 (worktree-link contract,
+live) — all now `docs/<category>/NAME`; systematic sweep of all 38 moved
+names found no further stale code refs. (2) docs-manifest.json 33 stale
+sources remapped + 10 GitHub blob links in docs/site/{api,evals,grpo}.html;
+all 59 manifest sources resolve. (3) build.test.mjs fixture layout now
+mirrors the real tree (`docs/contracts/GUIDE.md`,
+`docs/contracts/diagram.png`) + manifest/asset/llms assertions — **11/11
+pass** (was 8/11). (4) source_parsing gate: template worktree link fixed,
+`--write` byte-identical, gate PASS. (5) repository-hygiene.yml:34
+`docs/backend-latency-` → `docs/contracts/backend-latency-` (ERE verified);
+full `.github/` sweep clean. (6) 3 untracked old-loc byproducts deleted;
+both generators now target `docs/contracts/` and `--check` is
+byte-identical against the tracked files.
+
+**Beyond the queue — the move had broken live inter-document links.** The
+wave's href fixes had converted former sibling links to `../NAME.md`
+regardless of category and missed repo-root-relative refs: ~55 cross-category
+links across the 38 moved docs repaired (contracts↔guides↔training↔
+serving↔policies; same-dir `../` flattened to bare), plus
+docs/public/{OVERVIEW,ARCHITECTURE,CONFIGURATION}.md, docs/site/demo/README.
+md, one docs/plans/ link, and 65 repo-root-relative refs (schemas
+`../contracts/*.json` → `../../contracts/*.json`, qualification/benchmark
+receipt links, `public/BENCHMARKS.md` → `../public/BENCHMARKS.md`,
+`papers/echo/` → `../papers/echo/`, `../QUICKSTART.md` →
+`../../QUICKSTART.md`, …) — general rule: ref that resolved under `docs/`
+pre-move gets `../` so it still resolves from the category dir. Two
+generator link templates stale after the move fixed for byte-identical
+regeneration: check_runtime_env_contract.py:755 and
+generate_backend_capability_report.py:2829. docs/contracts/CONFIGURATION.md:
+9 schema link → `../../contracts/kiln-config-v1.schema.json`. Frozen
+archive/audit prose untouched per protocol.
+
+**Verification — all 13 proof commands PASS:** budget · artifacts ·
+http_api · openenv · runtime_env (448 reads/19 mutations; `--write`
+byte-identical) · thinking_budget · config_schema --self-test ·
+source_parsing · latency_fixtures · docs_site_smoke (static mode; full mode's
+only failure remains the pre-existing Chromium absence, same environmental
+condition as Round 5) · **build --validate-only: 59/59 documents** (was
+31/59 missing) · **build.test 11/11**. Supplementary:
+generate_backend_capability_report --check byte-identical.
+
+**Sweeps:** literal `docs/NAME.ext` (38 names): **0 stale** · relative
+links to moved names in live docs: 126 refs re-verified, **0 broken** ·
+workflow path prefixes: **0 stale** (48 heuristic hits triaged as site-slug
+routes or frozen prose) · untracked byproducts: **0**.
+
+Committed the wave (no push). No test-suite execution; gate scripts run as
+checks only; no frozen prose reworded; no new cleanup threads opened.

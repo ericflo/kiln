@@ -6,7 +6,7 @@
 > composition (Phase 4) was restored at `0e0606f73` (#1531). Landing commits
 > include `8a9181a70` (#1502), `7c746208d` (#1512), `a8de9dd85` (#1518),
 > `0e0606f73` (#1531). See [`README.md`](README.md) for the archive note; the
-> live user-facing surface is `docs/ECHO_GUIDE.md` + README "ECHO-by-default".
+> live user-facing surface is `docs/guides/ECHO_GUIDE.md` + README "ECHO-by-default".
 > The reference corpus stays at `docs/papers/echo/` (paper + blog).
 
 > *Make environment-token cross-entropy a first-class loss term across the kiln agentic-RL stack — on by default, native everywhere, composed cleanly with OPD.*
@@ -62,7 +62,7 @@ So the integration is less "bolt ECHO onto GRPO" and more "complete the masking 
 | ECHO env-CE loss | none | on by default at λ=0.05 | proven on TBLite-style holdout | proven verifier-free in §5.5 demo |
 | Backend coverage | n/a | CUDA, CPU, Metal (`trainer.rs`) + Vulkan (`vk_train.rs`) | same | same |
 | OPD composition | n/a | structural slot reserved (`LossConfig.opd`) | same | wired when OPD branch rebases (Phase 4) |
-| User-facing surface | new `agentic_groups` request shape; legacy `groups` still works | + `--echo-lambda` CLI flag | + 2nd cap with the headline receipt | + verifier-free demo cap + `docs/ECHO_GUIDE.md` |
+| User-facing surface | new `agentic_groups` request shape; legacy `groups` still works | + `--echo-lambda` CLI flag | + 2nd cap with the headline receipt | + verifier-free demo cap + `docs/guides/ECHO_GUIDE.md` |
 
 ---
 
@@ -425,7 +425,7 @@ Long-term we add an explicit `/v1/train/agentic` alias to signal the canonical p
 
 ### 4.4 — Docs
 
-- New `docs/ECHO_GUIDE.md` (peer to existing `docs/GRPO_GUIDE.md`). Single page: what ECHO is, when to turn it off, how to interpret the diagnostics, how to read `dynamics_holdout_ce`.
+- New `docs/guides/ECHO_GUIDE.md` (peer to existing `docs/guides/GRPO_GUIDE.md`). Single page: what ECHO is, when to turn it off, how to interpret the diagnostics, how to read `dynamics_holdout_ce`.
 - `README.md` GRPO section gets one paragraph: "kiln's GRPO is ECHO-by-default for agentic rollouts (trajectories with tool calls); for single-turn rewards it behaves identically to classical GRPO."
 - `CHANGELOG.md`: one entry per phase below.
 - `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan, written when Phase 1 lands.
@@ -530,7 +530,7 @@ pub struct OpdAuxConfig {
 The naming refactor is already done in Phase 0; this phase is just the rounding-out of the user story.
 
 - `capabilities/agentic-grpo/pi-script-fixup` — verifier-free env-only adaptation cap (paper §5.5 demo). Mask GRPO term off, train only on env CE for 100 steps from the strongest Phase 2 checkpoint. Demonstrates the perpetual-improvement-without-judge loop that pairs with OPD plan §10.6's self-distillation loop.
-- `docs/ECHO_GUIDE.md`, README/CHANGELOG/QUICKSTART updates.
+- `docs/guides/ECHO_GUIDE.md`, README/CHANGELOG/QUICKSTART updates.
 - `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` — the long-form companion to the OPD plan.
 
 ### Phase 4 — Compose with OPD (subsequent, dependent on OPD branch state)

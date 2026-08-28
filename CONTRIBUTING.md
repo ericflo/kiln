@@ -15,7 +15,7 @@ into a general model framework or adding a sidecar runtime.
 | Runtime, scheduler, memory, or backend behavior | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Focused behavioral tests and affected contract checks |
 | Public API or configuration | [HTTP API contract](contracts/kiln-http-api-v1.openapi.json) or [configuration](docs/public/CONFIGURATION.md) | Schema, implementation, examples, and docs updated together |
 | Training or evaluation | Relevant guide under `docs/` | Request, lifecycle, receipt, and failure-path tests |
-| Performance | [`BENCHMARKS.md`](BENCHMARKS.md), [`PROFILING.md`](docs/archive/profiling/PROFILING.md), and [local qualification](docs/qualification.md) | Comparable before/after evidence on the same declared workload |
+| Performance | [`BENCHMARKS.md`](BENCHMARKS.md), [`PROFILING.md`](docs/archive/profiling/PROFILING.md), and [local qualification](docs/policies/qualification.md) | Comparable before/after evidence on the same declared workload |
 | Documentation site | [`docs/plans/public-site-audit-and-copyediting-plan.md`](docs/plans/public-site-audit-and-copyediting-plan.md) | Docs build, smoke test, links, and desktop/mobile review |
 
 Open an issue before a non-trivial change, new dependency, new kernel, new
@@ -154,7 +154,7 @@ not in this representative list.
 Tests that read implementation source and assert substrings are migration debt,
 not correctness evidence. Replace them with compile-time constraints, runtime
 behavior, property/state-machine tests, or typed contract assertions. The
-[source-parsing test debt](docs/VERIFICATION_TEST_INVENTORY.md) page explains
+[source-parsing test debt](docs/policies/VERIFICATION_TEST_INVENTORY.md) page explains
 the zero-debt gate.
 
 ## Documentation changes
@@ -215,7 +215,7 @@ scorer:
 3. Dispatch the variant from `score_completion`.
 4. Extend `auto_detect_scorer` only when the target shape is unambiguous.
 5. Add focused unit and end-to-end eval lifecycle tests.
-6. Document the request and result behavior in `docs/EVAL_GUIDE.md` and the
+6. Document the request and result behavior in `docs/guides/EVAL_GUIDE.md` and the
    public eval page.
 
 Keep schema, CLI, UI, synthesis, and server behavior aligned with the enum’s
@@ -250,7 +250,7 @@ Use a plain descriptive title without a project prefix. Automatic CI reruns
 formatting, Linux default-feature checks, policy checks, and documentation
 checks based on changed paths. Backend compile jobs are deliberate manual
 checks; real backend behavior comes from local, source-bound qualification.
-See [CI and local qualification policy](docs/ci-policy.md).
+See [CI and local qualification policy](docs/policies/ci-policy.md).
 
 ## Changes that need prior agreement
 

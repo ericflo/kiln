@@ -19,7 +19,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = ROOT / "contracts" / "runtime-env-direct-reads-v1.json"
-DEFAULT_REPORT = ROOT / "docs" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
+DEFAULT_REPORT = ROOT / "docs" / "contracts" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
 RUST_SUFFIXES = frozenset({".rs"})
 NATIVE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".cu", ".cuh"})
 SOURCE_SUFFIXES = RUST_SUFFIXES | NATIVE_SUFFIXES
@@ -752,7 +752,7 @@ def render_report(contract: dict[str, object]) -> str:
         "that operators should copy into a shell.",
         "",
         "The machine-readable source of truth is",
-        "[`contracts/runtime-env-direct-reads-v1.json`](../contracts/runtime-env-direct-reads-v1.json);",
+        "[`contracts/runtime-env-direct-reads-v1.json`](../../contracts/runtime-env-direct-reads-v1.json);",
         "`python3 scripts/check_runtime_env_contract.py` rejects any source, classification,",
         "or generated-report drift.",
         "",

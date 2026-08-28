@@ -6,7 +6,7 @@ configuration. It describes the configuration accepted by the current
 validation, mechanically derived environment overrides, and runtime provenance.
 
 The machine-readable contract is
-[`contracts/kiln-config-v1.schema.json`](../contracts/kiln-config-v1.schema.json).
+[`contracts/kiln-config-v1.schema.json`](../../contracts/kiln-config-v1.schema.json).
 The documentation website renders its complete field reference directly from
 that schema. `python3 scripts/check_config_schema.py --self-test` verifies that
 the schema, these tables, and `kiln.example.toml` agree.
@@ -620,7 +620,7 @@ as does `portable_fallback`; both retain the
 ordinary BF16 LM head. Historical W8/W8A8 route
 attribution is available only in the explicit `hardware-qualification` example
 build; it is not a server profile or environment-selectable product path.
-See [Local Hardware Qualification](qualification.md) for fixture behavior,
+See [Local Hardware Qualification](../policies/qualification.md) for fixture behavior,
 telemetry, and receipt interpretation.
 
 ### ROCm synchronization telemetry and quarantine
@@ -1491,7 +1491,7 @@ This contract proves static ownership and route isolation; it does not by
 itself qualify numerical correctness, latency, memory use, or stability on a
 particular accelerator. Those claims require the platform-specific
 qualification workload and committed evidence described in
-[`NATIVE_SFT_PROFILE.md`](NATIVE_SFT_PROFILE.md).
+[`NATIVE_SFT_PROFILE.md`](../training/NATIVE_SFT_PROFILE.md).
 
 #### Frozen parameters are constants, not optimizer leaves
 
@@ -1603,7 +1603,7 @@ its pinned backend loss route. A changed boundary value, including one that is
 execution-inert for GRPO or OPD today, is therefore exact-resume drift. An SFT
 v3 identity also cannot authorize continuation under v4 because it cannot
 prove the admitted loss implementation. See [Native Training
-Checkpoints](training-checkpoints.md#checkpoint-planning-identity).
+Checkpoints](../training/training-checkpoints.md#checkpoint-planning-identity).
 
 The resolved object has this stable JSON shape:
 
@@ -1823,7 +1823,7 @@ focused real-device suite, a clean full-model semantic pass with prompt
 residency enabled and decode residency disabled, the cancellation/drain probe,
 and a checked soak. A micro-kernel or small-state parity result alone is not a
 release gate. The source-bound failure and rollback receipts belong in
-[Local Hardware Qualification](qualification.md); they do not define a
+[Local Hardware Qualification](../policies/qualification.md); they do not define a
 machine-specific product default.
 
 Prompt recurrent-state residency remains disabled by
@@ -1856,8 +1856,8 @@ must not resume an OPD checkpoint pinned to the previous revision.
 Prompt-logprob selection has no environment variable or runtime tuning field.
 The runtime chooses either `compact_device` or `bounded_host_fallback` from the
 backend implementation, and fixed-cardinality Prometheus counters report the
-resolved route. The [HTTP API Contract](../contracts/kiln-http-api-v1.openapi.json)
-defines scoring behavior and the [Latency Observability](LATENCY_OBSERVABILITY.md)
+resolved route. The [HTTP API Contract](../../contracts/kiln-http-api-v1.openapi.json)
+defines scoring behavior and the [Latency Observability](../serving/LATENCY_OBSERVABILITY.md)
 guide defines its operational evidence.
 
 `GET /v1/config` exposes the complete resolved object at
@@ -2105,8 +2105,8 @@ Kiln exposes complementary startup-input and runtime-derived views:
   GDN registry at `caches.resident_recurrent_state`; `/metrics` publishes the
   same fixed-cardinality ownership, reuse, rejection, concurrency, and eviction
   counters. The complete field and interpretation contracts are in
-  [resumable prefill residency telemetry](qualification.md#resumable-gdn-prefill-residency-telemetry)
-  and [batched recurrent-state cache telemetry](qualification.md#batched-recurrent-state-cache-telemetry).
+  [resumable prefill residency telemetry](../policies/qualification.md#resumable-gdn-prefill-residency-telemetry)
+  and [batched recurrent-state cache telemetry](../policies/qualification.md#batched-recurrent-state-cache-telemetry).
 - Startup logs record serving-profile provenance and configured/backend/final
   decode-width sources.
 

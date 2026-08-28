@@ -1,65 +1,71 @@
 # Docs
 
-Categorized index of the top-level `docs/` documents. Every top-level `.md`
-appears exactly once; `GENERATED` files are produced by the cited script and
-must not be hand-edited. Subdirectories are self-navigating (`audits/` and
-each `archive/` family carry their own README); the owner-managed surfaces
-(`plans/`, `public/`, `site/`) are listed for orientation, not as editable
-sources.
+Categorized index of the `docs/` documents. The 38 topic documents live in
+five theme directories — `guides/`, `training/`, `serving/`, `contracts/`,
+`policies/` — and every document appears exactly once below. `GENERATED`
+files are produced by the cited script and must not be hand-edited.
+Subdirectories are self-navigating (`audits/` and each `archive/` family
+carry their own README); the owner-managed surfaces (`plans/`, `public/`,
+`site/`) are listed for orientation, not as editable sources.
 
-## Quickstart & guides
+## guides/
 
-- `SUBSTRATE_QUICKSTART.md` — `kiln-tensor` developer quickstart: create, dispatch, and contract-test one tensor operation.
-- `EVAL_GUIDE.md` — eval workflow for the base model and LoRA adapters (suites, jobs, judgments) through the in-process serving path.
-- `GRPO_GUIDE.md` — the GRPO generate → score → train → evaluate loop and its operational decisions.
-- `ECHO_GUIDE.md` — when the ECHO environment-prediction term is active in multi-turn GRPO/OPD and what evidence a run records.
-- `OPENENV_GUIDE.md` — OpenEnv interactive-environment → trained-LoRA loop (`kiln openenv inspect/train`).
-- `VIGNETTES.md` — runnable CLI/HTTP reproduction recipes for the grand-plan §15 closing vignettes (Alice/Bob/Carol).
+- `guides/SUBSTRATE_QUICKSTART.md` — `kiln-tensor` developer quickstart: create, dispatch, and contract-test one tensor operation.
+- `guides/EVAL_GUIDE.md` — eval workflow for the base model and LoRA adapters (suites, jobs, judgments) through the in-process serving path.
+- `guides/GRPO_GUIDE.md` — the GRPO generate → score → train → evaluate loop and its operational decisions.
+- `guides/ECHO_GUIDE.md` — when the ECHO environment-prediction term is active in multi-turn GRPO/OPD and what evidence a run records.
+- `guides/OPENENV_GUIDE.md` — OpenEnv interactive-environment → trained-LoRA loop (`kiln openenv inspect/train`).
+- `guides/VIGNETTES.md` — runnable CLI/HTTP reproduction recipes for the grand-plan §15 closing vignettes (Alice/Bob/Carol).
 
-## Training workflows
+## training/
 
-- `NATIVE_SFT_PROFILE.md` — normative contract for the `native_online_lora_v1` training-shape profile (update shape, loss route, admission).
-- `sft-ingestion.md` — SFT row admission contract, invalid-row policy (`fail`/`skip`), and row identity.
-- `sft-tokenization.md` — chat-template rendering, assistant-only label contract, and truncation rules for native SFT.
-- `OPENENV_REPLAY_REFERENCE.md` — OpenEnv artifact bundle, verification/live-replay boundaries, and conformance contract.
-- `OPD_TEACHER_JSONL.md` — off-policy OPD teacher-JSONL corpus workflow and scored top-K requirements.
-- `training-checkpoints.md` — resumable native SFT/GRPO/OPD checkpoints: what is saved, what must match, how to recover.
-- `TRAIN_RECEIPT_SCHEMA.md` — field guide to reading `train_receipt.json` for one SFT/GRPO/OPD attempt.
-- `HF_TRL_INTEROP.md` — export an SFT/GRPO bundle to HF TRL/PEFT and import the verified adapter back in.
-- `LONG_CONTEXT_GRPO_BENCH.md` — run instructions for the pi-compaction-shaped long-context GRPO training benchmark.
+- `training/NATIVE_SFT_PROFILE.md` — normative contract for the `native_online_lora_v1` training-shape profile (update shape, loss route, admission).
+- `training/sft-ingestion.md` — SFT row admission contract, invalid-row policy (`fail`/`skip`), and row identity.
+- `training/sft-tokenization.md` — chat-template rendering, assistant-only label contract, and truncation rules for native SFT.
+- `training/OPENENV_REPLAY_REFERENCE.md` — OpenEnv artifact bundle, verification/live-replay boundaries, and conformance contract.
+- `training/OPD_TEACHER_JSONL.md` — off-policy OPD teacher-JSONL corpus workflow and scored top-K requirements.
+- `training/training-checkpoints.md` — resumable native SFT/GRPO/OPD checkpoints: what is saved, what must match, how to recover.
+- `training/TRAIN_RECEIPT_SCHEMA.md` — field guide to reading `train_receipt.json` for one SFT/GRPO/OPD attempt.
+- `training/HF_TRL_INTEROP.md` — export an SFT/GRPO bundle to HF TRL/PEFT and import the verified adapter back in.
+- `training/LONG_CONTEXT_GRPO_BENCH.md` — run instructions for the pi-compaction-shaped long-context GRPO training benchmark.
 
-## Serving, latency & benchmarks
+## serving/
 
-- `SERVING_PROFILES.md` — immutable process-wide GPU ownership profiles (`stable`/`experimental`/`maintenance`).
-- `SERVING_BENCHMARK_PROTOCOL.md` — protocol for source-bound, wall-clock comparable serving runs and receipts.
-- `LATENCY_OBSERVABILITY.md` — which observation surface answers TTFT, inter-token, and tail-latency questions.
-- `THINKING_BUDGET_CONTRACT.md` — request-level thinking-budget fields, their three distinct states, and what they do not bound.
-- `TRAJECTORY_TURN_THROUGHPUT.md` — RunPod recipe for trajectory-trainer turn throughput sweeps against long-context adapters.
+- `serving/SERVING_PROFILES.md` — immutable process-wide GPU ownership profiles (`stable`/`experimental`/`maintenance`).
+- `serving/SERVING_BENCHMARK_PROTOCOL.md` — protocol for source-bound, wall-clock comparable serving runs and receipts.
+- `serving/LATENCY_OBSERVABILITY.md` — which observation surface answers TTFT, inter-token, and tail-latency questions.
+- `serving/THINKING_BUDGET_CONTRACT.md` — request-level thinking-budget fields, their three distinct states, and what they do not bound.
+- `serving/TRAJECTORY_TURN_THROUGHPUT.md` — RunPod recipe for trajectory-trainer turn throughput sweeps against long-context adapters.
 
-## Configuration, provenance & artifact contracts
+## contracts/
 
-- `CONFIGURATION.md` — canonical typed server-configuration reference: defaults, validation, `KILN_*` overrides, provenance.
-- `ADAPTER_MANIFEST.md` — `adapter_manifest.json`: digests, provenance, and the three restore-time identity questions it answers.
-- `BASE_WEIGHT_PROVENANCE.md` — aggregate content identity of the base-weight shards and how to read it from health.
-- `EXECUTION_PROVENANCE.md` — the self-verifying startup-environment record copied into health, checkpoints, receipts, and manifests.
-- `REPLAY_INTEGRITY.md` — `kiln-replay verify/show`: hashed request-lineage chain checks (deliberately no training replay).
-- `DATASET_SPLITS.md` — train/validation/holdout split policy and the recommended dataset → held-out post-eval workflow.
-- `VLLM_TEACHER_IDENTITY.md` — immutable vLLM teacher launcher and the `TeacherIdentityV1` binding contract for OPD scoring.
-- `RUNTIME_ENVIRONMENT_INVENTORY.md` — GENERATED by `python3 scripts/check_runtime_env_contract.py --write`; do not hand-edit. Catalog of which `crates/` code reads the process environment and why.
-- `backend-capability-report.md` (+ `backend-capability-report.json`) — GENERATED by `scripts/generate_backend_capability_report.py`; do not hand-edit. Source-level inventory of backend interfaces, support predicates, and conformance gates.
-- `backend-latency-result-schema.md` (+ `backend-latency-fixtures.json`) — legacy per-backend latency fixture pipeline, its result schema, and current fixture state.
+- `contracts/CONFIGURATION.md` — canonical typed server-configuration reference: defaults, validation, `KILN_*` overrides, provenance.
+- `contracts/ADAPTER_MANIFEST.md` — `adapter_manifest.json`: digests, provenance, and the three restore-time identity questions it answers.
+- `contracts/BASE_WEIGHT_PROVENANCE.md` — aggregate content identity of the base-weight shards and how to read it from health.
+- `contracts/EXECUTION_PROVENANCE.md` — the self-verifying startup-environment record copied into health, checkpoints, receipts, and manifests.
+- `contracts/REPLAY_INTEGRITY.md` — `kiln-replay verify/show`: hashed request-lineage chain checks (deliberately no training replay).
+- `contracts/DATASET_SPLITS.md` — train/validation/holdout split policy and the recommended dataset → held-out post-eval workflow.
+- `contracts/VLLM_TEACHER_IDENTITY.md` — immutable vLLM teacher launcher and the `TeacherIdentityV1` binding contract for OPD scoring.
+- `contracts/RUNTIME_ENVIRONMENT_INVENTORY.md` — GENERATED by `python3 scripts/check_runtime_env_contract.py --write`; do not hand-edit. Catalog of which `crates/` code reads the process environment and why.
+- `contracts/backend-capability-report.md` (+ `contracts/backend-capability-report.json`) — GENERATED by `scripts/generate_backend_capability_report.py`; do not hand-edit. Source-level inventory of backend interfaces, support predicates, and conformance gates.
+- `contracts/backend-latency-result-schema.md` (+ `contracts/backend-latency-fixtures.json`) — legacy per-backend latency fixture pipeline, its result schema, and current fixture state.
 
-## Verification, qualification & policy
+## policies/
 
-- `VERIFICATION_POLICY.md` — which evidence classes can carry which claims, and the prohibited-evidence list.
-- `VERIFICATION_TEST_INVENTORY.md` — GENERATED by `python3 scripts/check_source_parsing_tests.py --write`; do not hand-edit. Zero-debt gate for source-parsing tests.
-- `qualification.md` — local hardware qualification workflows: workloads, receipts, and `compare_receipts.py` comparisons.
-- `ci-policy.md` — what GitHub CI can and cannot prove, and the evidence bar for accelerator and release claims.
-- `ARTIFACT_RETENTION.md` — where evidence belongs: tracked Git vs ignored local storage vs external stores.
-- `release-version-policy.md` — server/desktop release lines, machine-readable version owners, and current-link rules.
+- `policies/VERIFICATION_POLICY.md` — which evidence classes can carry which claims, and the prohibited-evidence list.
+- `policies/VERIFICATION_TEST_INVENTORY.md` — GENERATED by `python3 scripts/check_source_parsing_tests.py --write`; do not hand-edit. Zero-debt gate for source-parsing tests.
+- `policies/qualification.md` — local hardware qualification workflows: workloads, receipts, and `compare_receipts.py` comparisons.
+- `policies/ci-policy.md` — what GitHub CI can and cannot prove, and the evidence bar for accelerator and release claims.
+- `policies/ARTIFACT_RETENTION.md` — where evidence belongs: tracked Git vs ignored local storage vs external stores.
+- `policies/release-version-policy.md` — server/desktop release lines, machine-readable version owners, and current-link rules.
 
 ## Subdirectories
 
+- `guides/` — quickstart & workflow guides (see above).
+- `training/` — SFT/GRPO/OPD training-workflow contracts (see above).
+- `serving/` — serving, latency & benchmark protocols (see above).
+- `contracts/` — configuration, provenance & artifact contracts, incl. the GENERATED backend reports (see above).
+- `policies/` — verification, qualification & release policy (see above).
 - `archive/` — frozen investigation families (phase-c, profiling, metal, rocm, candle-removal, …); each family has its own README.
 - `audits/` — frozen audit receipts plus local-only raw evidence; see `audits/README.md`.
 - `desktop/` — desktop-app screenshots plus `signing.md` (macOS code signing and notarization).

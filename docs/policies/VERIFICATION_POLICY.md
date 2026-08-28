@@ -55,7 +55,7 @@ languages contain no similar test.
 
 | Invariant family | Authoritative evidence |
 | --- | --- |
-| Backend capability and dispatch shape | Rust trait and type checking; typed `Backend*` descriptors; `docs/backend-capability-report.json`; the report generator’s self-test and check mode; backend request and parity tests |
+| Backend capability and dispatch shape | Rust trait and type checking; typed `Backend*` descriptors; `docs/contracts/backend-capability-report.json`; the report generator’s self-test and check mode; backend request and parity tests |
 | Tape scope and exact gradients | `crates/kiln-model/tests/tape_forward_parity.rs`; `crates/kiln-model/tests/vk_tape_record_proof.rs`; backend SFT-step proofs; exact gradient-set validation in trainer tests |
 | Frozen GDN and RMSNorm weights | Compile-time Rust/FFI signatures; `crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs`; activation-only GDN tape tests |
 | Replay and graph lifetime | `kiln_graph::ReplayPlan` state tests; `crates/kiln-graph/tests/capture_lifetime.rs`; backend eager/replay parity; source-bound graph correctness, resilience, and failure-containment qualification |

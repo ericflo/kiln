@@ -133,7 +133,7 @@ Add --adapter-smoke-test to record a small base-vs-adapter canary check in train
 
 Use `kiln train hf export-sft` or `kiln train hf export-grpo` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. Export source paths are read by the server process, not uploaded by the CLI. After external training, use `kiln train hf import-peft` to verify the completed local bundle and stream only its model-identity and PEFT result envelope back to the server.
 
-Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
+Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/guides/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
@@ -157,7 +157,7 @@ Use --adapter-smoke-test to compare base vs trained adapter logits and short gre
 
 Use --checkpoint-interval N to emit exact resumable checkpoints every N optimizer groups. Resume with the same file and configuration plus --resume-checkpoint BASENAME.
 
-Open http://127.0.0.1:8420/ui/ for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
+Open http://127.0.0.1:8420/ui/ for guided submission and training status. See docs/guides/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_OPD_OVERVIEW: &str = r#"Train with on-policy or off-policy distillation from a registered teacher.

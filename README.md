@@ -15,14 +15,14 @@
   <a href="https://ericflo.github.io/kiln/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
   <a href="https://ericflo.github.io/kiln/cli.html">CLI Guide</a> &middot;
-  <a href="docs/OPENENV_GUIDE.md">OpenEnv Guide</a> &middot;
+  <a href="docs/guides/OPENENV_GUIDE.md">OpenEnv Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/grpo.html">GRPO Guide</a> &middot;
-  <a href="docs/EVAL_GUIDE.md">Eval Guide</a> &middot;
+  <a href="docs/guides/EVAL_GUIDE.md">Eval Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/api.html">API Reference</a> &middot;
   <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
   <a href="BENCHMARKS.md">Benchmarks</a> &middot;
-  <a href="docs/CONFIGURATION.md">Configuration</a> &middot;
+  <a href="docs/contracts/CONFIGURATION.md">Configuration</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
   <a href="CONTRIBUTING.md">Contributing</a> &middot;
   <a href="LICENSE">License</a>
@@ -30,7 +30,7 @@
 
 ---
 
-Kiln serves a language model, trains it, and evaluates it on one GPU from one Rust binary. The default `stable` profile is the complete product: inference, training, evaluation, adapter transitions, and correctness-qualified acceleration work together without profile tuning. Use `maintenance` only when inference must be drained, and `experimental` only to qualify a quarantined backend route. See [Serving Profiles](docs/SERVING_PROFILES.md).
+Kiln serves a language model, trains it, and evaluates it on one GPU from one Rust binary. The default `stable` profile is the complete product: inference, training, evaluation, adapter transitions, and correctness-qualified acceleration work together without profile tuning. Use `maintenance` only when inference must be drained, and `experimental` only to qualify a quarantined backend route. See [Serving Profiles](docs/serving/SERVING_PROFILES.md).
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
@@ -106,7 +106,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling and source-revision-aware caching, or merge them server-side via weighted_average / TIES / concatenation.
 - **Embedded web dashboard** at `/ui/` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
-- **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/EVAL_GUIDE.md § Mine your own request log](docs/EVAL_GUIDE.md#mine-your-own-request-log).
+- **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/guides/EVAL_GUIDE.md § Mine your own request log](docs/guides/EVAL_GUIDE.md#mine-your-own-request-log).
 - **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
 
@@ -302,7 +302,7 @@ protocol drift visible without hard-coded Kiln environment lists. Discovered
 string actions, exact integer rewards, deterministic resets, and frozen
 terminal observations are exercised over real WebSockets alongside
 representative multi-step episodes and collect/train/verify/replay end to end.
-See the [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
+See the [OpenEnv Training Guide](docs/guides/OPENENV_GUIDE.md)
 for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
 and troubleshooting.
 
@@ -345,7 +345,7 @@ The compact example above intentionally uses the default
 use `kiln rollout-generate`: it requests exact token/action provenance from the
 real batching path, validates the seed, adapter, prompt, scored content, and
 usage before scoring, and atomically writes JSONL for
-`behavior_policy="recorded"`. See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for
+`behavior_policy="recorded"`. See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for
 the recorded-policy workflow and worked verifiable-reward examples (math,
 JSON, code).
 
@@ -381,7 +381,7 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 })
 ```
 
-See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
+See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
 
 ### Off-policy OPD teacher data
 
@@ -395,7 +395,7 @@ teacher's `off_policy_manifest`; Kiln rejects a missing or different identity.
 ECHO env-CE can be composed with OPD and receipts count action and environment
 tokens separately.
 
-See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
+See [docs/training/OPD_TEACHER_JSONL.md](docs/training/OPD_TEACHER_JSONL.md) for the JSONL
 schema and the `reverse_kl` vs `cross_entropy` objective contract.
 
 OPD publishes immutable exact `.kiln-checkpoint` bundles every 25 committed
@@ -406,7 +406,7 @@ prompt/dataset identity, and authoritative teacher content revision. Use
 `kiln train status --job-id JOB_ID` to get the basename, then resubmit the
 identical request with `config.resume_checkpoint` or
 `kiln train opd --resume-checkpoint BASENAME`. See
-[Native Training Checkpoints](docs/training-checkpoints.md#opd).
+[Native Training Checkpoints](docs/training/training-checkpoints.md#opd).
 
 ### Remote vLLM teachers
 
@@ -450,7 +450,7 @@ secret environment-variable name. `GET /v1/teachers` reports `status`,
 On first startup after upgrading, Kiln removes legacy `api_key_env` fields from
 `teachers.json`; those entries stay unusable until they are explicitly deleted
 and re-registered with a configured credential handle and fresh identity.
-See [docs/VLLM_TEACHER_IDENTITY.md](docs/VLLM_TEACHER_IDENTITY.md).
+See [docs/contracts/VLLM_TEACHER_IDENTITY.md](docs/contracts/VLLM_TEACHER_IDENTITY.md).
 
 ## The Eval Loop
 
@@ -484,7 +484,7 @@ kiln-eval replay --job eval_123 --json
 
 The judgment flywheel runs entirely on your machine — no frontier LLM, no API keys, no telemetry leaving the box. Click two replies in the playground, save them as an A/B preference, compile your picks into SFT data, train a small judge LoRA on them, then use that LoRA as the `judge_adapter` in any `LlmJudge` scorer. The judge gets better the more you use it; bad judgments are removable from the dataset and a retrain wipes their influence.
 
-See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, strict replay contract, and judge-LoRA workflow.
+See [docs/guides/EVAL_GUIDE.md](docs/guides/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, strict replay contract, and judge-LoRA workflow.
 
 ## Quick Start
 
@@ -614,11 +614,11 @@ Native SFT uses a source-pinned Qwen/Hugging Face token-and-label oracle. It
 renders with `add_generation_prompt=false` and supervises complete assistant
 turn bodies plus their terminator while masking assistant role headers and all
 system, user, and tool-response turns. See
-[SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md) for the
+[SFT Tokenization and Assistant-Only Loss](docs/training/sft-tokenization.md) for the
 exact assistant mask and local reproduction command.
 
 Native SFT is deliberately the fixed
-[`native_online_lora_v1` microtrainer profile](docs/NATIVE_SFT_PROFILE.md): one
+[`native_online_lora_v1` microtrainer profile](docs/training/NATIVE_SFT_PROFILE.md): one
 conversation and one optimizer update at a time, constant learning rate, no
 gradient accumulation, warmup, decay, or clipping. Unsupported general-trainer
 fields fail closed.
@@ -640,7 +640,7 @@ weight identity, no Marlin-packed projection, and authoritative tape/loss
 routes. Invalid kind, rank, or hyperparameters return
 `training_invalid_request`; unsupported base dtype, backend identity, or
 complete training substrate return `training_backend_unsupported`. See the
-[native profile matrix](docs/NATIVE_SFT_PROFILE.md#precision-and-optimizer-state)
+[native profile matrix](docs/training/NATIVE_SFT_PROFILE.md#precision-and-optimizer-state)
 and inspect the running contract with:
 
 ```bash
@@ -718,7 +718,7 @@ strong ETag, import digest, content revision, installed size, and file count to
 match values derived locally. It never modifies or removes the completed
 bundle. The lower-level API is `POST /v1/train/hf/peft/imports/{name}`. The
 versioned identity, envelope, receipt, and failure model is documented in the
-[HF/TRL Interoperability Contract](docs/HF_TRL_INTEROP.md).
+[HF/TRL Interoperability Contract](docs/training/HF_TRL_INTEROP.md).
 
 SFT row admission is also identical across inline examples, server-local
 JSONL, named datasets, corrections, recipes, and direct Rust calls. The default
@@ -726,7 +726,7 @@ JSONL, named datasets, corrections, recipes, and direct Rust calls. The default
 `"skip"` records ordered stable hashes for every kept and rejected row in
 `train_receipt.json`. Local JSONL is revalidated before training so a queued
 file cannot change unnoticed. See
-[SFT Ingestion, Invalid Rows, and Row Identity](docs/sft-ingestion.md).
+[SFT Ingestion, Invalid Rows, and Row Identity](docs/training/sft-ingestion.md).
 
 **Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
 
@@ -911,7 +911,7 @@ per-token events.
 The request-local ITL percentiles, bounded stall attribution, exact timing
 boundaries, nullable phase coverage, request-owned batching-engine GPU-lock and
 synchronization timings, rolling endpoint, and Prometheus contract are
-documented in [`docs/LATENCY_OBSERVABILITY.md`](docs/LATENCY_OBSERVABILITY.md).
+documented in [`docs/serving/LATENCY_OBSERVABILITY.md`](docs/serving/LATENCY_OBSERVABILITY.md).
 
 ### Prompt logprobs
 
@@ -1019,7 +1019,7 @@ relocation-independent aggregate. `/health` exposes its bounded digest/count/
 byte summary; gated `/v1/debug/model-state` exposes the full list. Exact
 checkpoints, training receipts, adapter manifests, and eval results persist the
 same identity without re-reading weights during inference. See
-[Base-Weight Provenance](docs/BASE_WEIGHT_PROVENANCE.md) for the schema,
+[Base-Weight Provenance](docs/contracts/BASE_WEIGHT_PROVENANCE.md) for the schema,
 aggregate algorithm, legacy behavior, and exact-resume rules.
 
 After backend initialization, Kiln also binds the resident runner to a strict
@@ -1028,7 +1028,7 @@ executable and optional source identity, tokenizer/template, precision, kernel
 contract, and effective configuration/environment digests. Health exposes a
 bounded summary and requires a valid record for real-backend readiness; the
 gated debug endpoint exposes the complete record. See
-[Execution Provenance](docs/EXECUTION_PROVENANCE.md) for the schema, evidence
+[Execution Provenance](docs/contracts/EXECUTION_PROVENANCE.md) for the schema, evidence
 sources, secret-redaction policy, and integrity scope.
 
 Exact native checkpoints require that complete record and compare its canonical
@@ -1219,14 +1219,14 @@ before GPU work. Training checkpoint planning identity v3 includes the resolved
 SFT checkpoint-boundary policy. SFT uses that policy for sparse boundary replay;
 GRPO and OPD do not execute that SFT route, but retain the shared planning
 identity, so policy or schema drift rejects exact resume instead of silently
-changing the runtime contract. See [Native Training Checkpoints](docs/training-checkpoints.md)
+changing the runtime contract. See [Native Training Checkpoints](docs/training/training-checkpoints.md)
 for API, CLI, browser, cancellation, teacher-identity, and resume semantics.
 
 The historically named `replay.jsonl`, `lineage.json`, and `kiln-replay`
 surfaces are narrower: `kiln-replay verify` recomputes request-lineage hashes
 only. It does not load a model, retrain, compare tensors or outputs, or prove
 reproducibility. Use `.kiln-checkpoint` for exact continuation and see
-[Request-Lineage Integrity](docs/REPLAY_INTEGRITY.md) for the precise boundary.
+[Request-Lineage Integrity](docs/contracts/REPLAY_INTEGRITY.md) for the precise boundary.
 
 ## Architecture
 
@@ -1278,7 +1278,7 @@ crates/
 
 ## Configuration
 
-Kiln uses a typed TOML config file. Environment overrides are resolved during startup. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See the complete [Configuration Reference](docs/CONFIGURATION.md) for every field, default, validation rule, and currently supported override, and use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. `kiln config --file kiln.toml --json` emits every post-precedence typed startup leaf with source, environment spellings, redaction, hash, and restart semantics; a running server publishes its immutable startup snapshot in `GET /v1/config` under `effective_configuration`. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
+Kiln uses a typed TOML config file. Environment overrides are resolved during startup. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See the complete [Configuration Reference](docs/contracts/CONFIGURATION.md) for every field, default, validation rule, and currently supported override, and use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. `kiln config --file kiln.toml --json` emits every post-precedence typed startup leaf with source, environment spellings, redaction, hash, and restart semantics; a running server publishes its immutable startup snapshot in `GET /v1/config` under `effective_configuration`. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/serving/SERVING_PROFILES.md).
 
 | Setting | Env Var | Default | Description |
 |---|---|---|---|
@@ -1509,7 +1509,7 @@ instead of long `reasoning_content`. Operators can also set
 `KILN_DEFAULT_NO_THINK` is ignored.
 
 The normative wire schema and executable cross-runtime vectors are in the
-[Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
+[Thinking Budget Contract](docs/serving/THINKING_BUDGET_CONTRACT.md).
 
 Chat and batch requests also accept the vLLM-compatible `ignore_eos` boolean.
 It defaults to `false`. When `true`, tokenizer EOS ids are treated as ordinary
@@ -1642,7 +1642,7 @@ model config hash, the effective SFT training-template hash, the exact
 base-weight shard manifest, kiln commit, and training data hash. Use
 `kiln adapters restore <path>/adapter_manifest.json --adapter-dir <registry>`
 to copy an adapter into a registry and verify hashes after copy. See
-[`docs/ADAPTER_MANIFEST.md`](docs/ADAPTER_MANIFEST.md) for the schema.
+[`docs/contracts/ADAPTER_MANIFEST.md`](docs/contracts/ADAPTER_MANIFEST.md) for the schema.
 
 Full v0.1 threat model and per-finding analysis: [`docs/audits/security-audit-v0.1.md`](docs/audits/security-audit-v0.1.md).
 

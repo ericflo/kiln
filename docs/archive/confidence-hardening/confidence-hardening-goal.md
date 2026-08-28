@@ -6,7 +6,7 @@
 > `backend_build=all` run `f19d2591ab8e` (CI 30498143581); closure commit
 > `fb723bd61` "Complete confidence hardening goal" (2026-07-29) set the
 > status to Complete. The durable qualification evidence lives in
-> `docs/qualification.md` + `bench-results/`. See [`README.md`](README.md).
+> `docs/policies/qualification.md` + `bench-results/`. See [`README.md`](README.md).
 
 **Status:** Complete.
 

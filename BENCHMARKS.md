@@ -131,7 +131,7 @@ for catastrophic failures.
 Driver versions 2 through 15 remain accepted only so historical checked-in
 receipts continue to validate. They cannot produce new receipts and do not
 satisfy the current acceptance protocol. The complete field and lifecycle
-reference is in [Serving Benchmark Protocol](docs/SERVING_BENCHMARK_PROTOCOL.md).
+reference is in [Serving Benchmark Protocol](docs/serving/SERVING_BENCHMARK_PROTOCOL.md).
 
 ### Fixed workload profiles
 
@@ -271,7 +271,7 @@ must name the immutable launcher/runtime manifest
 that fingerprints the installed vLLM, Torch, Transformers, tokenizer, launch
 configuration, and accelerator; a version string alone is not sufficient.
 Generate it with the exact model, limits, and vLLM arguments used by the real
-launch (see [Immutable vLLM teachers](docs/VLLM_TEACHER_IDENTITY.md)):
+launch (see [Immutable vLLM teachers](docs/contracts/VLLM_TEACHER_IDENTITY.md)):
 
 ```bash
 python3 scripts/vllm_teacher.py \

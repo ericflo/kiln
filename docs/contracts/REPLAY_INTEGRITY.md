@@ -160,6 +160,6 @@ Use the surrounding evidence according to the claim:
 | “These are the exact base-weight bytes.” | [Base-weight identity](BASE_WEIGHT_PROVENANCE.md) |
 | “This process declared the same execution envelope.” | [Execution identity](EXECUTION_PROVENANCE.md) |
 | “These are the adapter files and hashes that were published.” | [Adapter manifest](ADAPTER_MANIFEST.md) |
-| “Continue from this exact training boundary.” | [Native training checkpoints](training-checkpoints.md) |
+| “Continue from this exact training boundary.” | [Native training checkpoints](../training/training-checkpoints.md) |
 
 No single one of these artifacts proves full end-to-end reproduction.

@@ -6,7 +6,7 @@ better outcomes; ECHO teaches it to predict the environment observations that
 followed those actions.
 
 The generated [Training and Agent Control Plane API
-Schema](../contracts/kiln-control-plane-v1.schema.json) owns request fields,
+Schema](../../contracts/kiln-control-plane-v1.schema.json) owns request fields,
 defaults, aliases, and constraints. This guide explains when the term is active,
 how trajectories identify its tokens, and what evidence a completed run
 records.
@@ -311,5 +311,5 @@ For an operational check:
 
 - [GRPO Training Guide](GRPO_GUIDE.md)
 - [Evaluation Guide](EVAL_GUIDE.md)
-- [ECHO paper archive](papers/echo/echo_paper.md)
-- [ECHO integration plan (archived)](archive/echo/echo-integration-plan.md)
+- [ECHO paper archive](../papers/echo/echo_paper.md)
+- [ECHO integration plan (archived)](../archive/echo/echo-integration-plan.md)

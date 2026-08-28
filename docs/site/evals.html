@@ -289,7 +289,7 @@
         <a href="api.html#evals" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
           Inspect eval endpoints &rarr;
         </a>
-        <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/guides/EVAL_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
           Read the complete Eval guide &rarr;
         </a>
         <a href="quickstart.html#sft-corrections" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
@@ -443,7 +443,7 @@
           and copy the job and per-completion seeds.
         </p>
         <p class="text-sm mb-5" style="color: var(--fg-mute);">
-          Admission also snapshots the resident <code>kiln.base-weight-shards.v1</code> manifest and startup-owned <code>kiln.execution-provenance.v1</code> record. Job detail and raw JSON retain every shard plus the complete backend/device, runtime, executable/source, model/tokenizer/template, precision, kernel, and effective-configuration envelope. The dashboard and <code>kiln-eval</code> show compact exact-copy summaries; downloaded outcome JSONL carries both complete records on every standalone row, and terminal archives validate them again on restart. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EXECUTION_PROVENANCE.md">execution provenance</a> contracts.
+          Admission also snapshots the resident <code>kiln.base-weight-shards.v1</code> manifest and startup-owned <code>kiln.execution-provenance.v1</code> record. Job detail and raw JSON retain every shard plus the complete backend/device, runtime, executable/source, model/tokenizer/template, precision, kernel, and effective-configuration envelope. The dashboard and <code>kiln-eval</code> show compact exact-copy summaries; downloaded outcome JSONL carries both complete records on every standalone row, and terminal archives validate them again on restart. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/contracts/BASE_WEIGHT_PROVENANCE.md">base-weight</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/contracts/EXECUTION_PROVENANCE.md">execution provenance</a> contracts.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a registered suite against an adapter</h3>
@@ -500,7 +500,7 @@ curl -fsS -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
           Admission refuses legacy or incomplete sources, changed execution or base-weight digests, and changed candidate or judge adapter bytes before the replay enters the queue. The executor rechecks the loaded candidate before decoding and each loaded judge before scoring. Terminal <code>replay_verdict.status</code> is <code>matched</code>, <code>mismatch</code>, or <code>error</code>; the CLI waits for a terminal state and exits nonzero unless every bound identity and raw continuation matches byte-for-byte. The Evals dashboard offers the same operation and copyable hashes for the selected run.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          A match proves reproduction for that declared run and environment, not driver correctness or cross-backend determinism. A mismatch is retained evidence and blocks the claim; nondeterministic backend operations may still be the cause. New terminal archives require and validate replay records, while legacy archives remain readable but cannot be strict-replayed. The complete identity, race-boundary, archive, and verdict contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md#strict-byte-replay">EVAL_GUIDE.md</a>.
+          A match proves reproduction for that declared run and environment, not driver correctness or cross-backend determinism. A mismatch is retained evidence and blocks the claim; nondeterministic backend operations may still be the cause. New terminal archives require and validate replay records, while legacy archives remain readable but cannot be strict-replayed. The complete identity, race-boundary, archive, and verdict contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/guides/EVAL_GUIDE.md#strict-byte-replay">EVAL_GUIDE.md</a>.
         </p>
       </article>
 

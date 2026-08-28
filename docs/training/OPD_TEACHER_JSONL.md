@@ -11,10 +11,10 @@ compatibility, but the server rejects it because cross-entropy is not wired
 into the production OPD loss root.
 
 The generated [Training and Agent Control Plane API
-Schema](../contracts/kiln-control-plane-v1.schema.json) is the normative
+Schema](../../contracts/kiln-control-plane-v1.schema.json) is the normative
 contract for `OpdRequest`, `OpdConfig`, job responses, and post-eval gates.
 The generated [Artifact Lifecycle API
-Schema](../contracts/kiln-artifacts-v1.schema.json) defines teacher
+Schema](../../contracts/kiln-artifacts-v1.schema.json) defines teacher
 registration and identity. This page covers only the offline corpus workflow.
 
 ## Prepare and submit a corpus

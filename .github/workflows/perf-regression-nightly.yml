@@ -72,7 +72,7 @@ jobs:
           python3 scripts/lock_backend_latency_thresholds.py --self-test
           python3 scripts/check_backend_latency_fixtures.py --self-test
           python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test
-          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered
+          python3 scripts/check_backend_latency_fixtures.py docs/contracts/backend-latency-fixtures.json --require-covered
 
       - name: Verify gate accepts a within-tolerance run (no regression)
         run: |
@@ -268,7 +268,7 @@ jobs:
         # The native/generic rows are kept as a cross-check: their baselines
         # should land within a few percent of each other. (The former
         # KILN_CUDA_NATIVE_TRAINING selector is retired — no code reads it;
-        # see docs/CONFIGURATION.md "legacy CUDA-native selector".)
+        # see docs/contracts/CONFIGURATION.md "legacy CUDA-native selector".)
         run: |
           rm -f /tmp/kiln_bench_stdout.txt
           # Skip inference/latency benches — perf gate is on training step time.
@@ -330,12 +330,12 @@ jobs:
       - name: Run selected backend latency fixture
         run: |
           python3 scripts/run_backend_latency_fixture.py \
-            docs/backend-latency-fixtures.json \
+            docs/contracts/backend-latency-fixtures.json \
             "${{ inputs.latency_fixture_id }}"
 
       - name: Validate covered latency fixture manifest
         run: |
-          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered
+          python3 scripts/check_backend_latency_fixtures.py docs/contracts/backend-latency-fixtures.json --require-covered
 
       - name: Upload backend latency fixture artifacts
         if: ${{ always() }}

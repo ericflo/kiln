@@ -1,5 +1,5 @@
 # Kiln configuration — all values shown are defaults.
-# See docs/CONFIGURATION.md for the complete field, validation, precedence,
+# See docs/contracts/CONFIGURATION.md for the complete field, validation, precedence,
 # source-attribution, and environment-override reference. Only mechanically
 # derived canonical names listed there are public field overrides.
 #
@@ -24,7 +24,7 @@ serving_profile = "stable"              # Immutable process-lifetime GPU ownersh
                                         # experimental: dynamic development behavior;
                                         # maintenance: inference disabled, drained exclusive work.
                                         # KILN_SERVER_SERVING_PROFILE overrides this strictly. See
-                                        # docs/SERVING_PROFILES.md for the restart workflow.
+                                        # docs/serving/SERVING_PROFILES.md for the restart workflow.
 deterministic = false                    # Serving repeatability envelope. True freezes the process-
                                         # wide determinism selector and forces one concurrent decode
                                         # row, even when max_decode_batch is wider. It does not make

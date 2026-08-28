@@ -40,7 +40,7 @@ A failed or incomplete run does not receive a completed-adapter manifest.
 ## Normative schema
 
 The generated [Artifact Lifecycle API
-Schema](../contracts/kiln-artifacts-v1.schema.json) is the field-level
+Schema](../../contracts/kiln-artifacts-v1.schema.json) is the field-level
 authority for `AdapterManifest`, adapter-list responses, and adapter mutation
 requests. This guide explains lifecycle and interpretation.
 
@@ -203,5 +203,5 @@ inputs. It cannot replace the audit.
 See [base-weight provenance](BASE_WEIGHT_PROVENANCE.md) for content
 equivalence and exact-resume boundaries, [execution
 provenance](EXECUTION_PROVENANCE.md) for the runtime envelope, and [training
-receipt schema](TRAIN_RECEIPT_SCHEMA.md) for the source record from which a
+receipt schema](../training/TRAIN_RECEIPT_SCHEMA.md) for the source record from which a
 native manifest is built.

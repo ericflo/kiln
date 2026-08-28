@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const repoRoot = resolve(import.meta.dirname, '..');
 const schemaPath = 'contracts/thinking-budget-v1.schema.json';
 const vectorsPath = 'contracts/thinking-budget-v1.conformance.json';
-const referencePath = 'docs/THINKING_BUDGET_CONTRACT.md';
+const referencePath = 'docs/serving/THINKING_BUDGET_CONTRACT.md';
 const generatedStart = '<!-- thinking-budget-contract-v1:generated:start -->';
 const generatedEnd = '<!-- thinking-budget-contract-v1:generated:end -->';
 
@@ -85,9 +85,9 @@ if (actualReference !== generatedReference) {
 }
 
 const requiredLinks = new Map([
-  ['README.md', 'docs/THINKING_BUDGET_CONTRACT.md'],
-  ['QUICKSTART.md', 'docs/THINKING_BUDGET_CONTRACT.md'],
-  ['docs/EVAL_GUIDE.md', 'THINKING_BUDGET_CONTRACT.md'],
+  ['README.md', 'docs/serving/THINKING_BUDGET_CONTRACT.md'],
+  ['QUICKSTART.md', 'docs/serving/THINKING_BUDGET_CONTRACT.md'],
+  ['docs/guides/EVAL_GUIDE.md', 'THINKING_BUDGET_CONTRACT.md'],
   ['docs/site/api.html', 'docs/thinking-budgets/'],
   ['docs/site/quickstart.html', 'docs/thinking-budgets/'],
 ]);

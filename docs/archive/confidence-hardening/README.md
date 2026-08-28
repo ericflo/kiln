@@ -11,4 +11,4 @@ source-bound receipts retained under `qualification/receipts/` and
 `benchmarks/receipts/`, and the final hosted `backend_build=all` CI run
 (30498143581 from source `f19d2591ab8e`) closed the hosted-matrix item.
 Archived 2026-08-26 with zero in-tree references to update. The permanent
-qualification narrative it feeds remains live in `docs/qualification.md`.
+qualification narrative it feeds remains live in `docs/policies/qualification.md`.

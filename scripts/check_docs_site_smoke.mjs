@@ -1395,13 +1395,13 @@ function validateRuntimeEnvironmentBoundaryDocumentationSourceContract() {
     );
   }
 
-  const configurationSource = readFileSync(resolve(repoRoot, 'docs/CONFIGURATION.md'), 'utf8');
+  const configurationSource = readFileSync(resolve(repoRoot, 'docs/contracts/CONFIGURATION.md'), 'utf8');
   const missingNames = missingNormalizedTerms(
     configurationSource,
     expectedDeviceRemapEnvironmentNames,
   );
   if (missingNames.length > 0) {
-    fail(`docs/CONFIGURATION.md: incomplete driver-remap safety reference: ${missingNames.join(', ')}`);
+    fail(`docs/contracts/CONFIGURATION.md: incomplete driver-remap safety reference: ${missingNames.join(', ')}`);
   }
 }
 
@@ -1439,12 +1439,12 @@ function validateSftLossRouteDocumentationSourceContract() {
     }
   }
 
-  const configurationSource = readFileSync(resolve(repoRoot, 'docs/CONFIGURATION.md'), 'utf8');
+  const configurationSource = readFileSync(resolve(repoRoot, 'docs/contracts/CONFIGURATION.md'), 'utf8');
   const retiredOverrideTableRows = configurationSource
     .split('\n')
     .filter((line) => line.trimStart().startsWith('|') && line.includes('KILN_USE_FLCE'));
   if (retiredOverrideTableRows.length > 0) {
-    fail('docs/CONFIGURATION.md: retired KILN_USE_FLCE must not appear as a supported or deprecated configuration-table entry');
+    fail('docs/contracts/CONFIGURATION.md: retired KILN_USE_FLCE must not appear as a supported or deprecated configuration-table entry');
   }
 
   const metalPolicySource = readFileSync(
@@ -1530,7 +1530,7 @@ function validateSftLossRouteDocumentationSourceContract() {
     ...retiredMetalEnvironmentNames,
   ]);
   if (missingMetalConfigurationTerms.length > 0) {
-    fail(`docs/CONFIGURATION.md: incomplete Metal policy reference: ${missingMetalConfigurationTerms.join(', ')}`);
+    fail(`docs/contracts/CONFIGURATION.md: incomplete Metal policy reference: ${missingMetalConfigurationTerms.join(', ')}`);
   }
 
   const staticArchitecturePath = resolve(repoRoot, 'docs/site/architecture.html');
@@ -1982,7 +1982,7 @@ function validateReadmeColdReaderCoverage() {
 
   const requiredTermGroups = [
     ['what-it-is paragraph', ['single-GPU inference server', 'live LoRA training', 'one GPU', 'one Rust binary']],
-    ['serving-profile contract', ['stable profile', 'experimental', 'maintenance', 'Serving Profiles', 'docs/SERVING_PROFILES.md']],
+    ['serving-profile contract', ['stable profile', 'experimental', 'maintenance', 'Serving Profiles', 'docs/serving/SERVING_PROFILES.md']],
     ['install/run paths', ['Desktop App', 'server binary', 'Docker', 'source CLI', 'kiln serve']],
     ['GRPO loop', ['GRPO Loop', 'killer feature', 'generate completions', 'score them', 'reward function']],
     ['embedded dashboard', ['/ui', 'dashboard']],
@@ -2765,7 +2765,7 @@ function validateCliHelpOnboardingCopy() {
       'reward scores',
       'http://127.0.0.1:8420/ui',
       'guided submission and status',
-      'docs/GRPO_GUIDE.md',
+      'docs/guides/GRPO_GUIDE.md',
       'reward-loop examples',
     ]],
     ['TRAIN_SFT_OVERVIEW', [
@@ -2783,7 +2783,7 @@ function validateCliHelpOnboardingCopy() {
       'one group per line',
       'http://127.0.0.1:8420/ui',
       'training status',
-      'docs/GRPO_GUIDE.md',
+      'docs/guides/GRPO_GUIDE.md',
       'reward-loop examples',
     ]],
     ['TRAIN_EXAMPLES', [
@@ -3688,8 +3688,8 @@ function validateGeneratedDocsArtifacts() {
     '[Evals Guide](https://ericflo.github.io/kiln/evals.html)',
     '## Core documentation',
     'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/public/OVERVIEW.md',
-    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/GRPO_GUIDE.md',
-    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/EVAL_GUIDE.md',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/guides/GRPO_GUIDE.md',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/guides/EVAL_GUIDE.md',
     '## Machine-readable contracts',
     'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/contracts/kiln-http-api-v1.openapi.json',
     '## Optional',

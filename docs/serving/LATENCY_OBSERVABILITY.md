@@ -304,5 +304,5 @@ machine-specific dispatch policy.
    comparison arm, compare like-for-like metrics, and retain failed evidence.
 
 The machine-readable field authorities are the
-[inference schema](../contracts/kiln-inference-v1.schema.json) and
-[observability schema](../contracts/kiln-observability-v1.schema.json).
+[inference schema](../../contracts/kiln-inference-v1.schema.json) and
+[observability schema](../../contracts/kiln-observability-v1.schema.json).

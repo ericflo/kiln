@@ -8,7 +8,7 @@
   "git_commit": "e1416ba901c2852265605b202d2ee052f319d12a",
   "git_tracked_dirty": false,
   "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
-  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest": "docs/contracts/backend-latency-fixtures.json",
   "manifest_schema_version": 1,
   "metrics": {
     "decode_qkv_m1_2560x4096_ms": 0.079427,

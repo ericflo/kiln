@@ -8,7 +8,7 @@ It is exhaustive for the scanner's direct-read APIs; it is not a list of setting
 that operators should copy into a shell.
 
 The machine-readable source of truth is
-[`contracts/runtime-env-direct-reads-v1.json`](../contracts/runtime-env-direct-reads-v1.json);
+[`contracts/runtime-env-direct-reads-v1.json`](../../contracts/runtime-env-direct-reads-v1.json);
 `python3 scripts/check_runtime_env_contract.py` rejects any source, classification,
 or generated-report drift.
 

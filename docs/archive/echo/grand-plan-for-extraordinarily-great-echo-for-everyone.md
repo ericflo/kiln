@@ -5,7 +5,7 @@
 > and the Phase 4 OPD composition was restored at `0e0606f73` (#1531). The
 > companion contract [`echo-integration-plan.md`](echo-integration-plan.md) is
 > archived alongside. ECHO-by-default is the documented product behavior today
-> (README, `docs/ECHO_GUIDE.md`, CHANGELOG "Unreleased — ECHO"). See
+> (README, `docs/guides/ECHO_GUIDE.md`, CHANGELOG "Unreleased — ECHO"). See
 > [`README.md`](README.md) for the archive note. The "what ships after Phase 3"
 > language below describes the 2026-05-19 point in time.
 
@@ -261,7 +261,7 @@ Same hot-swap semantics as SFT/GRPO. The next inference call uses the new adapte
 - `capabilities/agentic-grpo/pi-script-fixup` verifier-free cap.
 - `LossConfig.no_policy_loss` flag landed in trainer.
 - `--no-policy-loss` CLI flag in `cuda_grpo_ablation`.
-- `docs/ECHO_GUIDE.md` (this document's operational peer).
+- `docs/guides/ECHO_GUIDE.md` (this document's operational peer).
 - `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` (this document).
 - README + CHANGELOG ECHO entries.
 

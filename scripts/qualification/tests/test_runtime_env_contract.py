@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 MODULE_PATH = ROOT / "scripts" / "check_runtime_env_contract.py"
 CONTRACT_PATH = ROOT / "contracts" / "runtime-env-direct-reads-v1.json"
-REPORT_PATH = ROOT / "docs" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
+REPORT_PATH = ROOT / "docs" / "contracts" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
 SPEC = importlib.util.spec_from_file_location("check_runtime_env_contract", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runtime_env = importlib.util.module_from_spec(SPEC)

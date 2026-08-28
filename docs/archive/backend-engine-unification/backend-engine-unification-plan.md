@@ -8,7 +8,7 @@
 > replay as a production path). This document is kept as the historical design
 > record; its present-tense status blocks describe the 2026-06-05/07 point in
 > time, not current state. See [`README.md`](README.md) for the verified
-> landing state. The live scoreboard remains `docs/backend-capability-report.md`.
+> landing state. The live scoreboard remains `docs/contracts/backend-capability-report.md`.
 
 Date: 2026-06-05
 
@@ -18,7 +18,7 @@ Date: 2026-06-05
 > **behavioral migration** for Phases 1, 3, 4, and 5 did not — those shared
 > surfaces are additive scaffolds that coexist with the original `Device::`-keyed
 > dispatch, even though the generated report marks them `covered`. Do not treat
-> "covered" in `docs/backend-capability-report.md` as "migrated".
+> "covered" in `docs/contracts/backend-capability-report.md` as "migrated".
 >
 > - What actually landed, with evidence: **[`backend-engine-unification-review-2026-06-07.md`](backend-engine-unification-review-2026-06-07.md)**
 > - How to finish (drive every phase to genuine unification): **[`backend-engine-unification-completion-plan.md`](backend-engine-unification-completion-plan.md)** ← now complete; all workstreams landed (archived 2026-08-26).
@@ -973,7 +973,7 @@ These are the first concrete PRs, ordered by readiness. Items 1-4 are Phase 0
 pairs with the unified optimizer contract (Phase 6).
 
 Status note (revised 2026-06-07): this section records the initial migration
-order. The generated capability report (`docs/backend-capability-report.md` /
+order. The generated capability report (`docs/contracts/backend-capability-report.md` /
 `.json`) now marks all eight phases `covered`, but the 2026-06-07 review found
 that `covered` is computed mostly from hardcoded literals gated on file existence
 and certifies "a contract + test exist", not "call sites migrated". Phases 0, 2,

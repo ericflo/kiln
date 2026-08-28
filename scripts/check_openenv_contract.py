@@ -411,10 +411,10 @@ def main() -> int:
     adapter_manifest_source = (
         ROOT / "crates" / "kiln-train" / "src" / "adapter_output.rs"
     ).read_text(encoding="utf-8")
-    guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
-    replay_reference = (ROOT / "docs" / "OPENENV_REPLAY_REFERENCE.md").read_text(
-        encoding="utf-8"
-    )
+    guide = (ROOT / "docs" / "guides" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
+    replay_reference = (
+        ROOT / "docs" / "training" / "OPENENV_REPLAY_REFERENCE.md"
+    ).read_text(encoding="utf-8")
     capability_methods = (ROOT / "capabilities" / "METHODS.md").read_text(
         encoding="utf-8"
     )
