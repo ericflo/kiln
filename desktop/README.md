@@ -6,7 +6,7 @@ System-tray app that wraps the `kiln` local LLM server in a GUI for people who d
 
 Windows, Linux, and macOS (Apple Silicon). The Windows bundle drives
 CUDA-backed `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on
-AMD/Intel systems; the macOS bundle drives the candle-metal backend on
+AMD/Intel systems; the macOS bundle drives the Metal backend on
 Apple Silicon (M-series) Macs. Intel Macs are not supported; an x86_64 build
 would be strictly worse than running Linux in a VM.
 
@@ -37,7 +37,7 @@ Fresh installs use `127.0.0.1:8420`, matching the server and CLI defaults in the
 - **System tray icon** with status states: stopped, starting, running, training-active, error.
 - **Right-click menu** — Open Dashboard, Settings, Start/Stop Server, View Logs, Quit.
 - **Dashboard window** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's built-in `/ui/` is embedded below via a webview iframe.
-- **Settings window** — model path, host, port, adapter directory, inference memory fraction, FP8 KV cache, CUDA graphs, prefix cache, auto-start, auto-restart, launch-at-login. Persisted via `tauri-plugin-store`.
+- **Settings window** — model path, host, port, adapter directory, inference memory fraction, FP8 KV cache, CUDA graphs, prefix cache, auto-start, auto-restart, launch-at-login.
 - **Log viewer** — tails captured stdout/stderr lines from the ring buffer with auto-scroll and clear-view.
 - **Health and training polling** — hits `/v1/health` and `/v1/train/status` and drives the tray icon state.
 - **Auto-start kiln on app launch** — configurable; default on.
