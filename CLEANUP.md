@@ -9461,3 +9461,15 @@ Scanned all 5 desktop UI HTML files for defined-but-unused CSS classes:
   cross-file stylesheet (each UI page carries its own <style>).
   Deleted (−1 line). HTML parse OK, style blocks balanced, budget +
   artifact gates green.
+
+## Round 149 — build.rs env-read ↔ runtime-env contract cross-check [2026-09-02]
+
+- build.rs env reads across crates (KILN_CUDA_ARCHS, KILN_ROCM_ARCHS,
+  CUDA_HOME, CUDA_ROOT, HIPCC + CARGO_* std): every product var present
+  in contracts/runtime-env-direct-reads-v1.json (223 read entries, 38
+  KILN names; build-script surface rows for all 8 KILN_CUDA_ARCHS /
+  8 KILN_ROCM_ARCHS / 7 HIPCC sites).
+- Reverse direction: all 6 contract gates re-run green
+  (http-api 111 paths, openenv full suite, runtime-env 448 reads,
+  thinking-budget, config-schema 117 fields, source-parsing inventory).
+- 0 anomalies; env-read surface closed.
