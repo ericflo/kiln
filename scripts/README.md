@@ -118,3 +118,28 @@ retained evidence for a frozen `docs/archive/` investigation.
 - `phase-c40b/` — C40b analysis (`analyze_c40b.py`: N=20 seeds, bootstrap CI on the α median).
 - `phase-c40f/` — C40f run set: `run-all-seeds.sh`, `analyze.py`, and `h15a_correlation.py` (Marlin pack determinism × MTP acceptance correlation).
 - `qualification/` — qualification harness: `run.py` workload runner, oracle/receipt modules, `serve_*` workloads, `tests/`, and `validate_retained_evidence.sh`.
+
+## Reference census & orphan queue (wave 3b, 2026-08-28)
+
+Census method: for each top-level script, count tracked files outside
+`scripts/<self>` (and outside `.git/`) that reference its basename in
+`.github/`, `crates/`, `docs/`, `scripts/`, and the root docs.
+
+**Result: zero orphans.** All 75 top-level scripts have ≥1 external
+reference, so there is no orphan-candidate queue to adjudicate:
+
+- **Heavily cited (evidence provenance):** `mtp_reference_dump.py` (34),
+  `mtp_compare.py` (33), `cargo-bounded.sh` (24),
+  `mtp_h_main_reference_dump.py` (22), `vllm_teacher.py` (19) — cited by
+  `docs/archive/` investigation reports and audit receipts.
+- **Campaign gates (ledger-cited):** `check_production_file_budget.py`
+  (6 external + 13 ledger), `check_repository_artifacts.py` (7 external
+  + 11 ledger).
+- **Lightest citation:** `issue40_actual_model_regressions.sh` (1),
+  `runpod-validate-substrate-orchestrator.sh` (1) — each referenced by
+  exactly one script or doc; retained (pod-workflow entry points).
+
+Family sizes: campaign gates 3, CI contract gates 12,
+contract/schema generators 6, benchmark harness 10, one-off
+investigations 29, capture/UI smoke 3, training/serving drivers 6,
+utility/build 6.
