@@ -9661,3 +9661,45 @@ Rounds 5 and 152, byte-identical output; standing gates
 `check_repository_artifacts.py` (4563 tracked paths) and
 `check_production_file_budget.py` both pass; `git diff` is exactly the 13
 deleted lines, nothing else.
+
+## Cleanup Agent (round 155) — 2026-08-28
+
+**bench-results/ root organization** (worktree wave, ran parallel to round
+154's scripts/ wave, landed first; orchestrator recorded this entry after
+merge per the parallel-worktree protocol).
+
+**Moved (9 files, `git mv`):** 7 hand-written findings/status docs →
+`bench-results/findings/` (concurrent-batched-decode-2026-05-26,
+cuda-graph-box102-findings, cuda-graph-bs2-memcheck,
+cuda-graph-bs2-secondary-audit, cuda-graph-status,
+substrate-validate-2026-05-23, vulkan-strix-halo-baseline); 2 hand-curated
+baselines → `bench-results/baselines/` (kiln-bench.json,
+opd-phase0-validation-2026-05-16.json).
+
+**Kept at root (evidence per class):** `check_opd_regression.py` +
+opd-a6000/a100-baseline.json — CI-locked (opd-bench-gate.yml path filters +
+direct invocation, incl. scripts/opd_phase0_pod_validation.sh:18);
+`check_sft_train_regression.py` — CI-locked (perf-regression-nightly.yml
+direct invocation); Phase-0 generated audit set (candle-api-surface,
+customop-audit, dtype-usage, multi-gpu-seam, parity-tolerance,
+preserve-list, substrate-status) — the five `check_*.py` generators write
+to the bench-results/ root and these are frozen evidence snapshots;
+`backend-latency/`, `pre-migration-baseline/`, `regression/` — repository-
+hygiene.yml:34 prefix + substrate-status cross-ref + check_sft_train_
+regression.py default baseline path.
+
+**Reference fixes (all three forms, frozen surfaces excluded):** 7 Rust/CU
+source comments (cuda_graph.rs, forward/lm_head.rs, forward/full_attention.
+rs, forward/model_dispatch.rs, backend/cuda.rs, backend/rocm.rs,
+flash_api_c.cu), substrate-status.md → findings/ link, the secondary-audit
+memcheck xrefs, BENCHMARKS.md → baselines/kiln-bench.json, docs/plans/
+grand-plan OPD doc → baselines/opd-phase0-validation (path-only mechanical
+fix in an owner-managed plan doc — flagged, no prose change).
+
+**README:** merged, not replaced — every one-line description and warning
+preserved; 9 moved rows repointed; added generator-bound-root note and CI-
+lock note.
+
+**Proof:** worktree run of all 12 standing gates green + stale-reference
+sweep 0 hits; orchestrator re-ran all 12 on the merged main tree
+(2a0543edb): all PASS. Merge was conflict-free; working tree clean.
