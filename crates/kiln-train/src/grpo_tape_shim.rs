@@ -4298,7 +4298,7 @@ mod tests {
 
         let seed = KtTensor::from_vec_on(device, vec![1.0f32], vec![]).unwrap();
         let grads = tape
-            .backward(loss.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
+            .backward(loss.id(), seed, kiln_tensor::ops::add)
             .expect("GRPO tape backward on ROCm");
         let dl = grads.get(logits.id()).expect("d_logits present");
         let dl_v: Vec<f32> = dl
