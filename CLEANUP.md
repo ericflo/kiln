@@ -7836,3 +7836,74 @@ landed commit (paths, coverage 75/75, gates) before completing.
 **Gates.** budget PASS (646 files, 14 exceptions), artifacts PASS
 (4,556 tracked paths), tree clean, no cargo runs, Pages unaffected
 (scripts/README.md is outside the site manifest).
+
+## Wave 4 — docs/archive/ relative-link depth repair [2026-08-28]
+
+**Scope.** Mechanical, href-only repair of relative Markdown links in
+frozen `docs/archive/` investigation reports: code targets written at the
+wrong depth (`../../` instead of `../../../../` from the phase-cN/
+directories) and profiling artifacts written with a leading `docs/...`
+repo-relative prefix instead of `../phase-c/...`. Targets all exist on
+disk; only the href depth was wrong. No prose rewritten, no content
+changed — the diff is 63 insertions / 63 deletions, every changed line
+only the `](...)` target. Wave-2 precedent (fix href, never reword)
+re-applied.
+
+**Fix counts (63 links, 8 files).**
+
+| file | fixed |
+|---|---|
+| phase-c13/mtp-weight-loading-audit.md | 29 (loader.rs ×19, forward.rs ×10) |
+| phase-c19/c19-fc-norm-audit.md | 3 (loader ×1, forward ×1, mtp_reference_dump.py ×1) |
+| phase-c20/c20-mtp-block-norm-audit.md | 9 (loader ×3, forward ×5, dump.py ×1) |
+| phase-c21/c21-mtp-rotary-pos-audit.md | 3 (forward ×3) |
+| phase-c34/c34-sampler-parity-audit.md | 6 (speculative ×1, bench ×2, tokenizer ×3) |
+| phase-c35/c35-h13-residual-ab.md | 4 (tokenizer ×1, speculative ×2, bench ×1) |
+| profiling/PROFILING-MTP-C40d.md | 2 (main/reference seed0_temp0.json) |
+| profiling/PROFILING-MTP-C40e.md | 7 (command.txt, leg-a.exit, leg-b.exit, leg-a-w4a16.json, leg-b-bf16.json, common-env.txt, kiln-bench.sha256) |
+
+**Steering note verified.** c40e `common-env.txt` and
+`kiln-bench.sha256` both EXIST on disk (checked before editing), so both
+links were fixed rather than left. c40e `leg-a.env`/`leg-b.env` are
+purged raw captures (targets absent) — untouched.
+
+**Leave-alone list (9 frozen links, targets verified absent on disk).**
+- c34 `../../skills/kiln/SKILL.md` — target moved to owner-managed
+  `.agents/`; frozen pointer kept.
+- c35 `../phase-c18/c18-mtp-initial-baseline.md` ×2 — file never committed;
+  frozen pointer kept.
+- c40d `*.log` ×2, c40e `*.log` ×2 + `*.env` ×2 — purged raw captures;
+  frozen pointers kept.
+
+**Discrepancy vs steering table.** Actual count is 63 links, not ~50 —
+every row of the steering table matched exactly (old href, new href,
+file); the higher count is simply more occurrences per href than the
+estimate. No href had to be left unfixed; every new href resolves.
+The c40d/c40e href strings also appear as LINK TEXT (the `[...]` label
+mirrors the path); per href-only protocol those labels were untouched —
+replacements were anchored to `](...)` targets only.
+
+**Verification (per protocol, read/grep/test -e only — no cargo, no push):**
+- Every `[...](...)` link in all 8 edited files resolved from the file's
+directory: 34 real links, all resolve (0 broken) — previously-broken
+code/artifact links now resolve via `test -e`.
+- The only remaining unresolvable link targets are exactly the 9
+leave-alone frozen pointers above (all targets absent on disk, confirmed
+by `test -e`); two further audit hits (c21 `positions=positions`, c34
+`output_token_ids`) are prose/code-fence text, not Markdown links.
+- `python3 scripts/check_production_file_budget.py` → PASS (646 files,
+  5000-line default, 14 reviewed exceptions).
+- `python3 scripts/check_repository_artifacts.py` → PASS (4,556 tracked
+  paths, 119,470,776 bytes; CSV and per-file ceilings within limits).
+- `grep -c "phase-c13\|PROFILING-MTP" docs/site/docs-manifest.json` → 0
+  (archive docs outside the Pages site manifest — no Pages impact).
+- `git status` clean after the commit. Note: `.gitignore:19`
+  (`profiling/`) is unanchored and matched `docs/archive/profiling/` at
+  `git add` time (warning only — both files were already tracked and the
+  commit succeeded with all 8 files); anchoring that rule is a candidate
+  for a future wave, out of scope here.
+
+**Commit.** `9178a8943` docs(archive): wave 4 — repair wrong-depth
+relative hrefs in frozen investigation reports (href-only, ~50 links,
+8 files). This ledger entry lands as its own follow-up commit (wave-3
+precedent) so the recorded hash is stable.
