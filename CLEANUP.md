@@ -9485,3 +9485,43 @@ Scanned all 5 desktop UI HTML files for defined-but-unused CSS classes:
   17, server-config 15, schema 8, runtime 2, oracles 1); 255 content
   files + README = 256 on disk — consistent.
 - 0 anomalies; both remaining wave-5 indexes verified accurate.
+
+## Session consolidation 2 — rounds 132–150, autonomous surface closed again [2026-09-02]
+
+**19 rounds executed this segment (R132–R150), all committed, all
+pushed, gates green throughout.** Net tracked deletions: 32+ lines
+(R135 −10 unused imports, R136 −13 workflow lines, R138 −6 dead Python,
+R141 −1 dead JS function, R145 −1 gitignore redundancy, R148 −1 dead
+CSS rule) plus the R132 deploy/README precision fix.
+
+**New classes closed with evidence in this segment:**
+- JS dead-config (R132) · docs/ top-level corpus claims (R133) ·
+  residual-reference sweep (R134) · unused Rust imports (R135) ·
+  workflow redundancy (R136) · default-members comment (R136b) ·
+  feature forwarding (R137) · live-tooling dead code (R138) ·
+  Rust dead code all crates × all targets (R139) · all-targets
+  extension + root config files (R140) · desktop UI IPC/JS (R141) ·
+  kiln-openenv types↔schema (perfect, R142) · docs index + assets
+  (R142) · QUALIFICATION argparse/helpers (R143) · empty files,
+  dead $defs, UI JS (R144) · whitespace hygiene (0 in-scope; all
+  hits vendor/frozen/legal/fixtures) + .gitignore dedup (R145) ·
+  duplicate files (4 groups, all report-only: kiln-blas≡kiln-rocblas
+  module pair ×2, Inter ×4 + JetBrainsMono ×3 identical font
+  binaries) (R146) · sole crate README kiln-blas (9/10 true; 1 stale
+  ARCHITECTURE.md-ref cluster → owner) (R147) · desktop UI CSS
+  (R148) · build.rs env reads ↔ runtime-env contract (fully covered;
+  all 6 gates green) (R149) · bench-results + qualification indexes
+  (exact, 0 missing/phantom) (R150) · example flag liveness all
+  28 examples × 8 crates (all live).
+
+**Owner queue: 36 items** (32 at first consolidation + R146 ×3
+[blas/rocblas module duplication, Inter 4×identical weights,
+JetBrainsMono 3×identical weights] + R147 ×1 [kiln-blas README
+"recorded in ARCHITECTURE.md" cluster vs #1605 rewrite]).
+
+**State:** tree clean, local = remote main, budget + artifacts + 6
+contract gates green. Autonomous surface exhausted for the Nth time;
+every decision on the 36-item owner queue is immediately executable
+as a steered round. Silent-death pattern unchanged (4 occurrences,
+all menu-style prompts); single-scope mechanical steering continues
+to work, inline salvage remains the reliable path.
