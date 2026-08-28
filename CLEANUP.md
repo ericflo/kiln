@@ -7317,3 +7317,50 @@ the 120 dead-code queue is: cuda_graph.rs:671 (`captured_graph_count`),
 model_dispatch.rs:2978/3186 (the two `lm_head_argmax_..._eager` fns),
 the `max_seqlen_k` owner question (full_attention.rs:2224),
 kiln-tensor `MultiRowBatchUnsupported`, kiln-flash-attn rocm-only fns.
+
+## Cleanup Agent (round 118 — kiln-train warn-by-default lint closure, cuda lane first)
+
+**Date:** 2026-08-28
+
+**Result:** cuda 29 → 21 in-crate spans, rocm 27 → 21 (fixed
+`^\s{2,6}-->` span protocol, clean-tree measurement). 7 classes closed
+(one commit each, da5574fa9..e990991f2): unusual_byte_groupings (4,
+hex 4-digit regrouping, values identical), let_and_return (1),
+needless_option_as_deref (1, param `mut` dropped — Option moved
+directly), empty_line_after_doc_comments (1, orphaned `///` → `//`),
+unused_imports (1 each lane, `model_forward_head` dead in every lane),
+len_zero (1, rocm), redundant_closure (1, rocm, bound
+`FnMut(&Tensor,&Tensor)->Result<Tensor>` verified). Net: 18 ins / 19
+del = **net −1 line**.
+**Adjudication (kept, report-only):**
+- unused_assignments ×3 (forward_backward.rs:335/336, grpo_step.rs:1003):
+  attempted closure 83e8eab27 REVERTED (f3a1472d3) — dropping the
+  `= None` initializers broke the **vulkan lane** (E0381 possibly
+  uninitialized: the `VulkanActiveRows` arm never assigns them).
+  Load-bearing across lanes; the initializers stay.
+- NEW FINDING (pre-existing, not a regression): kiln-train cuda-lane
+  TEST TARGET has 5 hard E0061 argument-count errors
+  (grpo_tape_shim.rs:1476/1903/3738/3758/3772), inherited from the
+  grafted commit 9371035bf — lib builds fine; test target does not
+  compile in the cuda lane. Baseline-identical. Needs an owner with a
+  CUDA device to drive; owner-design queue.
+- Other report-only remainder (both lanes): too_many_arguments ×5
+  (grpo_tape_shim.rs:863/1298/1903/2098, forward_backward.rs:32),
+  private_in_public (opd_tape_shim.rs:508 + grpo_tape_shim.rs:1197),
+  type_complexity (reporting.rs:1052), dead_code ×4 (cuda) / ×7
+  (rocm: grpo_tape_shim.rs:1157/1476/153/1903/2098, sft_data.rs:229,
+  opd_tape_shim.rs:635), cfg-gated unused_imports ×3 (rocm span,
+  live in cuda lane — cannot remove).
+**Gates (independently re-verified by orchestrator):** kiln-train
+default 534/0; clippy 3-lane in-crate spans 0 / 21 / 21 (all
+report-only above); **vulkan lane compiles clean** (post-revert);
+fmt clean; budget pass (no kiln-train files in budget contract);
+artifacts pass (6694 paths). Round 117a CI: 3/3 workflows green.
+Working tree clean; nothing pushed by sub-agent.
+
+**Queue (updated):** 119 tail crates — kiln-server 6/9,
+kiln-rmsnorm-kernel 6/6 (the six manual_is_multiple_of sites,
+kt_api.rs:521/1241/1876/2203/2269/2340 — cheap mechanical win),
+kiln-tensor 1/6, kiln-rocblas 1/1, kiln-core 3 (type_complexity ×2 +
+too_many_arguments, tokenizer.rs:449/602/785). 120 dead-code
+adjudication. 121 judgment classes.
