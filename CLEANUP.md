@@ -7812,3 +7812,27 @@ tree and throws on the first broken link.
    wave if the owner wants them addressed.
 3. Wave 1's `~16MB` estimate was off; measured tracked delta was 7.94MiB
    (2,141 files). Tracked repo total: 6,694 → 4,553 paths.
+
+## Wave 3 — scripts/ index + reference census [2026-08-28]
+
+**Deliverable.** `scripts/README.md` (151 lines): all 75 top-level
+scripts indexed in 8 families with one-line descriptions read from each
+script's header, `(CI)` markers verified against `.github/workflows/`,
+9 subdirectories documented, and a reference census.
+
+**Census result: zero orphans.** Every top-level script has ≥1 external
+reference (CI, code, docs, or ledger). Heaviest: mtp_reference_dump.py
+(34), mtp_compare.py (33), cargo-bounded.sh (24) — evidence-provenance
+citations from docs/archive. No deletion/archive queue exists: the
+one-off investigation scripts (29) are all retained evidence for frozen
+investigations.
+
+**Sub-agent note.** The wave-3 agent committed task 1 (index,
+`ff72939cc`) then exited with no output (harness silence); task 2
+(census, `f5b17b9bb`) and this ledger were completed by the
+orchestrator from the same steering. Salvage pattern: verify the
+landed commit (paths, coverage 75/75, gates) before completing.
+
+**Gates.** budget PASS (646 files, 14 exceptions), artifacts PASS
+(4,556 tracked paths), tree clean, no cargo runs, Pages unaffected
+(scripts/README.md is outside the site manifest).
