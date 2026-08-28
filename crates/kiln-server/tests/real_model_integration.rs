@@ -1000,7 +1000,6 @@ fn public_training_base_weight_manifest(
             add_tensor(format!("{prefix}.mlp.{name}.weight"), tensor)?;
         }
     }
-    drop(add_tensor);
 
     let refs: HashMap<&str, &Tensor> = tensors
         .iter()
