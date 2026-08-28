@@ -8452,3 +8452,23 @@ git only, per round constraint).
 
 **Commits.** Parent HEAD at entry: `b22d6e221`. This ledger entry lands
 as its own commit (report-only round; no code/data deletions warranted).
+
+## Round 129 verification note (orchestrator) [2026-08-28]
+
+- foldhash refinement: the doc DOES cover foldhash — L6733
+  `[foldhash 0.2.0]` bullet in the Zlib section. Cargo.lock holds BOTH
+  0.1.5 and 0.2.0 (two hashbrown variants). The real gap is the
+  missing `foldhash 0.1.5` bullet (version-level, same Zlib license
+  body already present). Queue item #19 corrected accordingly: fix is
+  one bullet line, owner call (legal surface).
+- OFL claim verified: 0 OFL references in any TEXT file under
+  docs/site/ (the two raw grep hits were binary PNG byte-sequence
+  coincidences). Inter + JetBrains Mono .woff2 files are shipped
+  without an OFL-1.1 notice. Queue item #20 stands (docs/site is an
+  owner-managed surface — report-only).
+- New scope discovery: `desktop/` is a SEPARATE cargo workspace (own
+  Cargo.toml + Cargo.lock + CHANGELOG + docs) — outside `crates/*`,
+  so rounds 126/127's dead-config audits did not cover it. Its README
+  claims "the macOS bundle drives the candle-metal backend" —
+  candle-removal (#1082) makes this a stale-claim candidate. Round 130
+  audits the desktop workspace with the same evidence protocol.
