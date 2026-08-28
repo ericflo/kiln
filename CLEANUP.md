@@ -9313,3 +9313,30 @@ Closes the two R139 gaps:
 - **tauri.conf.json**: all 5 window URLs resolve to existing files
   (index/settings/dashboard/logs/about). identifier + sizes
   product-level (owner-managed copy, R130 note stands).
+
+## Round 142 — kiln-openenv type/schema consistency + docs index (sub-agent silent-death #4, salvaged inline) [2026-09-02]
+
+Sub-agent (qwen3.8-27b, 5-option bounded prompt) exited with no
+output and zero work — fourth silent-death (R133 + wave-3×2 + this).
+Salvage protocol: clean tree confirmed, work completed inline.
+
+**A. kiln-openenv schema ↔ types.rs: PERFECT (0 anomalies).**
+- OpenEnvObservation ↔ Observation: 4/4 fields
+- OpenEnvSchema ↔ EnvironmentSchema: 3/3
+- OpenEnvMetadata ↔ Metadata: 6/6
+- OpenEnvProtocolError ↔ ProtocolError: 6/6
+- OpenEnvErrorCode 7 variants ↔ ProtocolError.code enum: 7/7
+  (INVALID_JSON, UNKNOWN_TYPE, VALIDATION_ERROR, EXECUTION_ERROR,
+  CAPACITY_REACHED, FACTORY_ERROR, SESSION_ERROR)
+- OPENENV_CLIENT_PROFILE "openenv-http/1.x" = gate's identity
+  client_profile (2 sites) ✓
+- (message types + size bounds = protocol conformance, not
+  drift; 512-MiB guide hit is the artifact budget, unrelated)
+**C. docs/README.md index: 36/36 top-level docs indexed, 0 missing,
+0 phantoms** (the `signing.md` hit is docs/desktop/ in the
+subdirectories section — correct).
+
+Ledger lesson #4 for the silent-death pattern: prompts with a menu
+of 5 unbounded options are a risk factor; the two options executed
+inline were the mechanical ones (A, C). Options B/D remain open for
+a future round.
