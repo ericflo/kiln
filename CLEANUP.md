@@ -10097,8 +10097,8 @@ scripts/`), 25 `investigations/` top-level scripts, the 3 `mtp_*` + 3
 driver files present in `investigations/`, 7 regenerate scripts present at
 root; stale-phrasing grep for "22 one-off" / "75 top-level" / "Round 153
 (2026-09)" / "eight bench-results" → 0 hits; the file contains 0 markdown
-links (no link-rot surface). Commit: (recorded in the follow-up commit's
-amended ledger line below).
+links (no link-rot surface). Commit: `68bc72e887dd4e66bc66f23576776a4a30a57891`
+(work + ledger; this hash line lands in the small follow-up commit).
 
 **Lessons:** (a) index READMEs carry both per-entry lists AND prose census
 sections — a reorg sweep that only re-counts the lists leaves the prose
