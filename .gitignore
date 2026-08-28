@@ -12,12 +12,14 @@ Qwen3.5-4B/
 # Default runtime state directory (adapter_dir + .eval/{suites,datasets,judgments})
 /adapters/
 
-# Profiling artifact dumps (kept in git history only)
-c12-out/
-profile-out/
-profile/
-profiling/
-profiling-artifacts/
+# Profiling artifact dumps (kept in git history only).
+# Root-anchored: these were unanchored and shadowed tracked same-named
+# directories (docs/archive/profiling/, assets/profiling/).
+/c12-out/
+/profile-out/
+/profile/
+/profiling/
+/profiling-artifacts/
 
 # Local hardware qualification output. Compact validated receipts live under
 # qualification/receipts; raw logs, traces, and profiles stay here.

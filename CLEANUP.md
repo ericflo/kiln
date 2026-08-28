@@ -7907,3 +7907,19 @@ by `test -e`); two further audit hits (c21 `positions=positions`, c34
 relative hrefs in frozen investigation reports (href-only, ~50 links,
 8 files). This ledger entry lands as its own follow-up commit (wave-3
 precedent) so the recorded hash is stable.
+
+## Wave 4 follow-up — .gitignore profiling-block root anchoring [2026-08-28]
+
+**Problem.** The "Profiling artifact dumps" ignore block used
+UNANCHORED patterns (`profiling/`, `profile/`, etc.), which shadowed
+two TRACKED same-named directories: `docs/archive/profiling/` (wave-4
+href repairs landed there with a git-add warning) and
+`assets/profiling/` (1 tracked script). Any future file added to those
+directories would have been silently ignored.
+
+**Fix.** Anchored all five patterns to repo root (`/profiling/` etc.).
+Verified: root `profiling/` still ignored (`git check-ignore` PASS),
+no new untracked files exposed, tree clean.
+
+**Standing rule.** New `.gitignore` entries for artifact/output
+directories MUST be root-anchored unless deliberately depth-wild.
