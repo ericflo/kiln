@@ -8364,3 +8364,91 @@ reword pass (5 files, ~22 sites + 2 error strings), #16 candle-named
 pub fns/params (cross_entropy_from_logits_grad_candle, etc.),
 #17 openenv.credentials example doc missing, #18 [agent] header
 comment convention.
+
+## Cleanup Agent (round 129) — 2026-08-28
+
+License-coverage audit of `THIRD_PARTY_LICENSES.md` (6,756 lines) ↔
+`Cargo.lock` (435 packages). **Report-only round: zero deletions.**
+
+**Task 1 — coverage cross-check (scripted, python).** The doc's own
+mapping format: 160 `### <license>` sections under `## License Texts`
+(L49–6756), each with a `**Used by:**` bullet list; the `## N.` headings
+inside license bodies (e.g. CDLA `## 1. Provision of the Data` L1299) are
+license-internal structure, not doc sections. Parsed all 160 sections →
+341 crate/license pairings over **313 unique crates** (24 dual-listed,
+`getrandom`/`windows-sys` triple-listed; the `## Overview of Licenses`
+sum L37–45 = 296+19+13+5+3+2+1+1+1 = **341**, matching the bullet count
+exactly — overview is internally consistent). Lock side: 435 packages =
+33 workspace members (covered by the repo's own MIT license per doc L5 —
+excluded by design) + 402 registry entries (367 unique names).
+
+- **IN-LOCK-NOT-COVERED: 56 registry crates** (doc line for all: *none* —
+  no `Used by` entry; design-basis evidence is the doc's own scope
+  statement at **L3**: "enumerates every third-party Rust crate that is
+  statically linked into the released `kiln-server` and desktop
+  binaries"). Not staleness: all 56 entered the lock in `9371035bf`
+  (2026-07-27), *before* the doc's last regeneration `93d26c72f`
+  (2026-07-31) which omits them anyway, and every one's parent(s) are
+  covered in the doc (hashbrown, tracing-core, reqwest, winapi,
+  windows-targets, half, getrandom, nix, ahash, onig_sys, kiln-*
+  build.rs, …). Classification (lock parent edges + registry
+  `Cargo.toml` evidence):
+
+  | package (version) | doc line | lock presence | verdict |
+  |---|---|---|---|
+  | **foldhash 0.1.5, 0.2.0** | none | in lock | **GAP — genuinely linked**: hashbrown 0.16.1/0.17.1 `default` features include `default-hasher = ["dep:foldhash"]` (registry manifests), enabled via default-feature consumers safetensors 0.7.0 (`features=["serde"]` → hashbrown 0.16) and referencing 0.49.2 (`features=["equivalent"]` → hashbrown 0.17); indexmap 2.14 opts out (`default-features = false`) |
+  | autocfg 1.5.1, cc 1.2.63, cfg_aliases 0.1.1/0.2.1, find-msvc-tools 0.1.9, pkg-config 0.3.33, shlex 2.0.1, version_check 0.9.5 (7) | none | in lock | build-dependencies only (num-traits, nix/quinn build-deps, ahash/generic-array/multer, onig_sys, cc, kiln-*/ring/esaxx-rs build scripts) — never statically linked, out of scope per L3 |
+  | wasm-bindgen 0.2.122 (+futures 0.4.72, -macro, -macro-support, -shared), web-sys 0.3.99, js-sys 0.3.99, web-time 1.1.0, bumpalo 3.20.3, wasm-streams 0.4.2 (10) | none | in lock | wasm32-web target-specific edges of covered reqwest/chrono/uuid/indicatif/rustls-pki-types — not a release target |
+  | wasi 0.11.1, wasip2 1.0.3, wasip3 0.4.0, wit-bindgen 0.51.0/0.57.1, wit-bindgen-core, wit-bindgen-rust, wit-bindgen-rust-macro, wit-component 0.244.0, wit-parser 0.244.0, wasm-encoder 0.244.0, wasm-metadata 0.244.0, wasmparser 0.244.0, id-arena 2.3.0, leb128fmt 0.1.0, prettyplease 0.2.37, unicode-xid 0.2.6, semver 1.0.28 (17) | none | in lock | getrandom's wasm32-wasip2/wasip3 target subtree (wasm toolchain) |
+  | quinn 0.11.9, quinn-proto 0.11.14, quinn-udp 0.5.14, lru-slab 0.1.2, rustc-hash 2.1.2 (5) | none | in lock | reqwest's HTTP/3 stack, wasm-client-only in this graph |
+  | redox_syscall 0.5.18, redox_users 0.5.2, libredox 0.1.17 (3) | none | in lock | Redox-target edges of covered dirs-sys/parking_lot_core |
+  | iana-time-zone-haiku 0.1.2, r-efi 5.3.0/6.0.0, android_system_properties 0.1.5 (3) | none | in lock | Haiku / UEFI / Android target edges of covered iana-time-zone, getrandom |
+  | winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0, windows_aarch64_gnullvm/msvc 0.52.6/0.53.1, windows_i686_gnu/gnullvm/msvc, windows_x86_64_gnullvm (8) | none | in lock | target-specific subcrates of covered winapi 0.3.9 / windows-targets (the x86_64-msvc variants that ship *are* covered — confirming target filtering) |
+  | crunchy 0.2.4 | none | in lock | half 2.7.1 declares it only under `[target.'cfg(target_arch = "spirv")']` + dev-deps (registry manifest) |
+  | valuable 0.1.1 | none | in lock | tracing-core 0.1.36 declares it only under `cfg(tracing_unstable)` (registry manifest) |
+
+- **COVERED-NOT-IN-LOCK: 0.** All 313 unique doc crates exist in
+  Cargo.lock — no stale claims, nothing to delete.
+
+**Task 2 — action (conservative).**
+- COVERED-NOT-IN-LOCK empty → **0 deletions**.
+- IN-LOCK-NOT-COVERED → **report only** (license-text additions are a
+  legal content decision):
+  - **Queue: `foldhash` (Zlib, 0.1.5 + 0.2.0)** — the one uncovered
+    crate actually statically linked. The Zlib license body already
+    exists in the doc (L6729, currently 1 crate), so the fix is
+    mechanical (add to its `Used by` list + bump the L37 MIT→Zlib
+    overview count) — owner call.
+  - Note for the record: the other 55 are out of scope per the doc's
+    L3 statement (build-time or non-release targets); adding them would
+    be a coverage-policy change, not a fix.
+- **Queue: docs-site font attribution gap.** `docs/site/fonts/` ships
+  the same Inter (400–700) + JetBrains Mono (400–600) OFL-1.1 font
+  files as static site assets (referenced from every docs-site HTML
+  page's `<link rel="preload">`), but **no OFL license text or
+  copyright notice exists anywhere under docs/site/** (grep of html/js/
+  md). The license doc's bundled-assets section is explicitly scoped to
+  "the released binary" (L16), so the docs site is a separate legal
+  surface needing the same OFL notice — owner content decision.
+  (Sibling `docs/site/demo/vendor/asciinema-player/` is compliant:
+  carries its own LICENSE + NOTICE.md; `desktop/icons/icon.ico` is a
+  kiln icon, not third-party.)
+
+**Task 3 — bundled runtime assets.** All three doc entries verified live
+against `git ls-files` + `crates/kiln-server/src/api/ui.rs`:
+`ui/fonts/InterVariable.woff2` (ui.rs:43 `include_bytes!`) ✓,
+`ui/fonts/JetBrainsMonoVariable.ttf` (ui.rs:44) ✓,
+`ui/vendor/xterm.js` + `xterm-addon-fit.js` + `xterm.css` (ui.rs:36–38,
+all tracked) ✓. No stale asset entries → **0 deletions**. Repo-wide
+font/binary-asset scan found no other third-party embedded assets
+beyond the docs-site fonts (queued above).
+
+**Gates (before commit; no tracked file changed by the audit itself).**
+`python3 scripts/check_production_file_budget.py` PASS (646 files, 5000
+line default, 14 reviewed exceptions). `python3 scripts/
+check_repository_artifacts.py` PASS (4563 tracked paths, CSV ≤ 1 MiB,
+file ≤ 10 MiB). `git status` clean. No cargo commands run (python/grep/
+git only, per round constraint).
+
+**Commits.** Parent HEAD at entry: `b22d6e221`. This ledger entry lands
+as its own commit (report-only round; no code/data deletions warranted).
