@@ -8863,3 +8863,43 @@ section. ONE inaccuracy fixed (deletion/reword, ironclad evidence):
   subcommand also starts serving"); `kiln serve` is the explicit
   equivalent. Line now describes the real ExecStart. Net 0 (1 line
   replaced).
+
+## Round 133 — docs/ top-level corpus claim audit (sub-agent silent-death → orchestrator salvage) [2026-08-28]
+
+Sub-agent launched for this audit exited with no output and zero
+committed work (third occurrence; salvage protocol applied: verified
+tree clean, then completed the round inline with a deterministic
+mechanical method instead of open-ended reading).
+
+**Method:** python cross-check of every machine-checkable claim in all
+36 non-CONFIGURATION top-level docs/*.md against authoritative
+sources (openapi paths, runtime-env contract `argument` fields,
+config schema $defs-resolved, git ls-files paths, cli.rs + kiln bin
++ kiln-train + scripts argparse for flags, contract schemas for
+field names).
+
+**Result — CLEAN on every category (0 stale):**
+- Env vars: 15 flagged (KILN_SERVER_URL, 10× KILN_USE_TAPE_*/
+  KILN_BF16_STOCHASTIC_ROUND, KILN_VLLM_API_KEY/_SNAPSHOT_ROOT,
+  KILN_LATENCY_METRIC, KILN_VERSION) — ALL live (clap `env=` args in
+  kiln_eval_cli.rs, scripts/*.py os.environ reads, harness checks).
+  Runtime-env contract scan scope is Rust-crate reads only; script
+  reads legitimately absent from it.
+- API endpoints: 0 anomalies (all doc endpoints resolve in openapi).
+- Config keys: 0 anomalies (no batching.mode / rendezvous repeats in
+  docs/ top-level; all section.key leaves present in schema).
+- File paths: 0 anomalies.
+- CLI flags: 45 flagged — ALL live (kiln-server cli.rs, kiln-train
+  ablation shims, scripts/qualification, scripts/hf_trl argparse).
+- Schema-doc field names: 16 flagged — ALL live (latency artifact
+  scripts ×3-5 refs each; OPD teacher fields in
+  kiln-server/src/api/training.rs + kiln-train/src/opd.rs;
+  teacher_identity in kiln-control-plane-v1 schema).
+
+**Lesson recorded:** large open-ended audit prompts are the
+silent-death pattern (waves 3, round 133). Mechanical
+extract-and-cross-check scripts are the robust form; sub-agents
+reliably complete bounded, evidence-anchored tasks.
+
+**Campaign state:** every autonomous class now CLOSED (rounds 61–133
+cumulative). Owner queue remains the sole work source (27 items).
