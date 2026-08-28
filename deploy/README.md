@@ -15,7 +15,7 @@ image never builds on ordinary pushes).
 | file | role |
 |---|---|
 | Dockerfile | Multi-stage CUDA server image for `ghcr.io/ericflo/kiln-server` — `nvidia/cuda:12.4.1-devel` builder stage (Rust nightly, `KILN_CUDA_ARCHS` build arg) over a `nvidia/cuda:12.4.1-runtime` final stage; requires the NVIDIA Container Toolkit for GPU access at runtime |
-| kiln.service | systemd unit that runs `kiln serve` as a daemon |
+| kiln.service | systemd unit that runs bare `kiln --config /etc/kiln/kiln.toml` as a daemon (bare invocation starts serving; `kiln serve` is the explicit equivalent) |
 
 ## RunPod image (`deploy/runpod/`)
 

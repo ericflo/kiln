@@ -8838,3 +8838,28 @@ spawned on already-closed classes; the loop resumes when owner
 decisions land (each queued item becomes a steered round) or when
 fresh drift appears (re-run the gate suite: budget, artifacts,
 4× contract checks, schema self-test).
+
+## Round 132 — JS dead-config, contract-gate sweep, deploy/ claim audit [2026-08-28]
+
+**JS-side dead-config — CLOSED (clean).** Exactly one tracked
+package.json exists (scripts/docs-site/): all 3 deps (markdown-it,
+puppeteer-core, tailwindcss) verified used (2 imports + 1 CLI in
+build:utilities script). No dead JS config.
+
+**Contract-gate sweep — CLOSED (all green).** Ran every contract
+gate not yet verified this session: `check_source_parsing_tests.py`
+PASS ("inventory matches") in addition to the four gates verified in
+round 129-prep. All 5 contract gate scripts now green on HEAD.
+
+**deploy/ claim audit — 1 fix, 0 other stale.** Verified every claim
+in deploy/README.md against the tree: both workflows + image names +
+tag/dispatch gates (docker-server-release.yml, runpod-image.yml),
+Dockerfile stages (12.4.1-devel/12.4.1-runtime), all 7 runpod files
++ their roles (entrypoint PUBLIC_KEY/heartbeat/sshd), ownership
+section. ONE inaccuracy fixed (deletion/reword, ironclad evidence):
+- L18 claimed kiln.service "runs `kiln serve`" — actual
+  ExecStart is bare `kiln --config /etc/kiln/kiln.toml`. Bare
+  invocation serves (cli.rs:40,533: "Running kiln with no
+  subcommand also starts serving"); `kiln serve` is the explicit
+  equivalent. Line now describes the real ExecStart. Net 0 (1 line
+  replaced).
