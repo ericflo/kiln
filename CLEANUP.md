@@ -9451,3 +9451,13 @@ a future round.
   pre-#1605 ARCHITECTURE.md state. Owner must decide the crate's
   post-#1605 story (crate README mirrors the same sentence set in
   Cargo.toml comments).
+
+## Round 148 — desktop UI CSS sweep [2026-09-02]
+
+Scanned all 5 desktop UI HTML files for defined-but-unused CSS classes:
+- about.html 6/6, dashboard.html 1/1, index.html 4/4, logs.html 10/10 used.
+- settings.html: `.todo` rule (1 line) — single occurrence in the whole
+  repo (the definition itself); no markup use, no JS toggle, no
+  cross-file stylesheet (each UI page carries its own <style>).
+  Deleted (−1 line). HTML parse OK, style blocks balanced, budget +
+  artifact gates green.
