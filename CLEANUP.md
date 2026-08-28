@@ -9424,3 +9424,30 @@ a future round.
   anomaly, left as-is.
 - 0 deletions; 3 owner-queue observations added (blas/rocblas
   duplication, Inter font weights, JetBrainsMono weights).
+
+## Round 147 — kiln-blas README claim audit (sole crate README) [2026-09-02]
+
+9/10 claim families verified TRUE against the crate:
+- 3-layer structure = Cargo.toml features/comments (near-verbatim match)
+- file layout: all 12 listed files exist, nothing extra on disk
+- features probe/cublaslt = dep:cudarc; deps (optional cudarc, half,
+  kiln-resource, serde/serde_json, cc build-dep) exact
+- kiln-tensor/src/cuda_matmul.rs:41 dispatches
+  CublasLtMatmulHandle ✓
+- build.rs reads KILN_CUDA_ARCHS (default "80;86;89;90") ✓
+- --out + --iters flags live in the example (default 32) ✓
+- shape [B*T,2560]@[2560,18432] matches example source ✓
+- #1082 candle removal: 0 candle refs in kiln-blas ✓
+- bench-results commit instruction = procedural (RunPod), not an
+  existence claim ✓
+
+1 STALE CLUSTER (report-only → owner queue):
+- "its outputs are recorded in ARCHITECTURE.md" (×2: "What it measures"
+  tail + "Why the probe is kept") — ARCHITECTURE.md was rewritten in
+  00aac0f8f (#1605, owner doc-audit) and now has ZERO cublasLt/probe
+  mentions; no bench-results/cublaslt_mlp_probe-*.json baseline was
+  ever committed; the quoted "explicit-control approach" phrase exists
+  ONLY in kiln-blas/README.md. The crate narrative points at a
+  pre-#1605 ARCHITECTURE.md state. Owner must decide the crate's
+  post-#1605 story (crate README mirrors the same sentence set in
+  Cargo.toml comments).
