@@ -9703,3 +9703,58 @@ lock note.
 **Proof:** worktree run of all 12 standing gates green + stale-reference
 sweep 0 hits; orchestrator re-ran all 12 on the merged main tree
 (2a0543edb): all PASS. Merge was conflict-free; working tree clean.
+
+## Cleanup Agent (round 154) — 2026-08-28
+
+**scripts/ root organization** (worktree wave, parallel to round 155;
+orchestrator recorded this entry after merge).
+
+**Moved (25 one-off scripts + 5 phase family dirs → `scripts/investigations/`,
+all 100%-similarity renames):** MTP acceptance/splice cluster (14: mtp_
+reference_dump, mtp_h_main_reference_dump, mtp_compare, mtp_c10_splice_bisect,
+mtp_c1_summarize, c11–c16 audits, c29_hf_reference_dump, c29_logits_compare{,_
+v2}); multi-engine α cluster (8: h15c/h17/h17b/h18 compare+dump pairs); one-
+off drivers (3: capture-pre-migration-baseline.sh, cuda_qwen_sft_smoke.sh,
+phase7_cuda_graph_prefix_cache_verify.sh); family dirs (5: phase-c36/37/40a/
+40b/40f). Every one is retained evidence of a completed investigation with
+zero live references; the clusters moved together so sibling imports
+(`mtp_reference_dump`, `h15c_vllm_alpha_dump`, c14→c29) stay intact; all
+moved .py pass `py_compile`.
+
+**Kept live at `scripts/` root (locking reference per class):** the 8 bench-
+results regenerate scripts (bench-results/README.md table); 14 `check_*`
+gates + check_unification_gates.sh (.github/workflows); 5 schema generators
++ json_schema_subset.py + generate_backend_capability_report.py (pages.yml,
+contracts/README.md, backend_capability_contract.rs); 6 backend-latency
+fixture scripts (perf-regression-nightly.yml, docs/contracts/); bench-
+concurrent-batch.py (qualification tests, BENCHMARKS.md), bench-trajectory-
+turns.py (docs/serving), run-serving-benchmark-campaign.py (BENCHMARKS.md),
+vllm_teacher.py (qualification, docs/contracts); h15c_kiln_alpha_from_csv.py
+(check_config_schema.py RETIRED_ENV_REFERENCE_ALLOWLIST pins its exact path);
+phase2_validation_steps_1_2_3.sh (content-asserted by check_runtime_defaults.
+mjs); opd_phase0_pod_validation.sh (docs/guides/VIGNETTES.md); cargo-bounded.
+sh (qualification/), setup-build-cache.sh (deploy/runpod/Dockerfile); both
+capture-*.mjs (generators of tracked docs/site assets consumed by CI);
+c2_artifacts/ (qualification exclusion + R7 retained evidence).
+
+**Ambiguous (kept at root, reported):** push-build-cache.sh (zero refs;
+build-infrastructure utility, not investigation evidence); issue40_actual_
+model_regressions.sh (re-runnable regression driver cited by live
+capabilities/KILN_IMPROVEMENT_ISSUES.md). Owner may reclassify.
+
+**Reference fixes (5 files, all forms, frozen surfaces excluded):**
+BENCHMARKS.md, bench-results/pre-migration-baseline/README.md,
+scripts/audit-substrate-status.sh (its line-existence check pointed at a
+moved script — would have broken the live dashboard), crates/kiln-model/
+src/forward/model_dispatch.rs (provenance comment), scripts/README.md
+(re-counted: 50 top-level + 6 subdirs). New
+`scripts/investigations/README.md`: per-script one-liners, family grouping,
+"frozen evidence — do not edit" warning, live-vs-frozen decision rule.
+
+**Proof:** worktree run of all 12 standing gates green + stale sweep 0 live
+references (positive controls validated). Orchestrator re-ran on the merged
+main tree (b89f8e698): 11/12 direct PASS; the smoke entry initially showed
+FAIL — root cause was the orchestrator's own harness (env-prefix word in the
+looped command string not parsed as an assignment, rc=127 "command not
+found"); direct invocations of the identical gate pass rc=0 twice. Gate
+itself green; loop artifact recorded as a steering lesson.
