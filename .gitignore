@@ -63,5 +63,4 @@ scripts/docs-site/node_modules/
 !scripts/docs-site/package.json
 !scripts/docs-site/package-lock.json
 _site/
-.flip-errors-iter3.txt
 .flip-errors-*.txt

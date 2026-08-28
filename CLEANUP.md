@@ -9379,3 +9379,25 @@ a future round.
   (recursive grep count > def count for every function; R141's
   hideInstallPane remains the only one ever found).
 - 0 deletions. Three more classes closed.
+
+## Round 145 — whitespace hygiene + .gitignore dedup [2026-09-02]
+
+- **Whitespace hygiene (trailing-ws / CRLF / missing-EOF-newline)**:
+  scanned all tracked text files; 779 raw hits, ALL in
+  vendor/frozen/owner surfaces — csrc/ (CUTLASS, flash-attn, marlin —
+  upstream-derived, must not drift), ui/vendor/ (xterm),
+  capabilities/ (owner), docs/archive/ + bench-results/ +
+  docs/audits/ + scripts/c2_artifacts/ (frozen evidence),
+  THIRD_PARTY_LICENSES.md (legal), test_fixtures chat templates
+  (semantically significant whitespace). 0 in-scope fixable files.
+  Class closed: repo whitespace state is clean or intentionally
+  upstream/frozen.
+- **.gitignore**: every rule verified live. One redundancy found and
+  removed: `.flip-errors-iter3.txt` is strictly subsumed by
+  `.flip-errors-*.txt` (both from the #1082 WIP era; files no longer
+  exist on disk). `git check-ignore -v` proves the wildcard still
+  catches the exact iter3 name after deletion → behavior-preserving.
+  −1 line. Exception rule `!docs/audits/removed-raw-artifacts-...json`
+  verified load-bearing (target tracked + on disk). `Qwen3.5-4B/`
+  rule verified live (16 GB local weights on disk).
+  Budget + artifact gates green.
