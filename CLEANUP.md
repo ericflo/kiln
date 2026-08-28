@@ -9292,3 +9292,24 @@ Closes the two R139 gaps:
    files (7,900 lines) — 3 candidates, all `#[tokio::test]` fns
    (zero callers by design). **0 dead items.** (desktop excluded
    from cargo check per R130 heavy-workspace rule.)
+
+## Round 141 — desktop UI audit: IPC, capabilities, dead JS (first audit of the 10-file UI surface) [2026-09-02]
+
+- **Tauri IPC: 31/31 perfect** — every `#[tauri::command]` (31) is
+  invoked from the UI; every `invoke()` name (31) resolves to a
+  declared command. 0 dead commands, 0 ghost invocations.
+- **capabilities/default.json: 8/8 permissions live** — each maps to
+  a registered plugin (shell, dialog, clipboard-manager, updater,
+  process, notification, window-state + core:default); all 8 plugin
+  crates in Cargo.toml are registered in main.rs. 0 dead permissions.
+- **R131 stale cluster: 0 references** — `batching.*` /
+  `direct_decode_rendezvous*` absent from all desktop UI + src +
+  conf.
+- **Dead JS: 1 found, deleted** — `hideInstallPane()` in
+  desktop/ui/dashboard.html (3-line classList wrapper with zero
+  callers; `showFrame` already does the same inline; orphaned by
+  9371035bf-era refactor). Deleted; `node --check` on both script
+  blocks passes; `installPane` itself stays live (8 refs). Net −4.
+- **tauri.conf.json**: all 5 window URLs resolve to existing files
+  (index/settings/dashboard/logs/about). identifier + sizes
+  product-level (owner-managed copy, R130 note stands).
