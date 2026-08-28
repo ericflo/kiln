@@ -9340,3 +9340,21 @@ Ledger lesson #4 for the silent-death pattern: prompts with a menu
 of 5 unbounded options are a risk factor; the two options executed
 inline were the mechanical ones (A, C). Options B/D remain open for
 a future round.
+
+## Round 143 — QUALIFICATION harness internals: argparse + dead helpers (option B) [2026-09-02]
+
+- **argparse options: CLEAN** — scanned every `add_argument` in all 93
+  harness .py files; 3 `--json` candidates, all false positives
+  (custom `dest="json_output"`, each read 1-2× in-file).
+- **Dead helpers: CLEAN** — 6 "zero-ref" candidates from the first
+  pass, ALL false positives on repo-wide recheck:
+  read_temperature_millicelsius (4 refs incl.
+  tests/test_device_memory_sampler.py), resolve_memory_counter
+  (10 refs incl. bench-concurrent-batch.py), metrics_from_arms (3
+  incl. tests), declared_metric_names (3 incl. tests),
+  load_workload (17 incl. tests), gather (interface-conformance
+  stub). Root cause of the false pass: the first scan's glob was
+  non-recursive (tests/ subdirectory missed) — LESSON: function-ref
+  scans must be recursive-directory greps, not file-list greps.
+- **0 deletions.** Option B closed; all five R142 options (A/B/C/D +
+  free-roam) now adjudicated this session.
