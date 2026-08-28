@@ -58,7 +58,6 @@ jobs:
         # can `docker run` it for runtime checks BEFORE publishing. The second
         # pass (below) reuses the GHA cache and pushes — near-instant because
         # every layer is cache-hit.
-        id: build_local
         uses: docker/build-push-action@v7
         with:
           context: deploy/runpod
@@ -114,7 +113,6 @@ jobs:
           echo "OK: kiln-heartbeat live; timestamp ${AGE}s fresh; all contract keys present"
 
       - name: Build and push (uses cache from smoke-test stage)
-        id: build
         uses: docker/build-push-action@v7
         with:
           context: deploy/runpod

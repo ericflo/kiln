@@ -12,10 +12,6 @@ on:
         description: 'Commit ref to bench (default: latest main)'
         required: false
         default: ''
-      trainer:
-        description: 'Which trainer flag to bench against (native|generic|both)'
-        required: false
-        default: 'both'
       write_baseline_if_null:
         description: 'Seed `null` baseline fields with the observed numbers from this run'
         required: false
@@ -269,14 +265,10 @@ jobs:
           KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench
 
       - name: Run training bench (trainer=${{ matrix.trainer }})
-        env:
-          # Historical: this knob once selected the legacy CUDA-native SFT
-          # trainer, but it is obsolete — no code reads it and both matrix
-          # legs now run the same shared kt-native BackendRuntime path
-          # (see docs/CONFIGURATION.md "legacy CUDA-native selector").
-          # The native/generic rows are kept as a cross-check: their
-          # baselines should land within a few percent of each other.
-          KILN_CUDA_NATIVE_TRAINING: ${{ matrix.trainer == 'native' && '1' || '0' }}
+        # The native/generic rows are kept as a cross-check: their baselines
+        # should land within a few percent of each other. (The former
+        # KILN_CUDA_NATIVE_TRAINING selector is retired — no code reads it;
+        # see docs/CONFIGURATION.md "legacy CUDA-native selector".)
         run: |
           rm -f /tmp/kiln_bench_stdout.txt
           # Skip inference/latency benches — perf gate is on training step time.
@@ -317,7 +309,7 @@ jobs:
     name: Backend latency fixture (${{ inputs.latency_fixture_id }})
     runs-on: ${{ fromJSON(inputs.latency_runner_labels_json || '["self-hosted"]') }}
     needs: gate-self-test
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id != 'none' }}
+    if: inputs.latency_fixture_id != 'none'
     steps:
       - uses: actions/checkout@v6
         with:

@@ -88,7 +88,6 @@ jobs:
           # Allow codesign to use the key non-interactively.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Sign, notarize, and package kiln binary
         if: startsWith(github.ref, 'refs/tags/kiln-v')

@@ -65,7 +65,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute version from tag
-        id: version
         # On `push` to a `kiln-v*` tag, derive the version from the ref
         # (e.g. `kiln-v0.2.3` -> `0.2.3`) so the tagged image and the
         # binary release always share the same version string. On

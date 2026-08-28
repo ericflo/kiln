@@ -29,7 +29,6 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/ericflo/miniopenenv.git ../miniopenenv
           git -C ../miniopenenv checkout --detach origin/main
-          echo "OPENENV_INTEROP_ORACLE_SHA=$(git -C ../miniopenenv rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Validate contracts and current upstream environments
         env:
