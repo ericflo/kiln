@@ -7604,3 +7604,29 @@ counting compile ERRORS (not warnings):
 item #13. Standing rule added: after any signature change, re-verify
 `--all-targets` in EVERY lane the touched crate supports, not just
 the one being measured.
+
+## INCIDENT + PROTOCOL CHANGE (round 125)
+
+**Date:** 2026-08-28
+
+**Incident:** a local `cargo test -p kiln-server` run (1388-test
+suite: model loading, in-process servers) exhausted host resources
+and killed the user's running applications (user-reported; verified
+no leftover kiln test processes remain). Severe.
+
+**NEW STANDING PROTOCOL — OWNER MANDATE (absolute, permanent):**
+- NEVER run `cargo test` (full suites or broad filters) locally
+  again. Not under any circumstances.
+- Local verification is COMPILE-LEVEL ONLY: `cargo check`,
+  `cargo clippy` (measurement only), `cargo fmt --check`,
+  budget gate, artifacts gate, `git`/grep inspection.
+- All TEST EXECUTION happens in CI (GitHub-hosted runners — not the
+  user's machine). After a code change, push and read CI test
+  results; CI green is the test evidence.
+- This supersedes every earlier ledger entry that used local
+  `cargo test` results as a round gate (those historical baselines
+  remain valid evidence of the times they were measured, but are
+  NOT a permission to re-run them).
+- Keep all other local work light: no long sleeps, no parallel
+  builds of large dependency trees when a single small crate
+  build suffices.
