@@ -660,7 +660,7 @@ impl HipblasLtMatmulHandle {
             self.workspace_pool().max_bytes,
         );
         let (workspace, workspace_bytes) = self.ensure_workspace(stream, workspace_request)?;
-        let workspace_ptr_raw = workspace.device_ptr() as *mut c_void;
+        let workspace_ptr_raw = workspace.device_ptr();
 
         let mut algo_blob_out = vec![0u8; ALGO_BLOB_MAX];
         let mut algo_blob_out_len: u64 = algo_blob_out.len() as u64;
