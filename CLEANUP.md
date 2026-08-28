@@ -9027,3 +9027,116 @@ verification = compile-level + gate scripts only. Harmless here
 (lightweight python unittest, baseline-matched) but the rule is the
 rule: future rounds must NOT run test suites locally — CI is the
 suite-verifier.
+
+## Cleanup Agent (round 136) — 2026-08-28
+
+**.github/workflows redundancy audit — 13 files / 2,301 lines read end-to-end;
+5 deletions executed (net −13, commit `191ad783f`), 0 test-suite runs
+(round-135 steering: local verification = YAML parse + gate scripts + grep
+only).**
+
+**Executed — all provably dead, zero consumers (all 13 workflows grepped; no
+explicit `outputs:` blocks exist anywhere — `grep -rn "outputs:"
+.github/workflows/` rc=1 and `needs.*.outputs` rc=1 — so item 1 reduces to
+step-id/output-reference checks, which is where the three dead ids below
+came from):**
+
+1. **perf-regression-nightly.yml:15-18 (was) — dead `trainer` workflow_dispatch
+   input (4 lines, item 6).** Declared with `default: 'both'` but
+   `inputs.trainer` is read NOWHERE: the matrix hardcodes
+   `trainer: [native, generic]` and every consumer uses `matrix.trainer`
+   (job name, baseline path, artifact name). `plan_backend_latency_fixture_dispatch.py`
+   (the only script naming the workflow) references neither the input nor
+   `trainer`. Deleted.
+2. **perf-regression-nightly.yml:271-279 (was) — dead `KILN_CUDA_NATIVE_TRAINING`
+   env request (net −4 after preserving the cross-check rationale as a step
+   comment, item 6).** Repo-wide grep: zero readers — `grep -rIn
+   KILN_CUDA_NATIVE_TRAINING crates/` rc=1; remaining hits are CHANGELOG
+   history, frozen docs/audits, .qualification/ snapshots, and the OUT-OF-SCOPE
+   twin dead-setter `scripts/cuda_qwen_sft_smoke.sh:92` (reported below, not
+   touched). docs/CONFIGURATION.md:404 documents the selector as retired
+   ("the obsolete legacy CUDA-native selector remains unavailable"). Deleted.
+3. **perf-regression-nightly.yml:320 (was) — always-true conditional (item 3,
+   net 0).** `if: ${{ github.event_name == 'workflow_dispatch' && ... }}` —
+   the `on:` block declares ONLY `workflow_dispatch`, so the event-name clause
+   is true on every possible run of this workflow. Simplified to
+   `if: inputs.latency_fixture_id != 'none'`. Behavior identical.
+4. **openenv-interop.yml:32 (was) — dead `OPENENV_INTEROP_ORACLE_SHA`
+   GITHUB_ENV export (1 line).** Single repo-wide hit is the write itself;
+   GITHUB_ENV is run-scoped, no later step / other workflow / artifact reads
+   it. Deleted after verifying `check_openenv_contract.py`'s required-term
+   list for this file (`schedule:` / `workflow_dispatch:` /
+   `checkout --detach origin/main`) is untouched — self-test PASSES post-edit.
+5. **server-release.yml:91 (was) — dead `KEYCHAIN_PATH` GITHUB_ENV export
+   (1 line).** All other `KEYCHAIN_PATH` hits are the same step's local shell
+   variable; the export was read by no downstream step (the signing step finds
+   the identity via the default search list set by
+   `security list-keychains -d user -s` in the same step). Deleted.
+6. **runpod-image.yml `id: build_local` (L61) + `id: build` (L117) and
+   docker-server-release.yml `id: version` (L41) — 3 dead step ids (3 lines,
+   item 1-class).** `grep -rn "steps\." .github/workflows/` enumerates every
+   step reference: none is `steps.build_local` / `steps.build` /
+   `steps.version` (each grep rc=1). Both docker steps are consumed via
+   GITHUB_ENV / `steps.meta.outputs` (kept, referenced) only. Deleted.
+
+**Report-only (owner-level, NOT touched):**
+
+- **Duplicated step logic (item 4).** server-release.yml repeats "Install
+  Rust stable" (5×), "Package tarball/zip" (5×), and the full "Upload to
+  GitHub release" draft-create + upload block (5×, ~20 lines each) across its
+  five platform jobs; the free-disk-space block is duplicated across
+  server-release.yml, ci.yml, and runpod-image.yml; the "portable
+  qualification evidence" step is intentionally duplicated between
+  repository-hygiene.yml and dispatch-only qualification-contract.yml
+  (self-documented in the latter's header). Composite-action/step extraction
+  = churn risk on release-critical paths — owner call.
+- **Redundant-but-intent-documenting guards (item 3-adjacent).** ci.yml's
+  four backend jobs use `if: github.event_name == 'workflow_dispatch' &&
+  inputs.backend_build == '...'` — the event-name clause is subsumed by the
+  inputs clause (inputs are empty on non-dispatch events) but reads as
+  deliberate "manual-only" documentation; net-0, left.
+- **Inline env shadow.** perf-regression-nightly.yml's build step prefixes
+  `KILN_CUDA_ARCHS=86` duplicating the job-level `KILN_CUDA_ARCHS: "86"`
+  (same value; job scope already applies) — provably redundant, net-0, left
+  as defensive explicitness.
+- **Out-of-scope twin dead-setter.** `scripts/cuda_qwen_sft_smoke.sh:92` sets
+  the same retired `KILN_CUDA_NATIVE_TRAINING` — queue if the owner wants
+  scripts/ swept for the same class.
+- **Unused secrets (item 2): NONE.** Every `secrets.X` requested in all 13
+  files is consumed (inline `run:`, step `env:`, or by the consuming
+  third-party action — tauri-action for the TAURI_SIGNING_*/APPLE_* set,
+  docker/login-action for GITHUB_TOKEN).
+- **Dead matrix entries / strategy vars (item 5): NONE.** desktop-build.yml's
+  3 include rows all consumed; perf-regression's native/generic rows consumed
+  by name/baseline/artifact and semantically load-bearing (cross-check).
+- **Stale local action refs (item 6): NONE.** All `uses:` are registry
+  actions; `uses: \./` grep rc=1.
+
+**NEW observation (closed-list instruction, reported once, not chased):**
+qualification-contract.yml is confirmed dispatch-only (`on:
+workflow_dispatch:` is its sole trigger) — its header already documents the
+overlap with repository-hygiene.yml as intentional; no action taken.
+
+**Net: −13 lines (18 deletions − 5 preserved-rationale comment insertions),
+5 workflow files, no other files touched.**
+
+**Verification (round-135 protocol — no test suites locally):** all 13
+workflow files parse clean via PyYAML `safe_load`; residual grep shows zero
+remaining references to any removed identifier; surviving step-output consumers (14 `steps.*.outputs` refs: ci.yml 8,
+runpod-image.yml 2, docker-server-release/pages/repository-hygiene/
+server-release 1 each) intact. Gate sweep:
+`check_production_file_budget.py` PASS (646 files, 5000-line default, 14
+reviewed exceptions); `check_repository_artifacts.py` PASS (4563 tracked
+paths); `check_openenv_contract.py --self-test` PASS (asserts on the edited
+openenv-interop.yml). Final hashes (sha256):
+`67a9a4d4611f9e615f880a8b02a18da9578491f37d6c6634aa874ccb3a3a0cb9`
+perf-regression-nightly.yml,
+`39f9e7781ab51184893576af3384dfe010ca730996e2e3dbaa5f8de8dbf41d64`
+openenv-interop.yml,
+`f0fe392980c5f1e7d5ba97824bd4457d3cc4cf27500eb768e07cf49eb7ab49cb`
+server-release.yml,
+`07289eabf40ab31894830d0960ec1d4754183e52b45278efa05782d1ca7716bd`
+docker-server-release.yml,
+`ac0b9a1b816373c7a2f3b2b01b0442d772d868d66c12a29c5eee4bb824cb6005`
+runpod-image.yml. Suite verification in CI (the edited workflows are all
+manual/tag/scheduled-triggered — next natural dispatch will execute them).
