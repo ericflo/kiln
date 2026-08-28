@@ -9758,3 +9758,109 @@ FAIL — root cause was the orchestrator's own harness (env-prefix word in the
 looped command string not parsed as an assignment, rc=127 "command not
 found"); direct invocations of the identical gate pass rc=0 twice. Gate
 itself green; loop artifact recorded as a steering lesson.
+
+## Cleanup Agent (round 156) — 2026-08-28
+
+**Cross-surface drift audit after the docs/ (R151–152) + scripts/ (R154) +
+bench-results/ (R155) reorganizations:** every narrative surface re-audited
+against disk; all four index READMEs verified mutually consistent with the
+physical layout. Light work only; no frozen prose touched.
+
+**Audit (live surfaces only):** six root product docs — 0 stale layout
+narrative or old-path residue (all references already on new paths);
+`README.md#...`/`QUICKSTART.md#...` anchor refs (4 + 2, plus
+desktop/README.md#troubleshooting from the site) — all resolve to real
+headings; docs/site pages — 0 stale path refs; repo-wide stale sweep over
+all 38 moved doc names + 9 moved bench-results files + 25 moved
+investigation scripts — **0 hits** on live surfaces (independent
+re-verification of the R151–155 sweeps); link checker over all 663 tracked
+.md files (535 relative .md links + 26 anchors) — **0 broken on live
+surfaces**; all 29 broken hits sit in frozen surfaces (CLEANUP.md ledger
+quotes, docs/archive/ prose, docs/audits `#L296` line-anchor) — untouched
+per protocol.
+
+**Fixes (2 files, 6 precision edits, each verified against disk / script
+source / workflow source):**
+- scripts/README.md — "6 subdirectories" → "5 subdirectories" (its own
+  Subdirectories section lists exactly 5 tracked dirs; the 6th on disk is
+  the untracked transient `__pycache__` byproduct).
+- bench-results/README.md — five regressions introduced by the R155 merge
+  (the pre-merge README had the correct facts; R155's merge table dropped
+  them): (1) **Regenerate line:** 5 phantom scripts
+  (check_candle_api_surface.py, check_customop_preserve.py,
+  check_dtype_usage.py, check_multi_gpu_seam.py, check_parity_tolerance.py —
+  none ever existed in git) → the real generators
+  `scripts/audit-candle-usage.sh`, `scripts/audit-customop.py`,
+  `scripts/audit-dtype-usage.py`, `scripts/audit-multi-gpu-seam.sh`,
+  `scripts/build-parity-tolerance.py` (1:1 artifact mapping, verified in
+  each script's header + the pre-merge README) plus the two previously
+  omitted generators `scripts/audit-preserve-list.sh` (preserve-list
+  family) and `scripts/audit-substrate-status.sh --markdown` — matching the
+  LOCKED lines in scripts/README.md. (2) **check_sft_train_regression.py
+  line:** phantom default baseline `regression/sft-train-2026-07-24.json`
+  (never existed in git; the script *requires* `--baseline`) → pinned
+  `regression/` baselines via `--baseline`, verified against the script's
+  argparse and perf-regression-nightly.yml:279 (`sft_${{ matrix.trainer
+  }}_a6000_baseline.json`, matrix = native/generic). (3) **Regression-gates
+  section:** phantom `regression/sft-train-2026-07-24.json` row → real
+  `regression/README.md` + `regression/sft_generic_a6000_baseline.json` +
+  `regression/sft_native_a6000_baseline.json` (the two real baseline JSONs
+  were previously unclaimed by the index). (4) **baselines/kiln-bench.json
+  line:** description ("Llama-3.1-8B Instruct on A6000 … 24 tok/s")
+  contradicted the tracked artifact itself (gpu_info: NVIDIA RTX 6000 Ada;
+  inference rows ~10.1 tok/s; 10278 MB peak) → restored the pre-R155
+  verified description (RTX 6000 Ada capture, model load + per-batch
+  inference). (5) **Backend-latency section:** phantom
+  `backend-latency/README.md` + phantom `check_backend_latency.py` + wrong
+  7-backend list (cuda/cuda-graph/rocm/rocm-graph/vulkan/vulkan-graph/cpu)
+  + phantom "±10%" → the five real tracked fixture artifacts (names verified
+  1:1 against `docs/contracts/backend-latency-fixtures.json`:
+  cuda-rtx4090-matmul, metal-apple-silicon-matmul,
+  metal-apple-silicon-sdpa, rocm-gfx1151-matmul,
+  vulkan-strix-halo-decode), validated by
+  `scripts/check_backend_latency_fixtures.py` against the locked
+  numeric-threshold manifest (absolute per-metric maxima, no ±10% anywhere).
+
+**Index agreement (4 READMEs vs disk, post-fix):** scripts/README.md —
+50/50 claimed top-level scripts exist on disk, 0 unclaimed disk files, all
+subdir claims (c2_artifacts 7 files, docs-site 5, hf_trl 2,
+investigations, qualification) on disk, family counts in the closing
+paragraph match the lists (3/12/6/10/7/2/4/6 = 50). scripts/
+investigations/README.md — 30/30 claimed files+5 family dirs on disk, 0
+unclaimed disk files, all 51 script references resolve (parent-level or
+family subdir). bench-results/README.md — 0 claimed paths missing, 0
+tracked files unclaimed, all 7 regenerate scripts exist. docs/README.md —
+36 claimed .md + 2 .json all on disk, 0 unclaimed disk files, subdir claims
+(audits/README.md, desktop/signing.md, papers/echo, papers/
+on-policy-distillation, 3 plans/ docs) all on disk; "five theme
+directories" count matches disk.
+
+**Gate set (Round 152's 12 + supplementary) — all PASS:** budget (646
+files) · artifacts (4564 tracked paths) · http_api (111 paths / 125 ops) ·
+openenv · runtime_env (448 reads / 19 mutations) · thinking_budget ·
+config_schema --self-test (117 fields) · source_parsing · latency_fixtures
+(0 missing slots) · docs_site_smoke (static mode; full mode's only failure
+is the pre-existing Chromium absence, same environmental condition as
+Rounds 5 and 152) · build --validate-only (59/59 documents) · build.test
+(11/11) — plus supplementary `generate_backend_capability_report.py
+--check` byte-identical.
+
+**Owner queue (report-only, no file changes):** (1) BENCHMARKS.md:441-442
+(multi-engine table "Source" cells) and BENCHMARKS.md:680-681 ("Raw JSON"
+note) still cite `bench-results/llama-bench.json` and
+`bench-results/llama-bench-a6000-post536.json` — both deleted in Round 107
+(commit 563981f7e, whose "zero refs" claim missed these four lines). No
+correct fix exists without an owner decision (drop the Source cells / the
+llama.cpp-side citation, or recapture). Pre-existing, not reorg-caused.
+(2) bench-results/README.md "Pre-migration baselines" line — "2026-05-17:
+Llama-3.1-8B Instruct on A6000 box (150 tok/s, 64 GB VRAM), 58.4 tok/s on
+ROCm, 44 tok/s on box 102": the data JSONs are untracked (only the README
+is tracked there), so the figures are unverifiable from the repo, and the
+directory's own README captures Qwen3.5-4B — possibly a stale borrowed
+description; left untouched pending owner judgment.
+(3) Frozen-surface stale refs (protocol: untouched): 21
+`docs/archive/candle-removal/*.md` → `../../CONFIGURATION.md` / `../..
+/NATIVE_SFT_PROFILE.md`, 2 in docs/archive/phase-c/, 1 in
+docs/archive/vk-harmonization/, CLEANUP.md ledger quotes,
+docs/audits/PHASE11_SERVER_TIMEOUT_POLICY.md `QUICKSTART.md#L296`
+(line-number anchor).

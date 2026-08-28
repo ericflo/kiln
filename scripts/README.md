@@ -1,7 +1,7 @@
 # Scripts
 
 Index of the 50 top-level scripts in `scripts/` (29 `.py`, 14 `.sh`, 7 `.mjs`)
-plus its 6 subdirectories. Every top-level script appears exactly once;
+plus its 5 subdirectories. Every top-level script appears exactly once;
 one-liners are read from each script's own header. `(CI)` marks
 load-bearing scripts referenced by `.github/workflows/`. The 25 frozen
 one-off investigation scripts + 5 phase-c family directories that used to sit
