@@ -178,14 +178,14 @@ alpha on the C40 setup, BF16 is the right load mode.
 
 ## Artifacts
 
-- [docs/archive/phase-c/phase-c40e/command.txt](docs/archive/phase-c/phase-c40e/command.txt)
-- [docs/archive/phase-c/phase-c40e/common-env.txt](docs/archive/phase-c/phase-c40e/common-env.txt)
+- [docs/archive/phase-c/phase-c40e/command.txt](../phase-c/phase-c40e/command.txt)
+- [docs/archive/phase-c/phase-c40e/common-env.txt](../phase-c/phase-c40e/common-env.txt)
 - [docs/archive/phase-c/phase-c40e/leg-a.env](docs/archive/phase-c/phase-c40e/leg-a.env)
 - [docs/archive/phase-c/phase-c40e/leg-b.env](docs/archive/phase-c/phase-c40e/leg-b.env)
-- [docs/archive/phase-c/phase-c40e/kiln-bench.sha256](docs/archive/phase-c/phase-c40e/kiln-bench.sha256)
-- [docs/archive/phase-c/phase-c40e/leg-a.exit](docs/archive/phase-c/phase-c40e/leg-a.exit)
-- [docs/archive/phase-c/phase-c40e/leg-b.exit](docs/archive/phase-c/phase-c40e/leg-b.exit)
-- [docs/archive/phase-c/phase-c40e/leg-a-w4a16.json](docs/archive/phase-c/phase-c40e/leg-a-w4a16.json)
+- [docs/archive/phase-c/phase-c40e/kiln-bench.sha256](../phase-c/phase-c40e/kiln-bench.sha256)
+- [docs/archive/phase-c/phase-c40e/leg-a.exit](../phase-c/phase-c40e/leg-a.exit)
+- [docs/archive/phase-c/phase-c40e/leg-b.exit](../phase-c/phase-c40e/leg-b.exit)
+- [docs/archive/phase-c/phase-c40e/leg-a-w4a16.json](../phase-c/phase-c40e/leg-a-w4a16.json)
 - [docs/archive/phase-c/phase-c40e/leg-a-w4a16.log](docs/archive/phase-c/phase-c40e/leg-a-w4a16.log)
-- [docs/archive/phase-c/phase-c40e/leg-b-bf16.json](docs/archive/phase-c/phase-c40e/leg-b-bf16.json)
+- [docs/archive/phase-c/phase-c40e/leg-b-bf16.json](../phase-c/phase-c40e/leg-b-bf16.json)
 - [docs/archive/phase-c/phase-c40e/leg-b-bf16.log](docs/archive/phase-c/phase-c40e/leg-b-bf16.log)

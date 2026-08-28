@@ -175,7 +175,7 @@ Practical follow-through for the next task:
 
 ## Artifacts
 
-- [docs/archive/phase-c/phase-c40d/main_seed0_temp0.json](docs/archive/phase-c/phase-c40d/main_seed0_temp0.json)
+- [docs/archive/phase-c/phase-c40d/main_seed0_temp0.json](../phase-c/phase-c40d/main_seed0_temp0.json)
 - [docs/archive/phase-c/phase-c40d/main_seed0_temp0.log](docs/archive/phase-c/phase-c40d/main_seed0_temp0.log)
-- [docs/archive/phase-c/phase-c40d/reference_seed0_temp0.json](docs/archive/phase-c/phase-c40d/reference_seed0_temp0.json)
+- [docs/archive/phase-c/phase-c40d/reference_seed0_temp0.json](../phase-c/phase-c40d/reference_seed0_temp0.json)
 - [docs/archive/phase-c/phase-c40d/reference_seed0_temp0.log](docs/archive/phase-c/phase-c40d/reference_seed0_temp0.log)

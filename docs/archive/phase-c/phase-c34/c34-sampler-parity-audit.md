@@ -552,7 +552,7 @@ median-of-3.
 
 ### Kiln (this repo)
 
-- [`crates/kiln-model/src/speculative.rs:701-870`](../../crates/kiln-model/src/speculative.rs)
+- [`crates/kiln-model/src/speculative.rs:701-870`](../../../../crates/kiln-model/src/speculative.rs)
   — `speculative_mtp_decode_step`:
   - L714 — `_params: &SamplingParams` (proof of non-consumption)
   - L716 — `_rng: &mut StdRng` (proof of non-consumption)
@@ -562,19 +562,19 @@ median-of-3.
   - L836 — `if eos_token_ids.contains(&draft_token)` (EOS on draft)
   - L843-844 — `let verify_pos1 = ...; let bonus = greedy_sample(&verify_pos1)...`
   - L845 — `if eos_token_ids.contains(&bonus)` (EOS on bonus)
-- [`crates/kiln-server/src/bench.rs:289-308`](../../crates/kiln-server/src/bench.rs)
+- [`crates/kiln-server/src/bench.rs:289-308`](../../../../crates/kiln-server/src/bench.rs)
   — `build_prompt` (raw-prose workload)
-- [`crates/kiln-server/src/bench.rs:1221-1460`](../../crates/kiln-server/src/bench.rs)
+- [`crates/kiln-server/src/bench.rs:1221-1460`](../../../../crates/kiln-server/src/bench.rs)
   — `bench_latency_paged_mtp`:
   - L1293-1309 — prefill + first-token greedy seed
   - L1326-1334 — `SamplingParams { temperature: 0.0, top_p: 1.0, top_k: 0, ... }`
   - L1349-1366 — `speculative_mtp_decode_step(...)` call site
   - L1421-1425 — α definition
-- [`crates/kiln-core/src/tokenizer.rs:76-82`](../../crates/kiln-core/src/tokenizer.rs)
+- [`crates/kiln-core/src/tokenizer.rs:76-82`](../../../../crates/kiln-core/src/tokenizer.rs)
   — `encode(text, false)`
-- [`crates/kiln-core/src/tokenizer.rs:98-103`](../../crates/kiln-core/src/tokenizer.rs)
+- [`crates/kiln-core/src/tokenizer.rs:98-103`](../../../../crates/kiln-core/src/tokenizer.rs)
   — `apply_chat_template` (exists; not wired into bench)
-- [`crates/kiln-core/src/tokenizer.rs:106-119`](../../crates/kiln-core/src/tokenizer.rs)
+- [`crates/kiln-core/src/tokenizer.rs:106-119`](../../../../crates/kiln-core/src/tokenizer.rs)
   — `eos_token_ids`
 
 <a id="references-vllm"></a>

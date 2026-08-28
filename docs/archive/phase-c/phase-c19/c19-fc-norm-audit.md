@@ -67,7 +67,7 @@ shapes.
 
 ### 2. Kiln loader covers both norms
 
-`load_mtp_if_present` ([`crates/kiln-model/src/loader.rs:612-755`](../../crates/kiln-model/src/loader.rs))
+`load_mtp_if_present` ([`crates/kiln-model/src/loader.rs:612-755`](../../../../crates/kiln-model/src/loader.rs))
 extracts both pre-fc norms and stores them as distinct `MtpWeights` fields:
 
 ```rust
@@ -92,7 +92,7 @@ missing in the checkpoint, `extract_tensor` errors out and load fails loudly.
 
 ### 3. Kiln forward applies both norms to the correct halves
 
-`mtp_forward_step` ([`crates/kiln-model/src/forward.rs:4474-4489`](../../crates/kiln-model/src/forward.rs))
+`mtp_forward_step` ([`crates/kiln-model/src/forward.rs:4474-4489`](../../../../crates/kiln-model/src/forward.rs))
 applies the two norms to the embedding half and the hidden half before
 concatenation:
 
@@ -117,7 +117,7 @@ inside `model_forward_paged` to produce the post-final-norm `h_prev` that
 
 ### 4. HF Python reference confirms the dual-norm pattern
 
-The reference dump at [`scripts/mtp_reference_dump.py`](../../scripts/mtp_reference_dump.py)
+The reference dump at [`scripts/mtp_reference_dump.py`](../../../../scripts/mtp_reference_dump.py)
 documents HF Transformers' Qwen3-Next MTP forward as a 7-step routine with
 **two pre-fc norms applied to two halves**, identical to kiln's structure.
 There is no single `fc_norm` step in the reference either; the reference and

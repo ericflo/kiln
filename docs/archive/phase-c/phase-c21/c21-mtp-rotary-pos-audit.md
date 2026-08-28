@@ -361,13 +361,13 @@ Carrying the C18 handoff item 4 forward as the new head of the queue,
 
 Concrete artifacts in scope:
 
-- `mtp.fc` projection ([`forward.rs:4527-4543`](../../crates/kiln-model/src/forward.rs)):
+- `mtp.fc` projection ([`forward.rs:4527-4543`](../../../../crates/kiln-model/src/forward.rs)):
   the `concat([pre_fc_norm_embedding(embed), pre_fc_norm_hidden(h_prev)])`
   → `[2H → H]` projection. Cross-check that residual / bias / dtype
   exactly mirrors `Qwen3NextMultiTokenPredictor.forward`'s `fc`
   application.
 - `mtp.layer` first-residual application
-  ([`forward.rs:4605-4622`](../../crates/kiln-model/src/forward.rs)):
+  ([`forward.rs:4605-4622`](../../../../crates/kiln-model/src/forward.rs)):
   the inner `transformer_block_paged` call expects `residual = None`
   on entry per HF
   ([`qwen3_next_mtp.py:115`](#references-vllm) sets `residual = None`).
@@ -385,7 +385,7 @@ on deck as the fallback if H4 also disproves cleanly.
 
 1. **Targeted forward read.** Trace `mtp.fc` and the inner-block
    residual hand-off in `mtp_forward_step`
-   ([`forward.rs:4500-4622`](../../crates/kiln-model/src/forward.rs)).
+   ([`forward.rs:4500-4622`](../../../../crates/kiln-model/src/forward.rs)).
    Compare the dtype, bias, and residual-init sequence to vLLM's
    `Qwen3NextMultiTokenPredictor.forward` *and* to
    `Qwen3NextDecoderLayer.forward` (the inner block) one line at a

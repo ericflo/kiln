@@ -77,14 +77,14 @@ Because the loaded tokenizer sets no Jinja template string
 explicitly in-bench, `apply_chat_template` falls through to the
 plain ChatML framing (`<|im_start|>user\n...<|im_end|>\n
 <|im_start|>assistant\n`) defined at
-[`kiln-core/src/tokenizer.rs:152-163`](../../crates/kiln-core/src/tokenizer.rs).
+[`kiln-core/src/tokenizer.rs:152-163`](../../../../crates/kiln-core/src/tokenizer.rs).
 This is the same surface that production ChatML traffic hits
 through the HTTP server — no special-token divergence.
 
 **`KILN_MTP_ARGMAX_FP32`** (new env flag): gates a
 `.to_dtype(DType::F32)?` cast before each of the three
 `greedy_sample` call sites in
-[`speculative.rs::speculative_mtp_decode_step`](../../crates/kiln-model/src/speculative.rs)
+[`speculative.rs::speculative_mtp_decode_step`](../../../../crates/kiln-model/src/speculative.rs)
 (draft, verify pos-0, bonus) and the one prefill seed call
 in `bench.rs::bench_latency_paged_mtp`. Off-by-default (matches
 C18 baseline), on-by-env (matches vLLM
@@ -254,10 +254,10 @@ long as the switch is disclosed.
 ### 4.1 Merged in this PR
 
 - `--chat-template` CLI flag on `kiln-bench` MTP arm
-  ([`bench.rs`](../../crates/kiln-server/src/bench.rs))
+  ([`bench.rs`](../../../../crates/kiln-server/src/bench.rs))
 - `KILN_MTP_ARGMAX_FP32` env flag with `mtp_argmax_fp32_enabled()`
   + `argmax_input()` helper in
-  [`speculative.rs`](../../crates/kiln-model/src/speculative.rs)
+  [`speculative.rs`](../../../../crates/kiln-model/src/speculative.rs)
 - `ChatMessage` import routed from `kiln_core::tokenizer`
 - Three `greedy_sample` call sites in
   `speculative_mtp_decode_step` gated on the env flag

@@ -54,7 +54,7 @@ sequence:
 
 ### 1. Loader path — substitution is structurally impossible
 
-`load_mtp_if_present` ([`crates/kiln-model/src/loader.rs:684-685`](../../crates/kiln-model/src/loader.rs))
+`load_mtp_if_present` ([`crates/kiln-model/src/loader.rs:684-685`](../../../../crates/kiln-model/src/loader.rs))
 constructs the MTP layer prefix from the MTP root and dispatches into
 the same `load_layer` helper used by every main-stack layer:
 
@@ -67,7 +67,7 @@ let layer = load_layer(tensor_map, &mtp_layer_prefix, 3, config)
 
 `mtp_prefix` is `"mtp."` (resolved earlier in the same function), so
 `mtp_layer_prefix` evaluates to `"mtp.layers.0."`. `load_layer`
-([`loader.rs:357-396`](../../crates/kiln-model/src/loader.rs))
+([`loader.rs:357-396`](../../../../crates/kiln-model/src/loader.rs))
 then string-formats the four norm keys against the caller's prefix:
 
 ```rust
@@ -83,7 +83,7 @@ let post_attention_layernorm = extract_tensor(tensor_map,
 AttentionWeights::Full(load_full_attention(tensor_map, prefix, ...)?)
 ```
 
-`load_full_attention` ([`loader.rs:399-438`](../../crates/kiln-model/src/loader.rs))
+`load_full_attention` ([`loader.rs:399-438`](../../../../crates/kiln-model/src/loader.rs))
 extends the same prefix with `self_attn.`:
 
 ```rust
@@ -113,7 +113,7 @@ attention.Full.{q,k}_norm}` after load (no such code path exists).
 
 ### 2. Runtime path — the MTP block consumes the MTP layer struct
 
-`mtp_forward_step` ([`crates/kiln-model/src/forward.rs:4605-4622`](../../crates/kiln-model/src/forward.rs))
+`mtp_forward_step` ([`crates/kiln-model/src/forward.rs:4605-4622`](../../../../crates/kiln-model/src/forward.rs))
 calls the same `transformer_block_paged` used by main-stack full-attn
 layers, but passes `&mtp.layer` (the MTP-specific `GpuLayerWeights`)
 as the layer argument:
@@ -141,7 +141,7 @@ let mtp_hidden_result = transformer_block_paged(
 ```
 
 Inside `transformer_block_paged`
-([`forward.rs:3770-3868`](../../crates/kiln-model/src/forward.rs))
+([`forward.rs:3770-3868`](../../../../crates/kiln-model/src/forward.rs))
 the four norm taps reference fields of the layer struct passed in —
 no main-stack lookup, no global state:
 
@@ -174,7 +174,7 @@ let normed = {
 };
 ```
 
-`gqa_attention_paged` ([`forward.rs:3196-3201`](../../crates/kiln-model/src/forward.rs))
+`gqa_attention_paged` ([`forward.rs:3196-3201`](../../../../crates/kiln-model/src/forward.rs))
 applies the per-head Q/K norms from the same `attn_weights` it was
 handed:
 
@@ -199,7 +199,7 @@ never reachable from this call chain.
 
 The HF reference applies the four norms in this sequence (paraphrased
 from `Qwen3NextMtpDecoderLayer.forward` and verified via
-[`scripts/mtp_reference_dump.py`](../../scripts/mtp_reference_dump.py)):
+[`scripts/mtp_reference_dump.py`](../../../../scripts/mtp_reference_dump.py)):
 
 ```
 hidden = input_layernorm(hidden)
@@ -264,10 +264,10 @@ Carrying the C18 handoff item 3 forward as the new head of the queue:
 
 Concrete artifacts in scope:
 
-- `mtp_forward_step` ([`forward.rs:4605-4622`](../../crates/kiln-model/src/forward.rs))
+- `mtp_forward_step` ([`forward.rs:4605-4622`](../../../../crates/kiln-model/src/forward.rs))
   passes `mtp_pos` and `&positions` into `transformer_block_paged` as
   the `start_pos` and `positions` arguments.
-- `gqa_attention_paged` ([`forward.rs:3215-3296`](../../crates/kiln-model/src/forward.rs))
+- `gqa_attention_paged` ([`forward.rs:3215-3296`](../../../../crates/kiln-model/src/forward.rs))
   applies RoPE using the `positions` tensor and `inv_freq`.
 - HF reference: `Qwen3NextMtpDecoderLayer.forward` builds
   `position_ids` for the MTP step from `position_ids + 1` relative to
