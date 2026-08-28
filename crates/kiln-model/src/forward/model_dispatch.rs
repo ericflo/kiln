@@ -308,7 +308,7 @@ pub fn model_forward_paged_decode_contiguous_batch_sample_with_ids(
 /// owned device tensors instead of from transient `Tensor::from_slice`
 /// allocations that would be `cudaFree`'d when the per-call meta
 /// drops at end of capture. This pins the `ILLEGAL_ADDRESS` fault
-/// documented in `bench-results/cuda-graph-bs2-memcheck.md` (#1082).
+/// documented in `bench-results/findings/cuda-graph-bs2-memcheck.md` (#1082).
 /// All four stable parameters are independent: callers may pass any
 /// subset that matches the buffers their captured-region setup
 /// pre-allocates and re-fills.
@@ -348,7 +348,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     // Mirrors the bs=1 `PagedDecodeGraphInputs::{rotary_cos,
     // rotary_sin}` plumbing into `gqa_attention_paged_with_rope_tables`
     // (#1082 suspect 2 — see
-    // `bench-results/cuda-graph-bs2-secondary-audit.md`).
+    // `bench-results/findings/cuda-graph-bs2-secondary-audit.md`).
     stable_rotary_cos_gpu: Option<&Tensor>,
     stable_rotary_sin_gpu: Option<&Tensor>,
     // Runner-owned or per-step `[batch]` u32 per-row KV-write slot tensor.
@@ -467,7 +467,7 @@ pub(super) fn model_forward_paged_decode_contiguous_batch_hidden_inner(
         // around those instead of allocating fresh per-step tensors
         // via `Tensor::from_slice`. The transient-allocation path bakes
         // dangling pointers into the captured graph (#1082, see
-        // `bench-results/cuda-graph-bs2-memcheck.md`). Both stable
+        // `bench-results/findings/cuda-graph-bs2-memcheck.md`). Both stable
         // tensors must be supplied together — they're a single
         // logical "meta" input pair. If only one is provided, fall
         // back to the regular build path to keep the code obviously
@@ -3090,8 +3090,8 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
     // allocated *inside* the captured region would otherwise `cudaFree` their
     // storage at end of capture, leaving the graph with dangling pointers (the
     // `ILLEGAL_ADDRESS` faults documented in
-    // `bench-results/cuda-graph-bs2-memcheck.md` and suspects 1-4 in
-    // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082). This twin
+    // `bench-results/findings/cuda-graph-bs2-memcheck.md` and suspects 1-4 in
+    // `bench-results/findings/cuda-graph-bs2-secondary-audit.md`, #1082). This twin
     // diverges from the eager batched forward ONLY in what it does with the
     // resulting `hidden`: it stops before final_norm + lm_head and writes the
     // hidden to the stable `output_hidden` buffer.

@@ -676,7 +676,7 @@ versus the 88.43 quoted here at 512 → 256 on RTX 6000 Ada sm_89.
 | llama.cpp `408225b` (RTX 6000 Ada, 512 → 256) | **8224.45** | **88.43** | ~62 ms | **8820 MB** |
 | kiln `f3d5089` (pre-Phase-6, RTX 6000 Ada, 512 → 256) | 36.31 | 10.89 | 13934 ms | 10278 MB |
 
-Raw JSON: `bench-results/kiln-bench.json` (kiln side, stale) and
+Raw JSON: `bench-results/baselines/kiln-bench.json` (kiln side, stale) and
 `bench-results/llama-bench.json` (llama.cpp side, RTX 6000 Ada — superseded
 in the multi-engine table by `bench-results/llama-bench-a6000-post536.json`).
 

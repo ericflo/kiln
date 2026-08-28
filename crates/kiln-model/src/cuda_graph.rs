@@ -1888,7 +1888,7 @@ impl CudaGraphRunner {
         //
         // NOTE (BUG2): an earlier change (reverted here) flipped this to flags=0
         // on the theory that AUTO_FREE re-allocated the GDN state buffers each
-        // replay. That theory is WRONG: `bench-results/cuda-graph-box102-findings.md`
+        // replay. That theory is WRONG: `bench-results/findings/cuda-graph-box102-findings.md`
         // (runtime-instrumented on A6000) explicitly tested flags=0 here and saw
         // IDENTICAL token-doubling (finding #3) — flags=0 is orthogonal to BUG2.
         // The real divergence is a layer-0/input replay staleness still under

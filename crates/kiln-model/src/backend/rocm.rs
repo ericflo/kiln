@@ -1809,7 +1809,7 @@ impl ReplayBackend for RocmBackend {
         // Some` case must stay on the with-graph-outputs kt path. That path
         // specifically exists to fix the dangling-pointer hazard
         // documented in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
+        // `bench-results/findings/cuda-graph-bs2-secondary-audit.md` suspects
         // 3+4; the ROCm HIP graph runner follows the same stable-output
         // contract and re-uses caller-owned
         // tensors across replays. When `graph_outputs == None` (the

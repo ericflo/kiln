@@ -5,7 +5,7 @@
 **`--gpu-smoke` follow-up the same day**: full `cargo build --release
 --features cuda --bin kiln-bench` succeeded in 15m 56s, producing
 a 51MB binary linked against cuBLAS/cuBLASLt/cuRAND. See
-`substrate-validate-2026-05-23.md` for the full report.
+`findings/substrate-validate-2026-05-23.md` for the full report.
 
 **Phase 3 kt-API surface (same day):** five kernel crates now have a
 `kiln_tensor::Tensor`-typed surface alongside their candle-typed

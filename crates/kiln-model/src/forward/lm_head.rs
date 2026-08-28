@@ -335,7 +335,7 @@ pub(super) fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Opti
     // remains valid on every replay — fixing the
     // `CUDA_ERROR_ILLEGAL_ADDRESS` fault at
     // `greedy_sample_rows(captured.output_logits)` documented in
-    // `bench-results/cuda-graph-status.md` (2026-05-26 entries).
+    // `bench-results/findings/cuda-graph-status.md` (2026-05-26 entries).
     let installed_output_buffer = try_take_lm_head_output_buffer(&out_shape, x.dtype());
     if let Some(dst) = installed_output_buffer {
         // The thread-local hands us a kt Tensor shaped like `[batch, 1, vocab]`.
