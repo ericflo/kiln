@@ -4294,7 +4294,7 @@ mod tests {
         let loss = res
             .expect("try_tape_grpo_pg_loss_from_logits_kt errored")
             .expect("returned None on ROCm — GRPO tape gate REJECTED Rocm (regression #1454)");
-        assert!(tape.len() >= 1, "GRPO must record a tape node on ROCm");
+        assert!(!tape.is_empty(), "GRPO must record a tape node on ROCm");
 
         let seed = KtTensor::from_vec_on(device, vec![1.0f32], vec![]).unwrap();
         let grads = tape
