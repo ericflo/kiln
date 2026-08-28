@@ -8044,3 +8044,17 @@ authoritative confirm.
 **Standing rule.** `[workspace.dependencies]` entries with zero
 `workspace = true` consumers are dead config: delete (verify with
 cargo metadata + CI), don't accumulate.
+
+## Wave 7 — assets/ README + navigation-layer closure [2026-08-28]
+
+**Deliverable.** `assets/README.md` (9 lines): logo.png (site branding,
+verified referenced by 4 docs/site pages) + the Phase B3 MTP
+aggregation tool with its evidence pairing.
+
+**Navigation layer now COMPLETE — every tracked top-level tree has a
+README:** docs/ (wave 2 + 12 family READMEs), scripts/ (wave 3),
+crates/ (wave 5, 33-crate map), contracts/ (wave 5, 15 files with
+enforcers), deploy/ (wave 5), benchmarks/ (wave 5), bench-results/
+(wave 5), qualification/ (wave 5), desktop/ (pre-existing),
+capabilities/ (pre-existing, owner-managed), assets/ (this wave).
+`adapters/` = gitignored local runtime dir (no README by design).
