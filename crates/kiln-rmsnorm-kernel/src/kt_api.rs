@@ -518,7 +518,7 @@ pub fn fused_rotary_qk_kt(
             "kt-rotary: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if rotary_dim % 2 != 0 {
+    if !rotary_dim.is_multiple_of(2) {
         return Err(RmsNormError::Msg(format!(
             "kt-rotary: rotary_dim {rotary_dim} must be even"
         )));
@@ -1238,7 +1238,7 @@ pub fn fused_rotary_one_kt(
             "kt-rotary-one: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if rotary_dim % 2 != 0 {
+    if !rotary_dim.is_multiple_of(2) {
         return Err(RmsNormError::Msg(format!(
             "kt-rotary-one: rotary_dim {rotary_dim} must be even"
         )));
@@ -1873,7 +1873,7 @@ pub fn fused_rotary_one_bwd_kt(
             "kt-rotary-one-bwd: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if rotary_dim % 2 != 0 {
+    if !rotary_dim.is_multiple_of(2) {
         return Err(RmsNormError::Msg(format!(
             "kt-rotary-one-bwd: rotary_dim {rotary_dim} must be even"
         )));
@@ -2200,7 +2200,7 @@ pub fn supports_rotary_qk_kt(
         || k.rank() != 4
         || rotary_dim == 0
         || rotary_dim > head_dim
-        || rotary_dim % 2 != 0
+        || !rotary_dim.is_multiple_of(2)
     {
         return false;
     }
@@ -2266,7 +2266,7 @@ pub fn supports_attn_decode_qkv_prep_kt(
         || head_dim > 8192
         || rotary_dim == 0
         || rotary_dim > head_dim
-        || rotary_dim % 2 != 0
+        || !rotary_dim.is_multiple_of(2)
     {
         return false;
     }
@@ -2337,7 +2337,7 @@ pub fn supports_l2_qk_norm_gqa_kt(q: &KtTensor, k: &KtTensor, nv: usize) -> bool
     let dims = q.shape();
     let nk = dims[2];
     let dk = dims[3];
-    nk > 0 && dk == 128 && nv >= nk && nv % nk == 0
+    nk > 0 && dk == 128 && nv >= nk && nv.is_multiple_of(nk)
 }
 
 /// kt twin of [`crate::supports_lora_decode_add`].
