@@ -33,7 +33,7 @@ import macos_platform
 import wsl_platform
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
-from result_details import compact_details, join_details
+from result_details import join_details
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
 from strict_json import JSON_INTEGER_MAX_DIGITS, loads as strict_json_loads
 from workload import (
@@ -1517,12 +1517,6 @@ def _runner_metrics(
             raise QualificationRunError(f"runner metric {name!r} has no canonical definition")
         values[name] = {"name": name, "value": value, **definition}
     return [values[name] for name in sorted(declared)]
-
-
-def _compact_details(value: str) -> str:
-    result = compact_details(value, MAX_RESULT_DETAIL_CHARACTERS)
-    assert result is not None
-    return result
 
 
 def _join_details(*values: str | None) -> str | None:
