@@ -7475,3 +7475,56 @@ judgment classes (TMA ×7, type_complexity ×3, PIP ×1,
 mut_passed ×5, await_holding_mutex ×3, should_implement_trait ×1,
 items_after_test_module ×1) + owner-design (kiln-tensor E0599 ×6,
 kiln-train E0061 ×5, max_seqlen_k) — see owner queue (round 122).
+
+## Cleanup Agent (round 122 — OWNER DECISION QUEUE, definitive)
+
+**Date:** 2026-08-28
+
+Mechanical lint debt is CLOSED workspace-wide (34/34 crates, all
+buildable lanes, round 121). What remains is exclusively
+owner-judgment. Every item below was re-measured today (per-lane
+clippy, corrected span filter); ledger memory of earlier counts was
+verified and stale entries dropped (the old "kiln-train TMA ×5" and
+"kiln-model reporting.rs TC" no longer exist in the tree).
+
+**A. Judgment-class lint keeps (owner may waive or redesign):**
+1. kiln-core tokenizer.rs:449, :602 — `type_complexity` ×2.
+2. kiln-core tokenizer.rs:785 — `too_many_arguments` (8/7).
+3. kiln-model cuda_graph.rs:1477 — `too_many_arguments` (12/7),
+   cuda lane.
+4. kiln-model forward/tests/mod.rs:3159/3192/3885/8530/8547 —
+   `unnecessary_mut_passed` ×5 (call sites; fixing = changing
+   library fns' `&mut cache` params to `&` — API-level).
+5. kiln-train grpo_step.rs:1003, forward_backward.rs:335/336 —
+   `unused_assignments` ×3 (dropping initializers breaks the vulkan
+   lane — round 118 evidence; needs a vulkan-safe refactor).
+6. kiln-train opd_tape_shim.rs:508 (+ grpo_tape_shim.rs:1197) —
+   `private_in_public` ×1 (`EchoEnvSpec` more private than
+   `try_tape_opd_echo_env_compose_kt`).
+7. kiln-server tests/real_model_integration.rs:1463 —
+   `too_many_arguments` (10/7).
+8. kiln-server tests/real_model_integration.rs:1999/2029/2059 —
+   `await_holding_mutex` ×3 (fix = moving awaits outside the lock;
+   concurrency-semantics change).
+9. kiln-tensor cuda_storage.rs:2338 — `items_after_test_module`
+   (structural; moving code = large diff in a 6700-line file).
+**B. Owner-design (pre-existing, not lint debt):**
+10. kiln-tensor TEST target, rocm lane: E0599 ×6
+    (rocm_matmul.rs:201/321/1251/1291/1300, paged_decode_meta.rs:974)
+    — kiln-hip gates `Auto`/`qualified()` behind its
+    `hardware-qualification` feature, off when kiln-hip builds as a
+    dep of kiln-tensor's tests. Owner decision: enable the feature
+    in the dev-dependency or restructure the tests.
+11. kiln-train TEST target: E0061 ×5 (unresolved imports in test
+    modules) — same class: test-target-only feature wiring.
+12. kiln-model `max_seqlen_k` (full_attention.rs:2224, rocm lane) —
+    OPEN QUESTION for owner: 4 parallel struct families carry the
+    field; rocm lane never reads it. Delete all 4 (net removal) or
+    keep for backend parity?
+
+**C. Standing protocol reminders for the owner:**
+- CI has NO ROCm/cublasLt lane: all rocm/cuda-lane evidence is
+  local-only (rounds 111b-121).
+- `pub` API deletions require explicit owner sign-off (rounds 109/
+  110 precedent); everything in this queue is crate-internal or
+  test-scoped, so no public API changes are proposed anywhere.
