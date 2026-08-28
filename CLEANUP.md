@@ -9401,3 +9401,26 @@ a future round.
   verified load-bearing (target tracked + on disk). `Qwen3.5-4B/`
   rule verified live (16 GB local weights on disk).
   Budget + artifact gates green.
+
+## Round 146 — duplicate-file scan + audits-index adjudication [2026-09-02]
+
+- **Byte-identical tracked duplicates (non-vendor, non-frozen): 4 groups,
+  all report-only.**
+  1. kiln-blas/src/backend_matmul.rs ≡ kiln-rocblas/src/backend_matmul.rs
+     (12,115 B) and kiln-blas/src/workspace_pool.rs ≡
+     kiln-rocblas/src/workspace_pool.rs (3,819 B) — two crates carry
+     byte-identical module pairs. Consolidation (shared private module
+     or codegen) is an architectural decision → owner queue.
+  2. docs/site/fonts: Inter-400/500/600/700.woff2 are the SAME 48,256 B
+     file ×4, JetBrainsMono-400/500/600.woff2 same 31,432 B ×3 — four
+     and three font-weight slots ship byte-identical binaries (visual
+     weight variation is absent on the site). docs/site/ is
+     owner-managed → report-only (owner should re-cut the fonts or
+     collapse to one weight).
+- **docs/audits/README.md**: campaign wave-1 policy+highlights index
+  (129 lines); links its 11 load-bearing reports correctly, 0 phantoms;
+  the other 41 receipts are self-describing frozen evidence — a full
+  inventory would be an addition against deletion-preference. No
+  anomaly, left as-is.
+- 0 deletions; 3 owner-queue observations added (blas/rocblas
+  duplication, Inter font weights, JetBrainsMono weights).
