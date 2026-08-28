@@ -8024,3 +8024,23 @@ Trajectory: 130 (wave-2 census) → 83 (post wave-4). All mechanically
 fixable hrefs have been repaired (63 in wave 4 + 1 in wave 2).
 **Campaign closed.** New broken links must be caught by the Pages
 link-checker (site-scope) or re-run of this scan during a docs wave.
+
+## Wave 6 — dead `[workspace.dependencies]` removal (net −8) [2026-08-28]
+
+**Finding.** 62 workspace dependency entries; 54 are consumed by at
+least one crate via `workspace = true`. 8 are referenced by NO crate:
+kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-kt-bridge,
+kiln-marlin-gemm, kiln-graph-cuda, kiln-graph-vulkan, kiln-server.
+Consumers declare these path deps directly
+(e.g. `crates/kiln-model/Cargo.toml:33`), making the workspace table
+entries inert.
+
+**Fix.** Deleted exactly the 8 inert entries (8 lines, no comments or
+other changes). Verification: `cargo metadata --no-deps` OK (full
+33-member workspace resolves — no `workspace = true` reference was
+lost); `git diff --stat` = 1 file, 8 deletions. CI full build is the
+authoritative confirm.
+
+**Standing rule.** `[workspace.dependencies]` entries with zero
+`workspace = true` consumers are dead config: delete (verify with
+cargo metadata + CI), don't accumulate.

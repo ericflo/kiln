@@ -160,16 +160,11 @@ cudarc = { version = "0.19.4", default-features = false, features = [
     "cuda-version-from-build-system",
     "dynamic-linking",
 ] }
-kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
-kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
-kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 # kiln-hip — bounded ROCm/HIP runtime bindings (the cudarc analog) for the
 # ROCm backend. Pulled in by kiln-tensor's `rocm` feature in Phase R.3.
 kiln-hip = { path = "crates/kiln-hip" }
 kiln-rocblas = { path = "crates/kiln-rocblas" }
-kiln-kt-bridge = { path = "crates/kiln-kt-bridge" }
-kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-memory = { path = "crates/kiln-memory" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-openenv = { path = "crates/kiln-openenv" }
@@ -194,15 +189,12 @@ kiln-blas = { path = "crates/kiln-blas" }
 kiln-core = { path = "crates/kiln-core" }
 kiln-eval = { path = "crates/kiln-eval" }
 kiln-graph = { path = "crates/kiln-graph" }
-kiln-graph-cuda = { path = "crates/kiln-graph-cuda" }
 kiln-graph-metal = { path = "crates/kiln-graph-metal" }
-kiln-graph-vulkan = { path = "crates/kiln-graph-vulkan" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-optim = { path = "crates/kiln-optim" }
 kiln-param = { path = "crates/kiln-param" }
 kiln-resource = { path = "crates/kiln-resource" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
-kiln-server = { path = "crates/kiln-server" }
 kiln-tensor = { path = "crates/kiln-tensor" }
 kiln-tensor-id = { path = "crates/kiln-tensor-id" }
 kiln-train = { path = "crates/kiln-train" }
