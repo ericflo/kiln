@@ -8208,3 +8208,121 @@ net −6 lines). This ledger entry lands as its own follow-up commit.
   `kt_in` / `candle_out` / `to_candle` test helpers.
 - Phase-4 Metal/Vulkan op kernels (the 24 ops TODOs) remain the real
   pending work behind the kiln-tensor ops TODOs.
+
+## Round 128 — config-surface integrity: kiln.example.toml ↔ schema ↔ parser cross-audit [2026-08-28]
+
+**Scope.** Key-level and section-level cross-check of the user-facing
+`kiln.example.toml` (506 lines, 38,602 bytes — the "93KB" figure in the
+round brief is stale), `contracts/kiln-config-v1.schema.json`
+(17 top-level sections; `agent` is the 17th; 117 fixed canonical
+`x-kiln-path` fields + 3 dynamic `<id>` templates; every root property is
+a `$ref` into `$defs`), and the typed parser
+(`KilnConfig`, `crates/kiln-server/src/config.rs`). Method: a python
+script resolved the schema through `$defs`/`x-kiln-path` (no naive
+traversal), extracted the 17 parser section structs + both dynamic
+credential-map value structs by struct-field parse, and grepped every
+field name in `crates/kiln-server/src/` as a liveness cross-check.
+
+**Task 1 — key table (83 active dotted keys). Result: 83/83 in-schema,
+83/83 in-parser, 83/83 grep-live. ZERO anomalies (no `!`).** All 83 keys
+also appear in the corresponding `deny_unknown_fields` serde struct, so
+each is deserialized, not merely name-matching. Grouped by section
+(schema = parser = YES for every key; no anomalies):
+
+| section (active keys) | keys | verdict |
+|---|---|---|
+| server (16) | serving_profile, deterministic, host, port, request_timeout_secs, terminal_access, shutdown_timeout_secs, chat_performance_metadata, chat_config_hash_metadata, slow_request_warn_secs, stream_stall_grace_ms, max_batch_tokens, max_prefill_tokens_per_cycle, max_prefill_layers_per_cycle, max_decode_batch, debug_model_state | all OK |
+| accelerator (15) | kt_api_mode, full_attention_score_budget_mib, vulkan_device_index, vulkan_validation, cuda_kernel_profile, cuda_marlin_profile, cuda_flash_backward_mode, metal_kernel_profile, rocm_synchronization_mode, rocm_strided_batched_matmul_mode, rocm_bf16_matmul_output_mode, rocm_kernel_profile, rocm_graph_mode, rocm_graph_cache_entries, rocm_graph_cache_max_bytes | all OK |
+| batching (4) | rowwise_decode, prefix_aware_admission, prefill_admission_quantum, actor_cycle_idle_ms | all OK |
+| model (3) | model_id, vulkan_decode_weight_prewarm, vulkan_decode_weight_prewarm_mib_per_second | all OK |
+| memory (9) | inference_memory_fraction, vulkan_buffer_pool_gb, floor_gb, probe_ms, reclaim_mode, kv_autoscale, kv_force_blocks, cuda_graphs, cuda_graph_cache_entries | all OK |
+| training (8) | no_grad_checkpoint, recompute_checkpoint_boundaries, recompute_boundary_threshold_tokens, checkpoint_boundary_anchor_stride, checkpoint_boundary_cache_gb, max_queued_jobs, max_tracked_jobs, tracked_job_ttl_secs | all OK |
+| openenv (5) | enabled, max_active_runs, max_tracked_runs, tracked_run_ttl_secs, allow_remote_environments | all OK |
+| logging (2) | level, format | all OK |
+| prefix_cache (1) | enabled | all OK |
+| speculative (3) | method, num_speculative_tokens, draft_layers | all OK |
+| streaming_prefill (6) | mode, threshold_tokens, tile_tokens, tape_tile_tokens, detached_full_attn_tile_tokens, last_token_lm_head | all OK |
+| eval (2) | max_queued_jobs, max_tracked_jobs | all OK |
+| request_log (5) | enabled, max_file_bytes, max_total_bytes, compress, max_capture_bytes | all OK |
+| adapters (4) | library_url, max_disk_bytes, composed_cache_max_bytes, composed_cache_max_entries | all OK |
+| paths (0 active) | (only commented `cache_root` — see below) | section OK |
+| teachers (0 active) | (only commented credentials example — see below) | section OK |
+
+In addition, all 38 *commented* documented keys (the file's
+"optional-with-default" convention — e.g. `server.eval_mode`,
+`server.http_send_buffer_bytes`, `server.default_thinking_*`,
+`server.fold_reasoning_into_content`, `model.path`, `model.served_model_id`,
+`paths.cache_root`, `memory.num_blocks/gpu_memory_gb/training_memory_gb/
+kv_cache_fp8`, `training.grad_checkpoint_segments/checkpoint_interval/
+logit_cache_dir/webhook_url`, `prefix_cache.max_blocks/max_entries`,
+`eval.eval_dir/webhook_url`, `request_log.dir`, the
+`teachers.credentials.primary-vllm` example (L309-311), and the whole
+commented `[agent]` block) were checked: **every one is in-schema AND
+in-parser.** Zero stale claims in the example, active or commented.
+
+**Task 2 — section table (17 sections). Result: 17/17 in-parser; 16/17
+with an active header; `agent` documented as a commented optional block —
+the round-brief "GAP (verified)" does not hold on the current tree.**
+
+| section | in-example | in-parser | verdict |
+|---|---|---|---|
+| server, accelerator, batching, model, paths, memory, training, openenv, logging, prefix_cache, speculative, streaming_prefill, adapters, teachers, eval, request_log (16) | active `[section]` header | YES (1:1 serde structs under `KilnConfig`) | OK |
+| agent | YES — commented optional block at L411-436 (incl. all 7 fields + `[agent.self_improve]` sub-example), added deliberately in `40a55da71` | YES | OK — no gap |
+
+`agent` parser-liveness (required check): `AgentConfig` struct at
+config.rs:3087-3121 with all 7 schema fields; `KilnConfig.agent:
+Option<AgentConfig>` (config.rs:2891); canonical env overrides registered
+for the 6 env-eligible fields (config.rs L5235-5240,
+`optional_section_public_env_field!`); `agent.self_improve` listed as
+config-file-only (matches schema "target only; not implemented");
+consumed at main.rs:1547-1571 (`config.agent` → agent-run subsystem
+`apply_config(max_concurrent_runs, run_timeout_secs)` + self-improve
+scheduler; `api/self_improve.rs` exists). `max_concurrent_runs`: 8 lines
+in config.rs (L3105, 3128, 5236…); `self_improve_interval_hours`: 4 lines
+(L3093, 3126, 5235…). Fully live.
+
+**Task 3 — actions.**
+- **STALE example keys: NONE. Zero deletions.** No active or commented
+  example key is missing from the schema or from the parser, so there is
+  nothing to delete (per-key evidence above; `check_config_schema.py`
+  independently validates the example against the schema on every run).
+- **MISSING sections: NONE.** `agent` is in the example (commented
+  optional block) and in the parser — no queue item for a gap.
+- **RENAMED/diverged fields: NONE.** Every name matches 1:1 across
+  example/schema/parser, including the two dynamic credential maps:
+  `teachers.credentials.<id> = {origin, api_key_env}` (schema
+  `teacher_credential` def ↔ `TeacherCredentialConfig`) and
+  `openenv.credentials.<id> = {origin, bearer_token_env}` (schema
+  `openenv.properties.credentials.patternProperties` ↔
+  `OpenEnvCredentialConfig`) — the two "parser-only" flags in a naive
+  fixed-field comparison resolve to these matching dynamic templates.
+  `agent.self_improve` sub-keys (`agent`/`judge`/`post_eval`) are
+  intentionally open structured data on both sides (schema
+  `additionalProperties: true` ↔ parser `Option<serde_json::Value>`) —
+  consistent, not a divergence.
+
+**Owner queue (additions).**
+- **#17 — `openenv.credentials` documentation gap (content decision).**
+  The one schema field not documented in `kiln.example.toml`: the
+  `openenv.credentials.<id>` dynamic map has no commented example, while
+  its sibling `teachers.credentials` does (L309-311). Adding it to the
+  user-facing example is an owner content call; report-only per
+  round rule.
+- **#18 — example-convention nit (cosmetic, owner call).** `[agent]` is
+  the only section whose *header* is commented out (L414); every other
+  optional surface follows "active header, commented optional keys"
+  (e.g. `[teachers]`, `[paths]`). Either convention works; consistency is
+  a product-surface choice.
+
+**Gates (all before any commit; no tracked file changed by this round's
+audit).** `python3 scripts/check_config_schema.py --self-test` PASS
+(117 canonical fields, 3 dynamic templates, 112 canonical environment
+overrides, 0 compatibility aliases, 1 profile gate, 0 executable retired
+environment references; validates kiln.example.toml against the schema).
+`python3 scripts/check_production_file_budget.py` PASS (646 files).
+`python3 scripts/check_repository_artifacts.py` PASS (4563 tracked
+paths). `cargo check` not required — no source touched (report-only
+round; config.rs unchanged). `git status` clean.
+
+**Commits.** Parent HEAD at entry time: `07c05f6d0`. This ledger entry
+lands as its own commit (no code/data deletions warranted).
