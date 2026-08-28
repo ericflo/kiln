@@ -36,7 +36,8 @@ members = [
     "crates/kiln-vulkan-kernel",
 ]
 # kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
-# kiln-rmsnorm-kernel, kiln-vulkan-kernel, and kiln-hip unconditionally depend
+# kiln-rmsnorm-kernel, kiln-rocblas, kiln-vulkan-kernel, and kiln-hip
+# unconditionally depend
 # on platform-specific GPU runtimes (cudarc, vulkan-rs, amdhip64) which fail to
 # link on hosts without the matching GPU stack. They're only compiled when a
 # downstream crate opts in via --features cuda / --features vulkan /

@@ -9140,3 +9140,15 @@ docker-server-release.yml,
 `ac0b9a1b816373c7a2f3b2b01b0442d772d868d66c12a29c5eee4bb824cb6005`
 runpod-image.yml. Suite verification in CI (the edited workflows are all
 manual/tag/scheduled-triggered — next natural dispatch will execute them).
+
+## Round 136b — root Cargo.toml default-members comment repair (orchestrator, inline) [2026-08-28]
+
+Verified the round-135 noticed-but-left observation directly:
+members=33, default-members=25, excluded=8 —
+conv1d/flash-attn/gdn/marlin/rmsnorm/rocblas/vulkan-kernel + hip.
+The explanatory comment listed 7 (killing the "why" for
+kiln-rocblas). Ironclad: kiln-rocblas = "the ROCm analog of
+kiln-blas" (hipBLASLt, optional kiln-hip + build.rs cc link —
+same link-time category as the other 7; amdhip64 already named in
+the comment's runtime list). Added kiln-rocblas to the comment list
+(1 line, net 0). All 8 excluded crates now accounted for.
