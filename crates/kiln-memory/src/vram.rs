@@ -1729,8 +1729,8 @@ pub enum CheckpointPlan {
 ///
 /// Multiplied by `bytes_per_param` and then by a 1.2× working-buffer
 /// overhead factor (RoPE tables, attention masks, paged-KV scratch,
-/// candle's own intermediate tensor pool, the LoRA Vars and AdamW state
-/// registry). The 1.2× lands the Qwen3.5-4B estimate at ~9.5 GiB,
+/// the LoRA Vars and AdamW state registry). The 1.2× lands the
+/// Qwen3.5-4B estimate at ~9.5 GiB,
 /// matching the observed `model_loaded_vram_mib=9943` from the
 /// kiln-server training bench within ±5%.
 pub fn estimate_base_model_bytes(

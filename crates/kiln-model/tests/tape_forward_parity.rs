@@ -160,8 +160,6 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     // `forward::rms_norm` short-circuits to `Ok(None)` and the
     // call falls through to the existing kt-forward-op dispatch.
     // This is the production path today.
-    // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call,
-    // copy the kt output back to candle for the bit-exact parity assertions.
     let x_kt = kt_in(&x);
     let w_kt = kt_in(&w);
     let baseline =
@@ -169,7 +167,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
 
     // Path B — tape-forward. A Tape scope is open, so
     // `forward::rms_norm` records a node and returns the kt
-    // output (which we copy to candle here for comparison).
+    // output.
     let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
         kiln_model::forward::rms_norm(&x_kt, &w_kt, eps)
     });
@@ -1081,7 +1079,6 @@ fn tape_backward_rms_norm_produces_input_grads() {
     let eps = 1e-6f64;
     let (x, w) = build_inputs(&device, rows, hidden);
 
-    // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call.
     let x_kt = kt_in(&x);
     let w_kt = kt_in(&w);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
@@ -2713,7 +2710,6 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let backend = kiln_model::backend::for_device_kt(&device);
 
     // #1082: try_tape_gdn_recurrent_cuda takes kt q/k/v/beta/g + &mut kt state.
-    // Bridge the candle inputs to kt (CUDA borrow; same device storage).
     let q_kt = kt_in(&q);
     let k_kt = kt_in(&k);
     let v_kt = kt_in(&v);
@@ -2736,8 +2732,6 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
         .expect("try_tape_gdn_recurrent_kt ok")
         .expect("returned Some(out) — gate + scope both on");
     let out = candle_out(&out_kt);
-    // #1082: the kt twin returns a kt Tensor; copy to candle here so the
-    // shape/device asserts below can keep candle idioms (`dims4`/`is_cpu`).
     assert_eq!(
         out.dims4().unwrap(),
         (b, nv, t, dv),
