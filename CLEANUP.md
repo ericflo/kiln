@@ -8472,3 +8472,149 @@ as its own commit (report-only round; no code/data deletions warranted).
   claims "the macOS bundle drives the candle-metal backend" —
   candle-removal (#1082) makes this a stale-claim candidate. Round 130
   audits the desktop workspace with the same evidence protocol.
+
+## Cleanup Agent (round 130) — 2026-08-28
+
+First full audit of the `desktop/` Tauri workspace (a separate cargo
+workspace — own `[workspace]` root, outside `crates/*`, so the round-
+126/127 dead-config audits never covered it). Local verification kept
+light per steering: grep / python / git / vendored-crate source reads
+only; no `cargo check`/`build`/`test` anywhere (CI is the compile/test
+venue).
+
+**Task 1 — desktop/Cargo.toml dead-config audit: 0 dead, 0 deletions.**
+
+- `[features]` `default = ["custom-protocol"]` + `custom-protocol =
+  ["tauri/custom-protocol"]` — **USED, ironclad** (verified in the
+  vendored tauri 2.10.3 / tauri-macros 2.5.5 sources under
+  `~/.cargo/registry`): `tauri::is_dev()` is *defined* as
+  `!cfg!(feature = "custom-protocol")` (tauri/src/lib.rs:314-316);
+  the crate doc (lib.rs:22) calls it "Feature managed by the Tauri
+  CLI. When enabled, Tauri assumes a production environment instead of
+  a development one"; tauri's build.rs:252-255 derives the
+  `dev`/`custom_protocol` cfg aliases from it, and `generate_context!`
+  codegen branches on it (tauri-macros/src/context.rs:155 `dev:
+  cfg!(not(feature = "custom-protocol"))` — dev-CSP selection, dev
+  plist embedding, devUrl asset handling). The app's tauri.conf.json is
+  production-only (`devUrl: null`, `frontendDist: "ui"`, every window
+  URL a relative local asset) — exactly the case where the feature
+  must be on for plain `cargo build` to match `tauri build` (the CLI
+  enables the same feature). Note: the Tauri v1 rationale ("required
+  for non-localhost asset URLs") does not apply here — all asset URLs
+  are local — the v2 dev/prod-marker semantics are the load-bearing
+  ones, and the feature is still correct to keep.
+- `optional = true` deps: **none exist**. `[dev-dependencies]`:
+  **none**.
+- `[build-dependencies]` `tauri-build = "2"` — USED (build.rs:1-3
+  `tauri_build::build()`).
+- All 14 `[dependencies]` USED (word-boundary greps over src/): the 8
+  tauri plugins are all registered in main.rs L1054-1075 (shell,
+  dialog, clipboard-manager, updater, process, notification,
+  window-state, autostart — the latter with `MacosLauncher` for
+  launch-at-login, main.rs:20); serde (derive: hf_download.rs:14,
+  installer.rs:18, supervisor.rs:7, main.rs:154); serde_json
+  (poller.rs:170, …); toml (settings.rs:856-860 `toml::Table`); tokio
+  (6 files); reqwest (poller.rs:25, hf_download.rs:168-173);
+  sha2 (installer.rs:19); flate2 (installer.rs:446,685); tar
+  (installer.rs:447,686,2051-2052); semver (installer.rs:808-809).
+- tauri features `tray-icon` (tray.rs:5 `TrayIconBuilder`; tauri
+  manifest `tray-icon = ["dep:tray-icon"]`) and `image-png` (tray.rs:33-37
+  PNG tray icons decoded via `tauri::image::Image::from_bytes`;
+  tauri manifest `image-png = ["image/png"]`) — USED.
+
+**Task 2 — desktop/README.md stale-claim audit: 2 deletion-only
+deletions, 2 report-only.** Claims verified TRUE against code and
+kept: release asset names exactly match the installer.rs:65-69
+constants (`aarch64-apple-darwin-metal`, `x86_64-unknown-linux-gnu-
+cuda124`/`-vulkan`, `x86_64-pc-windows-msvc-cuda124`);
+`docs/desktop/{signing.md, dashboard.png, settings.png, logs.png}` all
+exist; 8420 matches contracts/runtime-defaults-v1.json L6 +
+runtime_defaults.rs L2; poller hits `/v1/health` + `/v1/train/status`
+(poller.rs:49,75); dashboard iframes the server `/ui/`
+(ui/dashboard.html:119); tray menu items (tray.rs:57-73); exponential
+backoff capped 30s (supervisor.rs:332-340); speculative_decoding
+normalized off (settings.rs:769-773; child config
+`speculative.method = "off"` L928-930); CI runners ubuntu-22.04 /
+windows-latest / macos-14 (desktop-build.yml matrix); macOS 11.0 floor
+(tauri.conf.json `minimumSystemVersion`); Ctrl/Cmd+L logs shortcut
+(ui/dashboard.html:73).
+
+- **DELETED (deletion-only):** "the macOS bundle drives the
+  **candle**-metal backend on Apple Silicon (M-series) Macs" → dropped
+  the stale `candle-` qualifier (the known candidate; adjudicated).
+  Evidence: 0 candle refs in any desktop *.rs/*.toml; candle removed
+  from the main workspace (#1082); the current macOS server artifact
+  is `kiln-<v>-aarch64-apple-darwin-metal.tar.gz` (server-release.yml
+  L128, built `--features metal` — root README L547 "native Metal
+  backend (kiln-owned MSL kernels)"); installer.rs:65
+  `MACOS_METAL_TARGET = "aarch64-apple-darwin-metal"`; the README's
+  own architecture section already says "Metal on macOS". Remaining
+  sentence is true and reads clean.
+- **DELETED (deletion-only):** "Persisted via `tauri-plugin-store`."
+  from the Settings bullet — the plugin exists nowhere in desktop
+  (not in Cargo.toml, no `tauri_plugin_store` import or registration;
+  the only occurrence in the whole repo was that README line, and
+  desktop/CHANGELOG.md never mentions it either); settings are actually
+  persisted by the app's own versioned `settings.json` mechanism
+  (settings.rs; documented in the README's own "Settings durability"
+  section).
+- **REPORT ONLY (queue #21):** the uninstall/app-data bullet lists
+  `%APPDATA%\com.kiln.desktop`, `~/.local/share/com.kiln.desktop`,
+  `~/Library/Application Support/com.kiln.desktop` — but the bundle
+  identifier is `com.eflorenzano.kiln.desktop` (tauri.conf.json L4)
+  and the code roots data at Tauri's `app_data_dir()` (installer.rs:
+  296-297, hf_download.rs:113), so the real directories carry the full
+  identifier. Fix is a substitution, not a deletion → owner-managed
+  copy.
+- **REPORT ONLY (nuance, not queued):** the CI section says "On
+  `desktop-v*` tag push it builds …", but desktop-build.yml triggers
+  are `workflow_dispatch` only (its own header says "Dispatch this
+  workflow from a desktop-v* tag"). Rephrasing, not deletion.
+
+**Task 3 — TODO/FIXME/XXX/HACK census in desktop/: 0 hits** across
+*.rs / *.toml / *.md / *.js / *.html (CHANGELOG excluded per steering;
+it contains zero of them too). No action per steering.
+
+**Task 4 — CI coverage: desktop/ IS covered (report; no workflow
+changes per steering).** (a) `.github/workflows/desktop-build.yml`
+("Build kiln-desktop"): matrix ubuntu-22.04 / windows-latest /
+macos-14 (`--target aarch64-apple-darwin`); compiles + bundles all
+three platforms via `tauri-apps/tauri-action@v0`; runs
+`cargo test --locked` **on the Linux leg only**; on `desktop-v*`
+dispatch publishes signed + notarized assets (Apple Developer ID +
+notarytool, including a `.dmg` re-notarize/staple step) and
+un-drafts the release with `--latest=false` (keeps the repo
+/releases/latest pointer on the kiln-v* server line).
+(b) `.github/workflows/ui-smoke.yml`: PR/push path gate over
+`desktop/ui/**`, `desktop/src/main.rs`, `desktop/src/settings.rs`
+running `node scripts/check_desktop_ui_smoke.mjs` (static +
+embedded-script contract checks — no compilation).
+(c) `.github/workflows/pages.yml`: `desktop/ui/**` (+
+dashboard.html/settings.html) appear in the docs-site path filters.
+(d) `.github/workflows/server-release.yml`: mentions desktop in
+comments only (the desktop app downloads prebuilt kiln-v* binaries).
+**Queue #22 (owner decision):** desktop-build.yml is
+`workflow_dispatch`-only, so PRs touching desktop/src Rust get only
+the static ui-smoke check — no automatic compile gate — and unit tests
+run on the Linux leg only. Whether to add a path-triggered compile job
+and per-OS test legs is a CI-policy call; workflows left untouched.
+
+**Owner queue (additions):** #21 — desktop README app-data paths use
+the stale `com.kiln.desktop` identifier (substitution, owner copy).
+#22 — desktop CI automation gap (dispatch-only build lane;
+Linux-only `cargo test`).
+
+**Net deletions:** 2 stale clauses, 2 lines changed (0 full lines
+removed), 1 file (desktop/README.md). No config deleted (Task 1:
+nothing dead).
+
+**Gates (before each commit).** `python3 scripts/
+check_production_file_budget.py` PASS (646 files, 5000-line default,
+14 reviewed exceptions). `python3 scripts/check_repository_artifacts.
+py` PASS (4563 tracked paths, CSV ≤ 1 MiB, files ≤ 10 MiB).
+`git status` clean after the commits. No cargo commands run (desktop/
+is a separate Tauri workspace; CI is the compile/test venue, per
+steering).
+
+**Commits.** Parent HEAD at entry: `0c3d2fd07`. README deletions land
+as `72dea8e5a`; this ledger entry lands as its own commit.
