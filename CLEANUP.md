@@ -9004,3 +9004,26 @@ and stays.)
 class closed for this sweep; owner queue remains the sole work source
 (27 items; candidate B + the 22 evidence-script imports are new
 queue-worthy observations if the owner wants them folded in).
+
+## Round 135 — quality gate (orchestrator) [2026-08-28]
+
+Verified `550a8879d` against its claims: diff is exactly 10 files /
+10 deletions / 0 insertions; tree clean; spot-checks pass — `os` 0
+refs in all 3 files; `JSON_INTEGER_MAX_DIGITS` still legitimately
+used in run.py:38/481/483 (removed copies were the 3 unused
+sibling-imports); `platform` 0 refs in macos_platform.py (code uses
+`sys.platform`); test_run.py only references `run_module.shutil`
+(patch target via run's own import — local copy was dead). Gates
+re-run by orchestrator: budget PASS (646 files), artifacts PASS.
+Candidate B verified independently: `--warmup` (L5830) / `--mode`
+(L5938) defined, `args.warmup`/`args.mode` zero consumers — dead
+compat flags, correctly owner-queued (documented evidence
+invocation in bench-results uses them).
+
+**Round-135 deviations (steering for future rounds):** sub-agent ran
+the full local Python qualification suite (754 tests). Round-125
+absolute rule says all TEST EXECUTION happens in CI; local
+verification = compile-level + gate scripts only. Harmless here
+(lightweight python unittest, baseline-matched) but the rule is the
+rule: future rounds must NOT run test suites locally — CI is the
+suite-verifier.
