@@ -10106,3 +10106,93 @@ stale, and count claims in dated snapshots rot independently of paths;
 (b) worktree waves can introduce local round numbers (R154's commit said
 "Round 153" while the ledger numbers it 154) — reconcile to the ledger
 when editing live index prose.
+
+## OWNER DECISION LIST (consolidated, round 159) — 2026-08-28
+
+**Purpose.** Single canonical, deduplicated, prioritized owner-queue extracted
+from the entire CLEANUP.md ledger (rounds 37 → 158). This list replaces the
+scattered "owner queue" mentions as the work source; older ledger entries are
+untouched history. Items executed since being queued are dropped with the
+resolving round (RESOLVED appendix).
+
+**Method / evidence.** Every `files:lines` cell below was re-verified against
+HEAD `39ded29c7` on 2026-08-28 (grep/sed/md5 only; working tree clean). Clippy
+lint spans are cited from the round-122 measurements and were NOT re-run
+(no-cargo rule for this round); the flagged files and line numbers were
+confirmed to still exist verbatim. Line numbers drift only if the owner edits
+the affected files first — re-anchor at execution time.
+
+**Counts.** DECISION 14 · APPROVAL 11 · FYI 4 = **29 open items**. Dropped as
+resolved: **12** (RESOLVED appendix). Prioritized by net repo improvement per
+owner minute; D-1..D-4 and A-1 are the highest-ROI items.
+
+### DECISION — owner judgment required (options listed; ledger cites source round)
+
+| ID | Item (source) | Files:lines (re-verified 2026-08-28) | Options | Suggested approval phrasing |
+|---|---|---|---|---|
+| D-1 | README.md split per round-157 plan (R157) | README.md — 1751 lines (largest tracked markdown; budget exception cap 1770 in contracts/production-file-budget-v1.json) | Phase 1 (b-removals, 17 sections, net −888 → ~863) · phases 1–2 (−1297 → ~454) · all phases 1–3 (−1340 → ~411) · reject | "approve README split phase 1" (or phases 1–2 / all phases 1–3, per R157) |
+| D-2 | `max_seqlen_k` field family — 4 parallel struct families, rocm lane never reads (R122 #12; open since R113) | crates/kiln-model/src/forward/full_attention.rs:2165, :2224, :2661 (+ `kernel_max_seqlen_k` :2666) | (a) delete all 4 (net removal) · (b) keep for backend parity (add allow + rationale) | "approve deletion of the max_seqlen_k family" / "keep the family for parity" |
+| D-3 | 9 judgment-class lint keeps (R122 #1–#9) | kiln-core/src/tokenizer.rs:449/:602 (type_complexity), :785 (too_many_arguments); kiln-model/src/cuda_graph.rs:1477 (too_many_arguments); kiln-model/src/forward/tests/mod.rs:3159/:3192/:3885/:8530/:8547 (unnecessary_mut_passed ×5); kiln-train/src/trainer/grpo_step.rs:1003, trainer/forward_backward.rs:335-336 (unused_assignments ×3); kiln-train/src/opd_tape_shim.rs:508 + grpo_tape_shim.rs:1197 (private_in_public); kiln-server/tests/real_model_integration.rs:1463 (too_many_arguments), :1999/:2029/:2059 (await_holding_mutex ×3); kiln-tensor/src/cuda_storage.rs:2338 (items_after_test_module) | Per item: waive (record rationale) or redesign. R122 constraints: #5 dropping initializers breaks the vulkan lane (R118 evidence); #4 fix = `&mut cache` → `&` library signature change (API-level); #8 fix changes lock-holding concurrency semantics | "waive items 1, 2, 7, 9 with recorded rationale; order redesign of 3, 4, 5, 6, 8" (or any per-item split) |
+| D-4 | `cuda_opd_remote.rs` example — the one remaining cuda-lane compile error (R123 #13, replaces R122 #11) | crates/kiln-train/examples/cuda_opd_remote.rs:289-304 (`RemoteTeacherConfig` literal omits required `expected_identity`; requirement at remote_teacher.rs:149-153) | (a) implement the discovery handshake in the example (net addition) · (b) delete the example (net removal). R123: the campaign will not choose | "approve deletion of crates/kiln-train/examples/cuda_opd_remote.rs" / "approve implementing the identity handshake" |
+| D-5 | kiln-blas ≡ kiln-rocblas byte-identical module pairs (R146) | crates/kiln-blas/src/backend_matmul.rs ≡ crates/kiln-rocblas/src/backend_matmul.rs (12,115 B); workspace_pool.rs pair (3,819 B) — md5-identical, verified today | (a) keep + add byte-identical sync note · (b) share one private module · (c) codegen from one source | "keep the duplication and add a sync note" / "consolidate via a shared module" / "adopt codegen" |
+| D-6 | Zero-dependent scaffold crates (R122 #14; R90 report) | kiln-mps, kiln-graph-cuda, kiln-vulkan-blas — verified: no manifest depends on any of the three (doc-comment mentions only) | (a) keep as Phase-2.x scaffold · (b) remove the three workspace members (net removal) | "remove kiln-mps, kiln-graph-cuda, kiln-vulkan-blas from the workspace" / "keep the scaffolds" |
+| D-7 | Byte-identical font binaries (R146) | docs/site/fonts/Inter-{400,500,600,700}.woff2 — one 48,256 B file ×4; JetBrainsMono-{400,500,600}.woff2 — one 31,432 B file ×3 (md5-verified today; ~203 KiB duplicate bytes) | (a) re-cut genuine weight binaries · (b) collapse each family to one weight file · (c) keep | "collapse each font family to a single weight" / "re-cut the font weights" |
+| D-8 | kiln-blas README post-#1605 story (R147) | crates/kiln-blas/README.md:65, :71 — "its outputs are recorded in ARCHITECTURE.md" ×2; ARCHITECTURE.md now has zero cublasLt/probe mentions (00aac0f8f, #1605) and no cublaslt_mlp_probe-*.json baseline was ever committed | (a) reword both sentences to the post-#1605 probe-evidence story · (b) delete the two sentences | "reword the kiln-blas README probe narrative to the post-#1605 state" |
+| D-9 | 22 unused imports in retained evidence scripts (R134/135) | audit-customop.py, audit-dtype-usage.py, bench-concurrent-batch.py:31 (`tempfile` — verified unused today), bench-trajectory-turns.py, c11–c14, h15c ×2, h17 ×3, h17b, h18 ×3, mtp_c1_summarize.py, mtp_h_main_reference_dump.py ×2, mtp_reference_dump.py, phase-c40b/analyze_c40b.py (most now under scripts/investigations/ after R154's byte-identical move) | (a) delete the 22 unused imports (net −22) · (b) keep frozen-evidence scripts verbatim (round-25 policy) | "delete the 22 unused imports listed in the round 134 ledger" / "keep the frozen scripts verbatim" |
+| D-10 | Duplicated utilities in owner-gated scripts (R138 item 4) | check_production_file_budget.py:42/:75 ≡ check_repository_artifacts.py:62/:95 (`_strict_object`/`_repo_path`, differ only in exception type); also: expected_metric_names (check_backend_latency_fixtures.py:298 ↔ lock_backend_latency_thresholds.py:123), `_canonical_json` (hf_trl_roundtrip.py:54 ↔ vulkan_hf_model_oracle.py:68), `_parse_worker_marker` (rocm_hf_layer_attribution.py:295 ↔ rocm_hf_path_attribution.py:224), `load_oracle_packages` (grpo_trl_oracle.py:118 ↔ qwen35_sft_oracle.py:216), `package_version_base` (grpo_trl_oracle.py:114 ↔ adamw_pytorch_oracle.py:91) | (a) keep (consolidation = churn across independently-gated scripts) · (b) shared helper module + re-pointing | "adopt a shared script-helper module" / "keep the per-script duplication" |
+| D-11 | server-release.yml 5× duplicated step logic (R136 report-only) | .github/workflows/server-release.yml — "Install Rust stable" ×5, "Package tarball/zip" ×5, draft-create+upload block ×5 (~20 lines each); free-disk-space block also duplicated in ci.yml and runpod-image.yml (×5 verified today) | (a) keep (churn risk on release-critical paths) · (b) extract composite action/step template | "extract the duplicated release steps into a composite action" / "keep the duplication" |
+| D-12 | Dead setter `KILN_CUDA_NATIVE_TRAINING` in frozen smoke script (R138) | scripts/investigations/cuda_qwen_sft_smoke.sh:89-92 — sets the retired env (var absent from config today; script frozen post-R154) | (a) delete the 2 lines · (b) keep the frozen script verbatim · (c) sweep scripts/ for the same retired-env-setter class | "sweep scripts/ for retired KILN_* setters and delete" / "delete just the smoke-script lines" / "keep frozen" |
+| D-13 | Cross-crate digest-shape helper (R80/R82) | crates/kiln-train/src/teacher_identity.rs:502 — `pub(crate) fn is_lower_sha256` (verified crate-private today); kiln-server carries its own copy | (a) keep crate-private (per-crate copies) · (b) make it `pub` and re-point the duplicates (behavior-neutral) | "publish the sha256-shape helper and re-point the duplicates" / "keep crate-private" |
+| D-14 | Desktop CI automation gap (R130 #22) | .github/workflows/desktop-build.yml — `workflow_dispatch` only (verified today); desktop Rust compiles only on the manual Linux leg | (a) keep dispatch-only · (b) add a path-triggered compile job for desktop/src/** (+ optional per-OS test legs) | "add a path-triggered desktop compile job" / "keep dispatch-only" |
+
+### APPROVAL — single proposed change; owner signs off
+
+| ID | Item (source) | Files:lines (re-verified 2026-08-28) | Proposed change | Suggested approval phrasing |
+|---|---|---|---|---|
+| A-1 | Root-docs stale-claim fixes, 14 sites (R131 #23–#27) | README.md:1295 (batching.mode row), :1300-1303 (4 rendezvous rows), :1365-1382 (direct-fallback paragraph), :1259-1277 (Project Structure lists 14 crates; workspace has 33 — verified); QUICKSTART.md:1055, :1060-1063, :1088 ("nine batching values" — now 6 runtime fields), :1096 (jq path), :1110-1117 (nested-object paragraph); BENCHMARKS.md:190-200 (`[batching]` block incl. `mode` + 4 rendezvous keys; parser is deny_unknown_fields, so copied blocks fail startup), :217-220 (`mode.effective_enabled` receipt line), :224-235 (direct-rendezvous A/B paragraph), :707 (`KILN_KV_CACHE_FP8` → canonical `KILN_MEMORY_KV_CACHE_FP8`), :747-758 (`KILN_W4A16` no longer exists; `KILN_CUDA_GRAPHS` retired) | Delete the retired rows/paragraphs (keys removed from schema; `RETIRED_PUBLIC_ENVIRONMENT_ALIASES` config.rs:6572+; actor is the only scheduler now), refresh the crate block 14 → 33, replace the env names. Exact per-line corrections are in the round-131 ledger. All 14 sites verified still present today | "approve the round 131 #23–#27 rewrites as written in the round 131 ledger" |
+| A-2 | BENCHMARKS.md phantom script references (R156 item 1) | BENCHMARKS.md:441-442 (two llama.cpp table rows cite `bench-results/llama-bench-a6000-post536.json`) and :680-681 (raw-JSON note cites `bench-results/llama-bench.json`) — verified: zero `llama*` files exist anywhere under bench-results/ | (a) re-point the Source cells / raw-JSON note to an artifact that actually exists, or (b) drop the two table rows and the raw-JSON sentence | "drop the two phantom llama.cpp rows and the raw-JSON note" / "re-point to a live artifact" |
+| A-3 | bench-results/README.md pre-migration baseline figures (R156 item 2) | bench-results/README.md:50/:54 — "2026-05-17: Llama-3.1-8B Instruct … 150 tok/s … 58.4 tok/s on ROCm, 44 tok/s on box 102" (verified still present; superseded by post-migration rows in the same index) | (a) replace with current baseline figures, or (b) mark the §Pre-migration baselines section as a historical snapshot | "mark the pre-migration baseline section as historical" / "update the figures" |
+| A-4 | Stale-claim reword pass, 5 files (R122 #15; deferred by deletion-only rule) | crates/kiln-model/src/tape_forward_parity.rs (~22 comment sites + 3 helper names); crates/kiln-memory/src/vram.rs:1717 ("ask candle") / :1732 ("LoRA Vars"); crates/kiln-tensor/src/dtype.rs:49/:55 ("candle CPU path" / "candle-Mac path"); crates/kiln-flce-kernel/src/kt_api.rs:67 and crates/kiln-opd-loss-kernel/src/kt_api.rs:109 ("candle-typed entry point" error strings) — all verified present today | Comment/error-string rewords only (no code behavior); per-site text proposed at execution, each verified against the tree | "approve the round 122 #15 reword pass (5 files, comments and error strings only)" |
+| A-5 | Rename candidates — pub identifiers (R122 #16) | `cross_entropy_from_logits_grad_candle` (crates/kiln-model/src/tape_forward.rs:811/:826, self-documented as "a misnomer"); `candle_cache` params (crates/kiln-model/src/forward.rs:710/:723/:741/:748 — the type is the kt `PagedKvCache` alias); `kt_in`/`candle_out` test helpers (crates/kiln-model/tests/tape_forward_parity.rs:74-80) — all verified present today | `..._grad_candle` → `..._grad_kt`; `candle_cache` → kt-named parameter; test helpers to neutral names. Pub API — sign-off required per the R109/R110 precedent | "approve the round 122 #16 rename set" |
+| A-6 | License lines: OFL notice + foldhash 0.1.5 bullet (R122 #19/#20) | docs/site/ — zero OFL/SIL mentions (verified today) despite serving the Inter + JetBrainsMono woff2 binaries; THIRD_PARTY_LICENSES.md:6733 — only a `foldhash 0.2.0` bullet while Cargo.lock also carries foldhash 0.1.5 (verified) | One OFL / SIL Open Font License notice line for the bundled fonts; one bullet line for foldhash 0.1.5 | "approve both one-line license additions" |
+| A-7 | Desktop copy fixes (R130 #21 + R130 nuance) | desktop/README.md:186 — `com.kiln.desktop` ×3 (stale bundle identifier; verified); desktop/README.md:164 — "On `desktop-v*` tag push it builds …" while desktop-build.yml is dispatch-only (verified) | Substitute the real bundle identifier; reword L164 to "dispatch from a `desktop-v*` tag" | "approve both desktop/README.md copy fixes" |
+| A-8 | `--warmup`/`--mode` compatibility flags (R134 candidate B; re-queued R135/R138) | scripts/bench-concurrent-batch.py:5830-5833 (`--warmup` alias) and :5938-5942 (`--mode`) — verified present today; `args.warmup`/`args.mode` have zero consumers; the canonical evidence invocation (bench-results/concurrent-batched-decode-2026-05-26.md:28-29) records both flags, so deletion changes documented replay | Delete both flags (net −9) or keep for documented-invocation replayability | "delete the --warmup and --mode compatibility flags" / "keep them for replayability" |
+| A-9 | Frozen/dated-record pointers (R77/R81/R82) | BENCHMARKS.md:607 — "see TODO note in `cuda_graph.rs`"; the live marker is now `TODO(phase2 …)` at crates/kiln-model/src/forward/model_dispatch.rs:3212 and cuda_graph.rs has no TODO (verified); scripts/investigations/c29_logits_compare_v2.py:53 — "updated in PR #XXX (H15b)" placeholder (verified; PR number not recoverable from this tree) | (a) fix the BENCHMARKS.md:607 pointer to model_dispatch.rs and/or fill the c29 PR number if the owner knows it · (b) leave the frozen records verbatim | "fix the BENCHMARKS.md:607 pointer to model_dispatch.rs; c29 PR number: …" / "leave both frozen records as-is" |
+| A-10 | `openenv.credentials` example gap (R128 #17) | kiln.example.toml [openenv] section (L366-373) — no credentials example, while sibling `teachers.credentials` has one at L309-311 (verified today; schema field `openenv.credentials.<id> = {origin, bearer_token_env}` exists) | Add a commented `openenv.credentials.primary-<id>` example matching the schema convention | "approve adding the commented openenv.credentials example" |
+| A-11 | `[agent]` header convention (R128 #18) | kiln.example.toml:411-414 — `[agent]` is the only section whose header is commented out (verified today); convention elsewhere = active header + commented optional keys | Un-comment the `[agent]` header (keep its keys commented) for convention consistency | "approve un-commenting the [agent] header" |
+
+### FYI — record only; no owner action required
+
+| ID | Item (source) | Location (re-verified 2026-08-28) | Note |
+|---|---|---|---|
+| F-1 | Orphan doc content (R62 follow-up) | docs/archive/mtp-training/mtp-training-plan.md:98 ("Follow-ups after PR-B" — open workstream items live inside an archived doc); docs/papers/echo/echo_blog_post.md (zero in-repo references, verified) | Owner may later give these a live home or deprecate deliberately; no cleanup-round action |
+| F-2 | RADV/driver SIGSEGV (R109/R110/R115) | 7 kiln-vulkan-kernel test binaries SIGSEGV on this host's RADV/driver stack (pre-existing; reproduces on the clean tree) | Host-environment issue; owner may choose to skip the affected binaries here |
+| F-3 | Stale references in frozen surfaces (R125/R156) | docs/archive/candle-removal/*.md — 21 `../../CONFIGURATION.md` links now one level stale (target moved to docs/contracts/CONFIGURATION.md, R151); docs/archive/phase-c/ ×2, docs/archive/vk-harmonization/ ×1; plus the R125 wave-4 leave-alone list (9 links with missing-by-design targets) | Protocol: frozen snapshots keep their pointers; no action |
+| F-4 | Phase-4 Metal/Vulkan op kernels (R127 note) | 24 op TODOs in kiln-tensor — the real pending work behind those TODOs (metal_paged_decode.rs, vulkan_paged_decode.rs) | Workstream, not a decision; recorded for completeness |
+
+### RESOLVED appendix — owner items dropped as already executed
+
+| Resolved item (source) | Resolving round / evidence |
+|---|---|
+| §9.9 OPD gate (R37) | R68 — owner retired the job, evidence kept |
+| kiln-tensor 107-stale-comment cluster (R90) | R91 — executed (−76 net; remainder adjudicated KEEP) |
+| `expectedApiSections` dead const (R100) | R101 — deleted (−102 net) |
+| Stale env hints `KILN_ROCM_PAGED_DECODE` / `KILN_ARENA_FORCE_ZERO` (R100) | R102 — commit `5d4914c4a` |
+| 3 dead public APIs (R108/R109) | R110 — deleted at owner's choice |
+| kiln-tensor E0599 ×6 (R122 #10) | R123 — measurement artifact; resolves under `--features rocm,hardware-qualification` |
+| kiln-train E0061 ×5 (R122 #11) | R123 — 4 of 5 fixed; the 5th was reclassified and remains open as D-4 |
+| `_compact_details` (R134 candidate A) | R138 — executed |
+| Root Cargo.toml default-members comment 7 vs 8 (R134) | R136b — fixed |
+| Orphan navigation docs VIGNETTES.md / TRAJECTORY_TURN_THROUGHPUT.md (R62 follow-up) | R151/R152 — docs/README.md index now links both (verified present) |
+| `qwen35_shapes` pub exposure (R83) | No owner gate remains: `pub mod qwen35_shapes` at crates/kiln-model/src/lib.rs:41 with `pub const` values since the crate's first commit (`9371035bf`); replacing bench-local literals is an optional refactor, not a decision |
+| kiln-blas Cargo.toml comment mirror (R147 half) | No longer in the tree: current kiln-blas/Cargo.toml comment (verified today) is accurate; only the README's two references remain open (D-8) |
+
+### Supersession note
+
+This **OWNER DECISION LIST (consolidated, round 159)** is the single canonical
+owner queue. It supersedes the scattered "owner queue" mentions in rounds 37,
+62, 77, 80–83, 90, 100, 108–110, 122–128, 130, 131, 134–136, 138, 146–147,
+156, and 157. Older ledger entries remain untouched as historical record;
+where an older entry and this list disagree, this list governs. Execution of
+any item here still requires the owner's approval phrasing above; no item in
+this list is executed by a cleanup round by default.
