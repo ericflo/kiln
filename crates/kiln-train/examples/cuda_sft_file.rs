@@ -368,6 +368,7 @@ fn main() -> Result<()> {
         checkpoint_interval: args.checkpoint_interval,
         resume_checkpoint: None,
         grad_checkpoint_segments: None,
+        detect_anomaly: false,
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
         adapter_smoke_test: false,
