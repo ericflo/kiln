@@ -1,6 +1,6 @@
 # Phase 5 — bs>1 CUDA graph secondary alloc-site audit (#1082)
 
-Companion to `bench-results/cuda-graph-bs2-memcheck.md`. The primary
+Companion to `bench-results/findings/cuda-graph-bs2-memcheck.md`. The primary
 `ILLEGAL_ADDRESS` fault was pinned to transient `Tensor::from_slice`
 allocations of `block_table_tensor` + `seqused_k_tensor` inside
 `CachedPagedDecodeMeta::build` and fixed in commits `9b173f84`,
@@ -400,7 +400,7 @@ green, flip `KILN_CUDA_GRAPHS_BATCHED=1` to default-on.
 
 - Primary fix commits (#1082): `9b173f84`, `ab798167`, `393beadc`
   (PR landed on `main` 2026-05-25).
-- Original memcheck trace: `bench-results/cuda-graph-bs2-memcheck.md`.
+- Original memcheck trace: `bench-results/findings/cuda-graph-bs2-memcheck.md`.
 - bs=1 reference pattern: `forward.rs:21308` (`model_forward_paged_inner`),
   `forward.rs:16730` (`gqa_attention_paged_with_rope_tables`),
   `forward.rs:15846-15871` (paged-decode kernel call with stable

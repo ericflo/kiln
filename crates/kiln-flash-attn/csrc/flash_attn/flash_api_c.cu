@@ -530,7 +530,7 @@ extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16(
 // per-row host loop, no transient device tensors, safe under CUDA graph capture
 // because the only inputs that vary across replays are the device-pointer-backed
 // `slots` table (refreshed via `update_cuda_scalar` outside the captured region).
-// See `bench-results/cuda-graph-bs2-secondary-audit.md` suspect 1 for #1082.
+// See `bench-results/findings/cuda-graph-bs2-secondary-audit.md` suspect 1 for #1082.
 __global__ void kiln_paged_kv_write_token_major_bf16_batch_slot_kernel(
     __nv_bfloat16 *k_pool,
     __nv_bfloat16 *v_pool,

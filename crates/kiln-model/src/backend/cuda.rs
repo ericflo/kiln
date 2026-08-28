@@ -304,7 +304,7 @@ impl AttentionBackend for CudaBackend {
     /// skip the `start_slots = Tensor::from_slice(...)` allocation that
     /// would otherwise emit a captured `cudaMemcpyHtoDAsync` to a recycled
     /// VA under CUDA graph capture (suspect 6 in
-    /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+    /// `bench-results/findings/cuda-graph-bs2-secondary-audit.md`, #1082).
     fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool {
         self.support_predicates()
             .supports_strict_paged_decode_contiguous_batch()
@@ -1790,7 +1790,7 @@ impl ReplayBackend for CudaBackend {
         // Some` case must stay on the with-graph-outputs kt path. That path
         // specifically exists to fix the dangling-pointer hazard
         // documented in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
+        // `bench-results/findings/cuda-graph-bs2-secondary-audit.md` suspects
         // 3+4, where the CUDA graph runner re-uses caller-owned
         // tensors across replays. When `graph_outputs == None` (the
         // non-graph-capture path), the kt route is bit-exactly

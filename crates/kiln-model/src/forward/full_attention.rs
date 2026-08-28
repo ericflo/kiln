@@ -2565,7 +2565,7 @@ pub(super) fn try_flash_attn_paged_decode(
                 // kt entry writes through the caller-owned `(attn_out,
                 // softmax_lse)` pinned by the captured-graph runner,
                 // preserving the dangling-pointer-fix contract from
-                // `bench-results/cuda-graph-bs2-secondary-audit.md`
+                // `bench-results/findings/cuda-graph-bs2-secondary-audit.md`
                 // suspects 3+4.
                 kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs");
                 // #1082: every arg is already kt here — `q_fa` (kt param `q`
@@ -2799,7 +2799,7 @@ impl CachedPagedDecodeMeta {
     /// `CachedPagedDecodeMeta` local drops at end of capture, candle
     /// `cudaFree`s the storage and the captured graph is left holding
     /// dangling pointers — the first `cuGraphLaunch` then faults with
-    /// `CUDA_ERROR_ILLEGAL_ADDRESS` (see `bench-results/cuda-graph-bs2-memcheck.md`,
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS` (see `bench-results/findings/cuda-graph-bs2-memcheck.md`,
     /// issue #1082).
     ///
     /// Callers must pre-populate the stable buffers with the same per-row
@@ -3016,7 +3016,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // kernel writes/reads through caller-owned buffers re-used across
     // graph replays instead of allocating fresh `Tensor::zeros` inside
     // the captured region (#1082, see
-    // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4).
+    // `bench-results/findings/cuda-graph-bs2-secondary-audit.md` suspects 3+4).
     // `None` reproduces the legacy per-call allocation behavior.
     graph_outputs: Option<(&Tensor, &Tensor)>,
     // CUDA-graph-stable RoPE cos/sin tables for the bs>1 captured
@@ -3027,7 +3027,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // `rotary_embedding_from_tensor`, which builds fresh
     // `cudaMalloc`-backed `freqs/cos/sin` tensors inside the captured
     // region (#1082 suspect 2 — see
-    // `bench-results/cuda-graph-bs2-secondary-audit.md`). `None`
+    // `bench-results/findings/cuda-graph-bs2-secondary-audit.md`). `None`
     // reproduces the legacy positions-based per-call build.
     rope_tables: Option<(&Tensor, &Tensor)>,
     // Graph-stable `[batch]` u32 per-row KV-write slot tensor. Metal dispatches
@@ -3041,7 +3041,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // write into the wrong KV-cache slot. The fused-slot kernel reads
     // its destination slots from this device tensor on every replay
     // (refreshed via `update_cuda_scalar` outside the captured region),
-    // closing suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
+    // closing suspect 1 in `bench-results/findings/cuda-graph-bs2-secondary-audit.md`
     // for #1082. `None` reproduces the legacy per-row writer.
     // Consumed only by the cuda/metal/rocm slot-writer and metal ICB paths;
     // on feature-less builds the allow silences the unused parameter.
@@ -3286,7 +3286,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             // `rotary_embedding_from_tensor` inner allocation of
             // freshly-allocated `freqs/cos/sin` tensors inside the
             // captured region — the bug documented as suspect 2 in
-            // `bench-results/cuda-graph-bs2-secondary-audit.md` (#1082).
+            // `bench-results/findings/cuda-graph-bs2-secondary-audit.md` (#1082).
             let q_swap = q.transpose(0, 1)?.contiguous()?;
             let k_swap = k.transpose(0, 1)?.contiguous()?;
             let (q_rot, k_rot) =
@@ -3480,7 +3480,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         // capture, the `Tensor::from_slice`'s `cudaMemcpyHtoDAsync`
         // is captured by the stream and on replay writes to a
         // recycled VA (suspect 6 in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+        // `bench-results/findings/cuda-graph-bs2-secondary-audit.md`, #1082).
         // The strict kernel exists on Metal so the predicate defaults
         // `true` and Metal paths keep their preferred-strict
         // dispatch.
