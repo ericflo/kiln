@@ -1,9 +1,12 @@
 # Scripts
 
-Index of the 75 top-level scripts in `scripts/` (51 `.py`, 17 `.sh`, 7 `.mjs`)
-plus its 9 subdirectories. Every top-level script appears exactly once;
+Index of the 50 top-level scripts in `scripts/` (29 `.py`, 14 `.sh`, 7 `.mjs`)
+plus its 6 subdirectories. Every top-level script appears exactly once;
 one-liners are read from each script's own header. `(CI)` marks
-load-bearing scripts referenced by `.github/workflows/`.
+load-bearing scripts referenced by `.github/workflows/`. The 25 frozen
+one-off investigation scripts + 5 phase-c family directories that used to sit
+here now live in `investigations/` (see its README for the full index and
+the live-vs-frozen decision rule).
 
 ## Campaign gates
 
@@ -48,54 +51,31 @@ load-bearing scripts referenced by `.github/workflows/`.
 - `run_backend_latency_fixture.py` (CI) — run one backend latency fixture and materialize its result artifact.
 - `write_backend_latency_result_artifact.py` (CI) — write a backend latency result artifact from a fixture benchmark log.
 
-## One-off investigations
+## One-off investigations (kept at root: live-locked)
 
-Candle-removal (#1082) audits and the phase-c MTP acceptance probes; each is
-retained evidence for a frozen `docs/archive/` investigation.
+Candle-removal (#1082) regenerate tooling (LOCKED — `bench-results/README.md`
+regenerate table) plus the one gate-pinned H15c driver. The other 22 one-off
+investigation scripts (c11–c16, c29, h15c/h17/h17b/h18, mtp_*) are frozen
+evidence in `investigations/`.
 
-- `audit-candle-usage.sh` — Phase 0.1: audit the candle API surface (call sites by module + symbol) into `bench-results/candle-api-surface.csv`.
-- `audit-customop.py` — Phase 0.2: audit `CustomOp1/2/3` impl blocks to design the kiln-tensor forward/backward seam.
-- `audit-dtype-usage.py` — Phase 0.5: audit dtype usage (incl. crate-local FP8/Marlin/FP4 types) into `bench-results/dtype-usage.{csv,md}`.
-- `audit-multi-gpu-seam.sh` — Phase 0.6: record hardcoded device-0 literals for the centralized device-accessor migration.
-- `audit-preserve-list.sh` — Phase 0.7: record the NVTX range names, `KILN_*` env gates, and Tensor seams the migration must preserve.
-- `audit-substrate-status.sh` — Phase 1.31: dashboard of #1082 substrate deliverable status from file existence + workspace membership.
-- `c11_marlin_audit.py` — Phase C11: Marlin W4A16 per-channel scale drift audit against the fp32-equivalence band.
-- `c12_activation_weighted_probe.py` — Phase C12: activation-weighted Marlin drift probe (C11 weight drift × activation energy).
-- `c13_hf_reference_dump.py` — Phase C13: HF reference sidecar for pre-projection MTP splice dumps (per-tap cos_sim / max|Δ|).
-- `c14_hf_reference_dump.py` — Phase C14: HF reference sidecar for post-MTP-transformer-block splice dumps.
-- `c15_h_main_drift_audit.py` — Phase C15: `h_main` drift audit across decode steps against a chained HF reference forward.
-- `c16_plumbing_analyze.py` — Phase C16: audit the MTP accept/reject plumbing hypotheses (H1–H4) from C1 attribution CSVs.
-- `c29_hf_reference_dump.py` — Phase C29: loop `c14_hf_reference_dump.py` over a multi-prompt kiln dump tree.
-- `c29_logits_compare.py` — Phase C29: empirical MTP-logits comparator (top-1, top-K Jaccard, KL, top-1 mass).
-- `c29_logits_compare_v2.py` — Phase C29 v2: the same comparator stratified by accepted vs rejected draft rows (H15b probe).
-- `h15c_compare.py` — H15c: apply the pre-registered decision rule to vLLM-vs-kiln MTP α medians.
-- `h15c_kiln_alpha_from_csv.py` — H15c: derive kiln per-seed MTP α from PR #529's c1_attr CSVs.
-- `h15c_vllm_alpha_dump.py` — H15c: vLLM MTP α microbench (same workload as the kiln capture, A6000 bs=1).
-- `h17_compare.py` — H17: pre-registered decision rule for SGLang-vs-kiln MTP α.
-- `h17_sglang_alpha_dump.py` — H17: SGLang MTP α microbench (Qwen3.5-4B, k=1 speculative decode, seeds 0–2).
-- `h17b_compare.py` — H17b: decision rule for the vLLM v0.20.0 retest against kiln α.
-- `h17b_vllm_020_alpha_dump.py` — H17b: vLLM v0.20.0 MTP α microbench (thin re-export of the H15c driver).
-- `h18_compare.py` — H18: decision rule for the hand-rolled HF-transformers α against kiln α.
-- `h18_hf_alpha_dump.py` — H18: hand-rolled HF transformers reference α probe (base/verifier + raw `mtp.*` head).
-- `mtp_c10_splice_bisect.py` — Phase C10: fp32 HF reference comparator + top1-flip per-site bisect (Class B rejection audit).
-- `mtp_c1_summarize.py` — summarize Phase C1 MTP acceptance-rate attribution CSVs (α, top-k match, Class A/B rows).
-- `mtp_compare.py` — Phase B6/B7: per-tap numerical comparison of kiln vs reference MTP intermediates.
-- `mtp_h_main_reference_dump.py` — Phase B10/B11/B12/C41–C43: pure-Python reference `h_main` dump with optional layer/GDN sub-op taps.
-- `mtp_reference_dump.py` — Phase B6: pure PyTorch reference implementation of the Qwen3.5-4B MTP forward pass.
+- `audit-candle-usage.sh` (LOCKED) — Phase 0.1: audit the candle API surface (call sites by module + symbol) into `bench-results/candle-api-surface.csv`.
+- `audit-customop.py` (LOCKED) — Phase 0.2: audit `CustomOp1/2/3` impl blocks to design the kiln-tensor forward/backward seam.
+- `audit-dtype-usage.py` (LOCKED) — Phase 0.5: audit dtype usage (incl. crate-local FP8/Marlin/FP4 types) into `bench-results/dtype-usage.{csv,md}`.
+- `audit-multi-gpu-seam.sh` (LOCKED) — Phase 0.6: record hardcoded device-0 literals for the centralized device-accessor migration.
+- `audit-preserve-list.sh` (LOCKED) — Phase 0.7: record the NVTX range names, `KILN_*` env gates, and Tensor seams the migration must preserve.
+- `audit-substrate-status.sh` (LOCKED) — Phase 1.31: dashboard of #1082 substrate deliverable status from file existence + workspace membership.
+- `h15c_kiln_alpha_from_csv.py` — H15c: derive kiln per-seed MTP α from PR #529's c1_attr CSVs. Stays at root because `check_config_schema.py` pins its exact path in `RETIRED_ENV_REFERENCE_ALLOWLIST` (gate-locked).
 
 ## Capture & UI smoke
 
-- `capture-desktop-screenshots.mjs` — headless-Chromium capture of the Tauri shell windows with canned `window.__TAURI__` demo data.
-- `capture-pre-migration-baseline.sh` — Phase 0.10: freeze pre-migration candle-path numbers so the Phase 9 "≥ baseline" gates are enforceable.
-- `capture-screenshots.mjs` — dashboard demo screenshots (PNG + 720/1440/2880 WebP delivery variants), no GPU pod required.
+- `capture-desktop-screenshots.mjs` — headless-Chromium capture of the Tauri shell windows with canned `window.__TAURI__` demo data; generates the tracked `docs/desktop/*.png` (keep: artifact generator).
+- `capture-screenshots.mjs` — dashboard demo screenshots (PNG + 720/1440/2880 WebP delivery variants); generates the tracked `docs/site/assets/server-ui-*` (keep: artifact generator).
 
 ## Training & serving drivers, pod validation
 
-- `cuda_qwen_sft_smoke.sh` — RunPod A6000: fetch Qwen3.5-4B, build kiln-bench with CUDA, run one real SFT training step.
 - `issue40_actual_model_regressions.sh` — issue #40 real-model regression driver: train an adapter, then run serving latency cycles.
 - `opd_phase0_pod_validation.sh` — §13 Phase 0 real-hardware validation: OPD loss-kernel bench vs baseline + kiln-train/server suites on a CUDA pod.
-- `phase2_validation_steps_1_2_3.sh` — bounded Vulkan training smoke on the single qualified route with an 8 GiB memory guard.
-- `phase7_cuda_graph_prefix_cache_verify.sh` — verify CUDA-graphs + prefix-cache behavior against a running kiln server.
+- `phase2_validation_steps_1_2_3.sh` — bounded Vulkan training smoke on the single qualified route with an 8 GiB memory guard (keep: content-asserted by `check_runtime_defaults.mjs`).
 - `vllm_teacher.py` — fingerprint and launch an immutable vLLM prompt-logprob teacher for OPD scoring.
 
 ## Utility & build infrastructure
@@ -112,11 +92,7 @@ retained evidence for a frozen `docs/archive/` investigation.
 - `c2_artifacts/` — Phase C2 MTP bisect evidence: kiln/ref safetensors dumps (`kiln_pos0..2.st`, `ref_pos0..2.st`) plus comparator stdout (`c2_compare.txt`).
 - `docs-site/` — docs-site build (`build.mjs`, `lib.mjs`), social-preview renderer, `tailwind.css`, and unit tests (`test/`); driven by `pages.yml`.
 - `hf_trl/` — HF/TRL reference trainer `train_sft.py` (Kiln SFT/recorded-GRPO handoff via PEFT) plus the locked `requirements-sft.lock`.
-- `phase-c36/` — C36 H14a decode-length sweep driver (`run_c36_bench.sh`, Cell D × {128, 256, 512, 1024} × seeds 0–2).
-- `phase-c37/` — C37 variance re-anchor single-cell sweep driver (`run_c37_bench.sh`).
-- `phase-c40a/` — C40a analysis (`analyze_c40a.py`: HumanEval, chat-template OFF, bootstrap CI on α).
-- `phase-c40b/` — C40b analysis (`analyze_c40b.py`: N=20 seeds, bootstrap CI on the α median).
-- `phase-c40f/` — C40f run set: `run-all-seeds.sh`, `analyze.py`, and `h15a_correlation.py` (Marlin pack determinism × MTP acceptance correlation).
+- `investigations/` — FROZEN one-off investigation scripts + 5 phase-c family directories (`phase-c36/` … `phase-c40f/`); do-not-edit evidence home, see its README for the per-script index and the live-vs-frozen decision rule.
 - `qualification/` — qualification harness: `run.py` workload runner, oracle/receipt modules, `serve_*` workloads, `tests/`, and `validate_retained_evidence.sh`.
 
 ## Reference census & orphan queue (wave 3b, 2026-08-28)
@@ -139,7 +115,11 @@ reference, so there is no orphan-candidate queue to adjudicate:
   `runpod-validate-substrate-orchestrator.sh` (1) — each referenced by
   exactly one script or doc; retained (pod-workflow entry points).
 
-Family sizes: campaign gates 3, CI contract gates 12,
-contract/schema generators 6, benchmark harness 10, one-off
-investigations 29, capture/UI smoke 3, training/serving drivers 6,
-utility/build 6.
+**Round 153 (2026-09) reorg:** the 25 non-locked one-off investigation
+scripts and the 5 phase-c family directories moved to `investigations/`;
+the eight bench-results regenerate scripts, both screenshot generators, and
+every gate/contract/tooling script stayed at root. Current family sizes:
+campaign gates 3, CI contract gates 12, contract/schema generators 6,
+benchmark harness 10, one-off investigations (root, locked) 7, capture/UI
+smoke 2, training/serving drivers 4, utility/build 6, frozen
+investigations (`investigations/`) 25 + 5 family dirs.

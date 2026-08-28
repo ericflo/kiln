@@ -699,8 +699,8 @@ in the multi-engine table by `bench-results/llama-bench-a6000-post536.json`).
 - **vLLM and SGLang comparisons are blocked engine-side**, not because kiln
   is faster. Whenever a vLLM stable wheel ships `+cu124` / `+cu128` (or the
   RunPod kiln-runpod base image upgrades to driver ≥580), the H17b /
-  H17 drivers in `scripts/h17b_vllm_020_alpha_dump.py` and
-  `scripts/h17_sglang_alpha_dump.py` are re-runnable in 10–30 minutes for
+  H17 drivers in `scripts/investigations/h17b_vllm_020_alpha_dump.py` and
+  `scripts/investigations/h17_sglang_alpha_dump.py` are re-runnable in 10–30 minutes for
   ~$0.10–$0.20 per engine. Wire those numbers into the multi-engine table at
   that point.
 - **VRAM** at ~10 GB on A6000 leaves substantial headroom. KV-cache FP8

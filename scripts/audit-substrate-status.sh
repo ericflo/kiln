@@ -63,7 +63,7 @@ ROWS = [
     ("0.9",  "Vulkan MLP probe example",
      ["crates/kiln-vulkan-kernel/examples/vk_mlp_probe.rs"]),
     ("0.10", "pre-migration baseline harness",
-     ["scripts/capture-pre-migration-baseline.sh",
+     ["scripts/investigations/capture-pre-migration-baseline.sh",
       "bench-results/pre-migration-baseline/README.md"]),
     # Phase 1 — kiln-tensor scaffold + ops.
     ("1.1",  "kiln-tensor scaffold + Error/Result/bail!/ensure!",
