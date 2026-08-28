@@ -9168,3 +9168,93 @@ syntax — valid, verified declared.)
 (R126), dead forwards (R137: 0), default-members comment (R136b),
 workspace profile tables (R124-lane-sweep verified single-profile
 integrity).
+
+## Cleanup Agent (round 138) — 2026-08-28
+
+**LIVE-tooling dead-code sweep (29 CI/contract scripts + scripts/qualification/** +
+scripts/hf_trl/**; ~73K lines, all AST-scanned). ONE deletion executed
+(net −6, commit `91c86c457e889fbdde5f7b17010b35ca3bda64b8`) — the round-135 deferred candidate A, closed
+this round per the prefer-largest-net-removal rule after the full sweep
+confirmed nothing larger is provably dead. 0 test-suite runs (round-135
+steering: compile-level + gate scripts + grep only).**
+
+**Executed — dead private wrapper + its orphaned import
+(scripts/qualification/run.py, net −6):**
+
+1. **run.py:1522 (was) — `_compact_details` (item 1, dead function, 4 lines +
+   1 blank line).** Private 1-line-wrapper over `result_details.compact_details`
+   with an assert. Evidence chain: (a) repo-wide `git grep -nw _compact_details`
+   — only hit outside its own `def` is the historical CLEANUP.md ledger
+   sentence; zero call sites in scripts/, crates/, .github/, docs/, tests/;
+   no argparse/`--flag` wiring (private, not a subcommand target); no string/
+   getattr dynamic references. (b) `git log -S _compact_details -- run.py` +
+   `git show e2efd5dff^:run.py`: the function was LIVE until e2efd5dff
+   ("Harden Vulkan baseline evidence semantics", 2026-07-14) — its last call
+   site was run.py:1125 (`return _compact_details("; ".join(parts)) if parts
+   else None` inside the old `_join_details`); that commit introduced
+   result_details.py and rewired `_join_details` to
+   `join_details(*values, max_characters=...)`, orphaning the wrapper.
+   (c) `_join_details` itself stays — 8 live call sites (run.py
+   L1652/2381/2391/2413/2455/2471/2496/2564). (d) Round 135 already
+   adjudicated this exact item "safe, not executed — smaller" (candidate A).
+   Deleted the function and its one blank line.
+2. **run.py:36 (was) — orphaned import (item 3, dead import, 1 line → 1
+   line).** After item 1, `compact_details` had zero uses in run.py;
+   `from result_details import compact_details, join_details` trimmed to
+   `from result_details import join_details`. The imported symbol itself
+   STAYS LIVE: defined in result_details.py, used by `join_details`
+   (L128/L147) and by serve_mixed_load.py:5727 (own import at L34).
+
+**Net: 7 deletions − 1 insertion = −6 lines, 1 file.**
+
+**Sweep coverage (all clean — evidence for the negative):**
+- Dead functions/classes (items 1): AST inventory of every fn/class/method in
+  all 3 in-scope dirs; each name repo-wide word-grepped. Exactly ONE
+  zero-caller found (item 1 above); every other definition has ≥1 real call
+  site, test reference, `signal.signal`/argparse/subclass wiring, or dataclass
+  protocol use. Zero-caller test-directory helpers: NONE (all count-1 test
+  names are test classes/methods called by unittest discovery, or live
+  `do_GET`/`do_POST`/`__enter__`/`__exit__` methods).
+- Dead branches (item 2): AST pass for constant-condition `if`/`while` and
+  unreachable statements after return/raise/continue/break in every scope
+  file — zero findings (the only literal-True tests are live `while True`
+  poll loops with internal break/return).
+- Dead imports (item 3): only item 2's orphan (R135's AST scan closed the
+  rest; re-verified).
+- JS (item 5): docs-site/build.mjs fully live (`usage`/`parseArguments` both
+  called; all imports used); the five other .mjs scope files: zero unused
+  import bindings (name-count verified); the two scope shell scripts: both
+  `cleanup()` functions trap-referenced (4 refs each).
+- Module-level constants: every ALL_CAPS constant in scope files has ≥1
+  non-def reference repo-wide — no dead consts.
+
+**Noticed-but-left (owner-queued, item 4 — duplicate utilities, REPORT ONLY,
+consolidation = churn across independently-gated scripts):**
+- `_repo_path` + `_strict_object` near-identically reimplemented in
+  check_production_file_budget.py (L75/L42) and check_repository_artifacts.py
+  (L95/L62) — byte-identical logic except the raised exception type
+  (`BudgetPolicyError` vs `ArtifactPolicyError`); consolidation needs a shared
+  helper module = cross-gate churn.
+- `expected_metric_names` duplicated in check_backend_latency_fixtures.py:298
+  and lock_backend_latency_thresholds.py:123; `_canonical_json` in
+  hf_trl_roundtrip.py:54 and vulkan_hf_model_oracle.py:68;
+  `_parse_worker_marker` in rocm_hf_layer_attribution.py:295 and
+  rocm_hf_path_attribution.py:224; `load_oracle_packages` in
+  grpo_trl_oracle.py:118 and qwen35_sft_oracle.py:216;
+  `package_version_base` in grpo_trl_oracle.py:114 and
+  adamw_pytorch_oracle.py:91 (`_package_version_base`).
+
+**Verification (round-135 protocol — no test suites locally):**
+`git grep -nw _compact_details` after: only the historical ledger mention;
+`grep -c compact_details run.py` = 0; `python3 -m py_compile
+scripts/qualification/run.py` rc=0 (result_details.py untouched, sha256
+unchanged); PEP8 spacing around the seam verified (exactly 2 blank lines);
+`check_production_file_budget.py` PASS (646 files, 5000-line default, 14
+reviewed exceptions); `check_repository_artifacts.py` PASS (4563 tracked
+paths); `git status` clean after the commit. Suite verification in CI
+(qualification unittest exercises `_join_details` → `join_details` →
+`compact_details` on every run-receipt path). Final hashes (sha256):
+`006ee5c59c4bcc06ced1e276f5c45cb9f15e7ad44fb08bc5a50ebd68f173adec`
+scripts/qualification/run.py,
+`ff14cec30dda44411e07f7c2832f871fcbbf5c1f68288474bcfca4b0e01791df`
+scripts/qualification/result_details.py (untouched reference).
