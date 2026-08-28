@@ -9864,3 +9864,178 @@ description; left untouched pending owner judgment.
 docs/archive/vk-harmonization/, CLEANUP.md ledger quotes,
 docs/audits/PHASE11_SERVER_TIMEOUT_POLICY.md `QUICKSTART.md#L296`
 (line-number anchor).
+
+## Cleanup Agent (round 157) — 2026-08-28
+
+**REPORT-ONLY — README.md split plan (owner queue; no files changed; awaiting owner approval).**
+No cargo/test suites run; only cheap Python/Node gate checks to confirm the current
+green state (standing gates pass on the committed tree). The task brief estimated
+README.md at ~2036 lines; the committed tree measures **1751 lines** (`wc -l`) — all
+line numbers below are from the committed tree, verified by a code-fence-aware
+heading scan.
+
+### Section map (27 sections; total = 1751 lines)
+
+| # | Section | Lines | Size | Purpose | Class |
+|---|---|---|---|---|---|
+| 1 | Preamble (logo, tagline, nav links, intro, service-envelope note) | 1–43 | 43 | GitHub landing: identity, nav hub to QUICKSTART/site/contracts, BENCHMARKS envelope pointer (`#current-measured-service-envelope`) | (a) |
+| 2 | Why | 44–80 | 37 | Product narrative + minimal serve→train→infer→eval curl demo | (a) |
+| 3 | Features | 81–112 | 32 | 24-bullet feature index; each claim has a canonical doc (NATIVE_SFT_PROFILE, ECHO_GUIDE, EVAL_GUIDE, SERVING_PROFILES; request-log bullet already links EVAL_GUIDE#mine-your-own-request-log) | (b) |
+| 4 | The OpenEnv Loop | 113–308 | 196 | Narrative + curl flows for discovery/episodes/collect/train/replay; ends pointing at OPENENV_GUIDE | (b) |
+| 5 | The GRPO Loop | 309–351 | 43 | Recorded-policy GRPO loop with OpenAI-client example | (b) |
+| 6 | Agentic GRPO with ECHO | 352–385 | 34 | ECHO-by-default, λ=0.05, paper citation, TerminalBench-2.0 ~2× claim, `--no-echo` opt-out | (c) |
+| 7 | Off-policy OPD teacher data | 386–410 | 25 | JSONL corpus + 25-step checkpoint claim | (b) |
+| 8 | Remote vLLM teachers | 411–454 | 44 | Provenance snapshot launch command incl. `--max-provenance-read-mib-per-second`, K=1 probe, identity | (b) |
+| 9 | The Eval Loop | 455–488 | 34 | curl flows: upload/synthesize/compare/replay + judgment flywheel | (b) |
+| 10 | Quick Start | 489–763 | 275 | 4 install paths + training deep-dive (seed, native profile, optimizer tuples/rank matrix, HF export/import, invalid rows) + pi-setup + embedded agent runs | (c) |
+| 11 | See it in action | 764–773 | 10 | Six-cast demo player link + dashboard screenshot | (a) |
+| 12 | Memory Budget (24GB GPU) + Apple Silicon | 774–799 | 26 | VRAM/unified-memory tables (128K→~13GB … FP8→~19GB) | (a) |
+| 13 | API (curated workflow index) | 800–896 | 97 | ~30-row curated table; explicitly defers to openapi contract + schemas | (b) |
+| 14 | Performance timing | 897–915 | 19 | include_performance, phase clocks, actor_queue_ms | (b) |
+| 15 | Prompt logprobs | 916–1145 | 230 | /v1/completions scoring: snapshots, 4096-token cap, tape/optimizer leaves, 65,536 cap, quarantine, JSON example | (c) |
+| 16 | Chat adapter selection | 1146–1185 | 40 | `adapter` null/`x-kiln-loaded-adapter-revision` semantics | (b) |
+| 17 | Adapter publication and conflicts | 1186–1230 | 45 | Atomic publication, `.failed` quarantine, `adapter_revision_conflict` | (b) |
+| 18 | Architecture | 1231–1258 | 28 | ASCII pipeline diagram + "see ARCHITECTURE.md" pointer | (b) |
+| 19 | Project Structure | 1259–1278 | 20 | Crate inventory (14 crates) | (a) |
+| 20 | Configuration | 1279–1630 | 352 | ~55-row curated settings table + provenance/prefill-quantum/thinking-budget prose | (b) |
+| 21 | Security model | 1631–1648 | 18 | Narrative + pointer to security-audit-v0.1.md | (b) |
+| 22 | Desktop App | 1649–1684 | 36 | Installer matrix, screenshots, pointers to desktop/README.md | (b) |
+| 23 | Deployment (Docker pull / build / systemd) | 1685–1724 | 40 | docker pull + build + unit file | (b) |
+| 24 | Status | 1725–1730 | 6 | Phase-1–11 status narrative (v0.1.0-shipped wording is stale) + CHANGELOG pointer | (b) |
+| 25 | Prior Art | 1731–1740 | 10 | vLLM/DeepSeekMath/S-LoRA/Tinker/nano-vllm credits | (a) |
+| 26 | Contributing | 1741–1746 | 6 | Welcome + CONTRIBUTING.md pointer | (b) |
+| 27 | License | 1747–1751 | 5 | MIT + THIRD_PARTY_LICENSES pointers | (a) |
+
+### Duplication audit — classification evidence (all claims opened and verified)
+
+**Counts: (a) 7 sections = 151 lines · (b) 17 sections = 1061 lines · (c) 3 sections = 539 lines.**
+(a + b + c = 27 sections = 1751 lines.)
+
+- **(b) canonical docs verified:**
+  - OpenEnv → `docs/guides/OPENENV_GUIDE.md` (loop/protected envs/identity/artifacts/failures/security) + `docs/training/OPENENV_REPLAY_REFERENCE.md` (512 MiB budget L231, 256 MiB cap L397, "twenty-two" pin L538, "eight one-step math" L550 — matches README claims).
+  - GRPO → `docs/guides/GRPO_GUIDE.md` ("The loop" L70, "Choose the rollout contract" L100, recorded-policy workflow L113+).
+  - OPD → `docs/training/OPD_TEACHER_JSONL.md` L236: "OPD defaults to an immutable checkpoint every 25 committed optimizer steps" (verbatim match of README claim).
+  - vLLM teachers → `docs/contracts/VLLM_TEACHER_IDENTITY.md` (`--max-provenance-read-mib-per-second` L75/L108, identity contract L231, register L343, recovery L570).
+  - Eval → `docs/guides/EVAL_GUIDE.md` (synthesize L100, run/compare/rerun L235, judgment flywheel L488).
+  - Quick Start install paths → `QUICKSTART.md` "Choose your path" L5 + path sections L33/L41/L96; training deep-dive → `docs/training/NATIVE_SFT_PROFILE.md` (rank matrix L372–380 = README's 1024/48/32 numbers), `docs/training/HF_TRL_INTEROP.md`, `docs/training/sft-ingestion.md`, `docs/training/sft-tokenization.md` (README itself links all of these).
+  - API/perf/adapter sections → `contracts/kiln-http-api-v1.openapi.json` + `docs/site/api.html` (completions L590/L699–745, quarantine L722/L732, adapter `allow_quarantined`/`reload` L886) + `docs/serving/LATENCY_OBSERVABILITY.md` (L33/L62) + `docs/contracts/ADAPTER_MANIFEST.md` (L150/L183) + `docs/guides/GRPO_GUIDE.md` (`adapter_revision_conflict`).
+  - Architecture → root `ARCHITECTURE.md` (795 lines; Gated DeltaNet L167/L194; site slug `architecture-deep-dive`).
+  - Configuration → `docs/contracts/CONFIGURATION.md` (2296 lines; `actor_cycle_idle_ms` ×4; `[agent]` L1996+) + `docs/serving/THINKING_BUDGET_CONTRACT.md` (×13).
+  - Security → `docs/audits/security-audit-v0.1.md` (9 findings incl. auth surface L249).
+  - Desktop → `desktop/README.md` `#releases` L13–30 (full installer matrix, verbatim).
+  - Deployment → `QUICKSTART.md` "Running with Docker" L1147 + "Running with systemd" L1178.
+  - Status → `CHANGELOG.md`. Contributing → `CONTRIBUTING.md` (site slug `contributing`).
+- **(c) README copy newer/more complete (verified absent from docs):**
+  - ECHO: `docs/guides/ECHO_GUIDE.md` has λ=0.05 (L26/L175) but **no** TerminalBench-2.0 claim and **no** paper citation (grep 0 hits) — README L354 is the only copy.
+  - Quick Start: embedded agent runs API surface (`POST /v1/agent/runs`, events/steer/abort, FIFO/loopback policy) — 0 hits in QUICKSTART.md and api.html (only `[agent]` config fields exist in CONFIGURATION.md L1996+).
+  - Prompt logprobs: "65,536 candidate entries" cap, "omits the unused final logits row", settlement/quarantine narrative — no match in any docs/*.md (only api.html endpoint overview + CONFIGURATION.md fields `model.snapshot_dir` L1029 / `model.checkpoint_read_mib_per_second` L1030).
+- **(a) unique (no canonical copy found):** preamble, Why, See it in action, Memory Budget tables (`grep "128K context"` → README + docs/plans only; no 24GB table in BENCHMARKS.md; no unified-memory table in docs/training/), Project Structure (crate list appears only in bench/audit prose), Prior Art, License pointers.
+
+### Anchor census (root README only)
+
+3 in-scope references (whole-repo `git grep -nE "README(\.md)?#([a-z0-9-]+)"`, excluding
+untracked `Qwen3.5-4B/` traces, node_modules, and this ledger):
+
+| File | Line | Reference | Anchor | Exists in README? | Disposition |
+|---|---|---|---|---|---|
+| QUICKSTART.md | 37 | `README.md#desktop-app` | `desktop-app` | Yes — L1649 `## Desktop App` | Keep: phase 1 retains `## Desktop App` heading as a link stub (anchor survives); or re-point QUICKSTART.md:37 to `desktop/README.md#releases` |
+| QUICKSTART.md | 217 | `README.md#security-model` | `security-model` | Yes — L1631 `## Security model` | Keep: phase 1 retains `## Security model` heading (anchor survives); or re-point to `docs/audits/security-audit-v0.1.md` |
+| README.md (self) | 493 | `(#desktop-app)` | `desktop-app` | Yes — L1649 | Follows the `desktop-app` decision above |
+
+Out of scope (noted, untouched): `docs/site/troubleshooting.html:372` →
+`desktop/README.md#troubleshooting` (desktop README anchor; exists at
+`desktop/README.md` L166; unaffected by the root split). No other tracked file
+references a root-README anchor.
+
+### Site / manifest impact
+
+`docs/site/docs-manifest.json` (59 documents) **does not serve README.md at all**
+(JSON parse: zero `source` values containing "readme" case-insensitive;
+`grep -i readme` rc=1). The site serves derived copies (`docs/public/OVERVIEW|
+QUICKSTART|CONFIGURATION|ARCHITECTURE|BENCHMARKS|CHANGELOG.md`), root
+`SECURITY.md`/`ARCHITECTURE.md`/`CONTRIBUTING.md`, and contract schemas;
+hand-written pages (index/api/grpo/evals/cli/quickstart/troubleshooting) link to the
+GitHub blob `README.md` **without anchors**. Build (`scripts/docs-site/build.mjs`)
+renders exactly the manifest, so:
+
+- **Phase 1 (b removals): 0 manifest edits.** No anchor-bearing manifest change.
+- **Phase 2 (c reconciles): 0 manifest edits** unless the agent-runs/prompt-logprobs
+  detail lands in a new published doc (below).
+- **Phase 3 (a moves): 0 manifest edits if** Memory Budget → root `BENCHMARKS.md`
+  (non-manifest) or Project Structure → root `ARCHITECTURE.md` (manifest source
+  unchanged, page grows). **1 manifest entry if** a new `docs/training/MEMORY_BUDGET.md`
+  is published, of the shape:
+  `{"source":"docs/training/MEMORY_BUDGET.md","slug":"memory-budget","title":"Memory budget (24GB GPU / 64GB unified memory)","section":"training","description":"VRAM and unified-memory budgets for long-context inference and concurrent training."}`
+  (insert into the manifest `documents` array in the training section; verify the
+  `sections` key during execution). Not made — plan only.
+
+### Plan table (ordered by execution safety)
+
+**Phase 1 — (b) removals: 17 sections, −888 lines, README 1751 → ~863.** Zero new
+content; keep both anchor-bearing headings (`## Security model`, `## Desktop App`)
+as 8–12-line link stubs.
+
+| Step | Section (lines) | Action | Save |
+|---|---|---|---|
+| 1.1 | Configuration (352) | → ~20-line pointer to `docs/contracts/CONFIGURATION.md` + `kiln.example.toml` + `GET /v1/config` | 332 |
+| 1.2 | The OpenEnv Loop (196) | → ~15-line narrative + links to OPENENV_GUIDE + OPENENV_REPLAY_REFERENCE | 181 |
+| 1.3 | API (97) | keep 10-row curated table + contract/site links | 72 |
+| 1.4 | Remote vLLM teachers (44) | → ~10 lines + VLLM_TEACHER_IDENTITY link | 34 |
+| 1.5 | The GRPO Loop (43) | → ~10 lines + GRPO_GUIDE link | 33 |
+| 1.6 | Adapter publication (45) | → ~12 lines + ADAPTER_MANIFEST link | 33 |
+| 1.7 | Chat adapter selection (40) | → ~10 lines + api/site link | 30 |
+| 1.8 | Deployment (40) | → ~8 lines + QUICKSTART Docker/systemd anchors | 32 |
+| 1.9 | The Eval Loop (34) | → ~8 lines + EVAL_GUIDE link | 26 |
+| 1.10 | Architecture (28) | → ~6 lines + ARCHITECTURE.md link | 22 |
+| 1.11 | OPD (25) | → ~6 lines + OPD_TEACHER_JSONL link | 19 |
+| 1.12 | Performance timing (19) | → ~5 lines + LATENCY_OBSERVABILITY link | 14 |
+| 1.13 | Features (32) | trim verbose bullets to ~20 lines | 12 |
+| 1.14 | Desktop App (36) | keep `## Desktop App` anchor stub + desktop/README links | 24 |
+| 1.15 | Security model (18) | keep `## Security model` anchor stub + audit link | 10 |
+| 1.16 | Status (6) | refresh stale v0.1.0 wording; → CHANGELOG pointer | 2 |
+| 1.17 | Contributing (6) | → CONTRIBUTING.md pointer | 2 |
+
+**Phase 2 — (c) reconciles: 3 sections, −409 lines, README → ~454.** Land README-
+unique claims in canonical docs *first*, then trim.
+
+| Step | Section (lines) | Action | Save |
+|---|---|---|---|
+| 2.1 | ECHO (34) | add paper citation + TerminalBench-2.0 ~2× claim to ECHO_GUIDE.md; README → ~10 lines | 24 |
+| 2.2 | Quick Start (275) | collapse install-path narrative → QUICKSTART links (−~120); move embedded agent runs (events/steer/abort, loopback policy) to QUICKSTART new § or api.html (+~25 docs); README → ~95 lines | 180 |
+| 2.3 | Prompt logprobs (230) | verify 65,536 cap / final-logits-row / settlement vs `crates/kiln-server/src/api/completions`; add to api.html completions section (+~20); README → ~25 lines | 205 |
+
+**Phase 3 — (a) moves: 2 sections, −43 lines, README → ~411.** Unique content to
+canonical homes; README keeps 1–2-line pointers.
+
+| Step | Section (lines) | Action | Save |
+|---|---|---|---|
+| 3.1 | Memory Budget (26) | tables → BENCHMARKS.md new "Memory budget" section (no manifest change) or new `docs/training/MEMORY_BUDGET.md` (+1 manifest entry, 60/60) | 24 |
+| 3.2 | Project Structure (20) | crate inventory → root ARCHITECTURE.md new "Workspace layout" section | 19 |
+
+Keep untouched (already (a) hub content): preamble, Why, See it in action, Prior
+Art, License.
+
+**Gate suite per phase (before AND after):** standing — `python3
+scripts/check_repository_artifacts.py`, `python3 scripts/check_production_file_
+budget.py`; docs-site — `node scripts/docs-site/build.mjs --validate-only`
+(59/59; 60/60 after any manifest add), `npm test --prefix scripts/docs-site`
+(11/11), `node scripts/check_docs_site_smoke.mjs` (static mode; full mode's only
+failure is the pre-existing Chromium absence, same condition as Rounds 5/152/153);
+plus phase 1 anchor-resolution check (QUICKSTART.md:37/:217 + README:493 resolve),
+phase 2 claim-presence greps in destinations (`TerminalBench`, `65,536`,
+`v1/agent/runs`), and link checks on every edited markdown file. Each phase = one
+focused commit, no push.
+
+### Owner queue — README split proposal (report-only)
+
+**Status: no files changed; awaiting owner approval.** The task brief's 2036-line
+estimate is stale (measured 1751); the plan above is exact against the committed
+tree. Suggested approval format (any of):
+- "approve README split phase 1"
+- "approve README split phases 1–2"
+- "approve README split all phases (1–3)"
+- "reject README split <reason>"
+
+On approval, execution is mechanical: apply the phase's table rows verbatim,
+run the gate suite, commit one phase per commit, and record the follow-up ledger
+round.
