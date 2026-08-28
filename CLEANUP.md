@@ -9152,3 +9152,19 @@ kiln-blas" (hipBLASLt, optional kiln-hip + build.rs cc link —
 same link-time category as the other 7; amdhip64 already named in
 the comment's runtime list). Added kiln-rocblas to the comment list
 (1 line, net 0). All 8 excluded crates now accounted for.
+
+## Round 137 — feature-forwarding audit, all manifests (orchestrator, inline) [2026-08-28]
+
+Proper (unlike round-136's false-positive-prone quick scan)
+tomllib-based scan of all 34 manifests (root + 33 crates): every
+`dep/feature` and `dep:xxx` entry in every feature list checked
+against the target crate's declared features. **Zero dead
+forwards** — no feature forwards to a feature its dependency does
+not declare; no orphan non-dep/non-feature entries. (round-136's
+2 "SUSPECT" hits were `dep:kiln-kt-bridge?/cuda` implicit-optional
+syntax — valid, verified declared.)
+
+**Manifest class fully CLOSED:** dead deps (R127/130), dead features
+(R126), dead forwards (R137: 0), default-members comment (R136b),
+workspace profile tables (R124-lane-sweep verified single-profile
+integrity).
