@@ -15122,3 +15122,198 @@ Gate 1 re-run after the commit to confirm byte counts still pass (CLEANUP.md is 
 
 CLEANUP.md append only (no other file touched); committed to local `main`, no push. Commit hash reported in the round 190 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 191 — root ARCHITECTURE.md claims audit) — 2026-08-29
+
+**Scope.** Read-only claims audit of the 836-line root `ARCHITECTURE.md` at HEAD `017c50c20` (round 190 commit, clean tree). Per the brief, this round audits only the root doc's own claims — crate/layer structure, data flow, behavior, counts, and code references — and does not re-open the pointer-stub audit (R170) or the published curated-copy audit (R188). Method: full claim census of the doc (crate inventory, layer table, workflow table, numeric budgets, endpoint names, profile semantics, identity/provenance contracts, byte caps, doc-relative references), each cross-checked against canonical sources (root `Cargo.toml`, crate manifests, `crates/kiln-{server,model,train,eval,core,scheduler,vulkan-kernel,openenv,graph-metal,graph-hip,graph-vulkan,mps,hip}/src/*`, Qwen3.5-4B `config.json`, `.github/workflows/*`); every doc-relative reference verified with `test -e`; profile semantics verified against the production policy matrix *and* its contract test. Light tools only — no cargo build, no test suites beyond the standing gates, no source edits. The only file mutated is CLEANUP.md.
+
+### Claim verdicts — structure and inventory
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| S1 | "the 33 members of root `Cargo.toml`" crate inventory with per-crate descriptions | :86–119 | Root `Cargo.toml` `[workspace] members` = exactly 33 crates; all 33 listed, all directories exist; descriptions match crate manifests (spot-checked kiln-core, kiln-server, kiln-train, kiln-openenv, kiln-hip, kiln-mps, kiln-graph-metal) | CONSISTENT |
+| S2 | Package-boundary layer table (product runtime / environment runtime / learning loop / tensor substrate / resource control / backend integration / kernel libraries) | :63–73 | Every listed crate exists; module structure supports each stated role (kiln-server: `api/`, `training_queue.rs`, `eval/`, `metrics.rs`; kiln-model: `generate.rs`, `lora.rs`; kiln-train: SFT/GRPO/OPD trainers; kiln-openenv: `client.rs`, `action_schema.rs`, `types.rs`) | CONSISTENT |
+| S3 | "The same process owns five related workflows" table; "do not communicate through Python workers or a second model server" | :46–55 | All five surfaces exist in-process in kiln-server (serving `api/completions*`, training `training_queue.rs`, OpenEnv `api/openenv.rs` + `openenv_cli.rs`, eval `eval/`, artifacts `api/adapters.rs` + `hf_trl.rs`); no Python in the serving/training path (all-Rust workspace) | CONSISTENT |
+| S4 | System diagram: HTTP → validation/policy/identity → scheduler/ownership → model runner → CUDA·ROCm·Metal·Vulkan·CPU; OpenEnv HTTP + WS branch | :18–44 | Route set (`completions.rs:2090-2107`), BatchingEngine actor, `ModelRunner` (`kiln-model/src/generate.rs`), backend crates (kiln-blas/kiln-rocblas/kiln-mps/kiln-vulkan-blas/kiln-vulkan-kernel), OpenEnv discovery + `/ws` client (`kiln-openenv/src/client.rs`) | CONSISTENT |
+
+### Claim verdicts — serving and scheduling
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| P1 | "default combined budget is 512 tokens" | :185–186 | `DEFAULT_MAX_BATCH_TOKENS: usize = 512` (`kiln-scheduler/src/scheduler.rs:8`) | CONSISTENT |
+| P2 | Cycle priority: decode rows → resumable prefills → newly admitted prefills; partial prefills rotate | :187–196 | `scheduler.rs:86,195` ("Pack all active decode requests (1 token each) — highest priority"), `scheduler.rs:521-545` test `decode_priority_over_prefill` asserts decode-first + prefill fill-remaining | CONSISTENT |
+| P3 | "A narrow direct-stream worker remains as a compatibility path when the actor is unavailable; it is not a second production scheduler" | :198–200 | No named direct-stream worker or actor-unavailable fallback dispatch found in kiln-server; all HTTP generation enqueues into the BatchingEngine actor (`api/completions/generation.rs:22,325` → `BatchingEngineHandle::enqueue`, `batching_engine.rs:2061`). A single-row "direct streaming" decode loop exists in kiln-model (`generate.rs:10100-10548`) but is not a documented worker with that fallback role | UNRESOLVED → U191-1 |
+| P4 | Terminal cleanup list: graph/command-replay ownership, GDN state, prefix leases, private KV blocks, delivery/cancellation state; health counters keep row active through cleanup | :202–214 | `batching_engine.rs:6268-6317` tests (`terminal_finish_remains_active_until_resource_cleanup_completes`, `terminal_discard_…`) assert the active-decode row stays counted during cleanup; GDN/prefix-lease/private-KV release paths present in engine cleanup | CONSISTENT |
+| P5 | `POST /v1/completions/batch` admits a bounded set and returns one aggregate response; rows share scheduler/identity/accounting/cancellation | :216–218 | Route with `BATCH_BODY_LIMIT` (8 MiB) at `api/completions.rs:2101-2106`; batch rows enqueue through the same `EngineRequest` path | CONSISTENT |
+| P6 | Thinking budgets: omitted inherits server defaults, `null` = unlimited, nonnegative = explicit limit; closing span emits tokenizer-validated closing sequence | :220–228 | `kiln-core/src/thinking_budget.rs` state machine (omitted/null/explicit semantics) + conformance artifacts `contracts/thinking-budget-v1.{conformance,schema}.json` (referenced at `thinking_budget.rs:920,1029`) | CONSISTENT |
+| P7 | Serving path: chat-template rendering + tokenization → model/adapter/sampling/cache identity → batching actor → JSON or SSE | :156–178 | Chat-template kwargs in `api/completions/{schema.rs:327,validation.rs:58-70}`; streaming events via bounded mpsc channel (`response_delivery.rs:9-14,110`) | CONSISTENT |
+| P8 | `ModelRunner` owns model execution, adapter application, sampling, backend health, accelerator-resident state | :176–178 | `ModelRunner` in `kiln-model/src/generate.rs` (sampling, LoRA application, backend dispatch, health sync) | CONSISTENT |
+
+### Claim verdicts — model execution and replay
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| M1 | Qwen3.5-4B: 32-layer hybrid — 24 GDN linear-attention layers, 8 grouped-query full-attention layers | :233–236 | `Qwen3.5-4B/config.json`: `num_hidden_layers=32`, `linear_attention=24`, `full_attention=8`, GQA `num_attention_heads=16`/`num_key_value_heads=4` | CONSISTENT |
+| M2 | Replay table: CUDA graph / HIP graph / Metal indirect command buffer / Vulkan resident command batch; "never assumed from the backend name alone" | :256–268 | `kiln-graph-cuda` (CUDA graph scaffold), `kiln-hip` + `kiln-model/src/rocm_graph.rs` (hipGraph), `kiln-graph-metal` (ICB), `kiln-graph-vulkan` + `kiln-vulkan-kernel` (command buffers); eligibility decided by capability policy, not name | CONSISTENT |
+| M3 | Unknown completion state quarantines the backend; contained fallback only where a route defines one | :270–274 | Backend health latch + quarantine path (`state.rs:3255-3273`, `gpu_coordination.rs:61-75`); route-specific fallback policy in capability contracts | CONSISTENT |
+| M4 | Speculative decoding: serving accepts only effective `off`; startup rejects non-off before weights load | :276–278 | `SpeculativeDecodingConfig::validate_for_serving` (`config.rs:5486`) called from `main.rs:698` (before runner construction) and at state construction (`state.rs:3636`) | CONSISTENT |
+| M5 | LoRA deltas applied to supported projections | :237 | `kiln-model/src/lora.rs` + `lora_loader.rs`; LoRA rank/alpha in `GrpoConfig` (`kiln-train/src/lib.rs:1539+`) | CONSISTENT |
+
+### Claim verdicts — memory and resident state
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| R1 | Memory governor samples live pressure; admission uses the same planning inputs as execution | :291–297 | `kiln-memory/src/governor.rs` header: TTL-cached memory snapshot, `MemoryPressure`, available-budget with safety floor + soft reservations | CONSISTENT |
+| R2 | Block manager divides K/V into 64-token blocks; logical block tables; incremental allocation; cleanup-gated return | :299–305 | `DEFAULT_BLOCK_SIZE: usize = 64` (`state.rs:47`, used at `state.rs:3679`) | CONSISTENT |
+| R3 | FP8 K/V storage halves BF16 bytes/element; opt-in, not a quality/speed guarantee | :309–311 | `kv_cache_fp8` config (`config.rs:3464-3467`, "halving memory usage"), default `false` (`config.rs:5322`) | CONSISTENT |
+| R4 | Prefix cache: block-aligned reuse, reference-counted retained blocks, eviction within budgets; Vulkan prefix reuse quarantined | :313–325 | `kiln-core/src/prefix_cache.rs:41-42,127` ("A block with refcount > 0 must not be freed"); `MIN/MAX_PREFIX_CACHE_STATE_BYTES` (`state.rs:474-475`); `vulkan_correctness_quarantine` status (`api/config.rs:25-35`) | CONSISTENT |
+| R5 | GDN state, graph buffers, command batches, activations have owners/generations; adapter transitions invalidate state whose weight pointers/numerical identity changed | :327–335 | `cuda_graph.rs:30` ("Graph is invalidated on LoRA adapter swap (different weight pointers)"); ROCm graph invalidation on load/unload/swap (`generate.rs:2876,2904,2978`); Metal "graph invalidation on adapter/weight-pointer changes" (`metal_graph.rs:4`) | CONSISTENT |
+
+### Claim verdicts — accelerator backends and Vulkan policy
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| B1 | Support predicates are request-aware; declined routes may use a defined reference implementation only when it preserves the residency/performance contract | :339–347 | Capability-contract dispatch with per-route support predicates (`kiln-model/src/backend/capability.rs`) | CONSISTENT |
+| B2 | Vulkan selection does not branch on device name, qualification machine, driver string, vendor ID, or device ID | :353–356 | `kiln-vulkan-kernel/src/policy.rs:7` ("Deliberately absent: vendor IDs, device IDs, driver names, and marketing…"), `:77` ("Product selection must never depend on device names, vendor IDs…") | CONSISTENT |
+| B3 | `VulkanKernelPolicy::from_capabilities` derives routes from capability facts; policy installed once; conflicting reinstallation fails | :358–380 | `policy.rs:181` (`from_capabilities`) + `policy.rs:436-446` (`install_vulkan_kernel_policy` refuses "conflicting selected-device capabilities") | CONSISTENT |
+| B4 | Vulkan serving may run kernels with frozen model weights on CPU (explicit hybrid; execution device ≠ weight device) | :386–390 | Weights-on-CPU + Vulkan kernel dispatch (`state.rs:2497`); separate execution-device and weight-device tracking in state | CONSISTENT |
+| B5 | Stable profile keeps Vulkan resident prefill disabled; experimental may admit it; gate is about route evidence | :392–395 | `config.rs:851` (stable `vulkan_resident_prefill: false`), `:861` (experimental `true`), effective at `state.rs:4327-4328`; field doc "Stable serving remains on generic prefill until the full release qualification closes" (`config.rs:893-895`) | CONSISTENT |
+| B6 | CUDA/ROCm/Metal follow the same boundary; Marlin W4A16, FP8 K/V, live graph capture, specialized GDN/attention routes exist in source without implying stable activation | :397–410 | `kiln-marlin-gemm` (Marlin W4A16), `kv_cache_fp8` opt-in, `live_graph_capture` per profile (`config.rs:850,860,870`), `kiln-gdn-kernel`/`kiln-flash-attn` capability-gated | CONSISTENT |
+
+### Claim verdicts — ownership, profiles, failure boundaries
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| O1 | Shared coordination lock: inference shared, training/physical mutations exclusive; adapter swaps cross the actor quiescence barrier; GPU-backed eval obeys the same lock | :411–418 | `gpu_coordination.rs:14-24` ("Inference acquires a read lock… Training and memory mutations acquire a write lock"); quiescence barrier (`batching_engine.rs:2223-2260`); eval takes `state.gpu_lock` read guard (`eval/generator.rs:559-567`) | CONSISTENT |
+| O2 | Profile table: `stable` → inference "Admitted", training and live mutation "**Rejected**" | :420–422 (stable row :422) | `ServingProfile::Stable.runtime_policy()` = `training_gpu_ownership: true`, `adapter_weight_transitions: true`, `exclusive_gpu_behavior: "writer_priority"` (`config.rs:844-854`); contract test `serving_profile_policy_matrix_is_fail_closed` asserts the same (`config.rs:10103-10114`); admission gate `ensure_training_gpu_ownership_allowed` (`state.rs:2996-3007`) therefore PASSES for real-backend training under stable; default profile is `stable` (`config.rs:966-973`) | **STALE-CLAIM → F191-1** |
+| O3 | Profile table: `experimental` → training "Admitted with writer priority"; `maintenance` → inference "Disabled", training "Admitted after drain" | :423–424 | experimental: `training_gpu_ownership: true` + `"writer_priority"` (`config.rs:855-863`); maintenance: `inference_admission: false` + `"inference_disabled_drain_then_exclusive"` (`config.rs:864-874`) | CONSISTENT |
+| O4 | "Stable serving rejects real-backend training instead of quietly pausing traffic" | :430–431 | Same evidence as O2: stable admits real-backend training with writer priority; the only stable/experimental difference in the matrix is `vulkan_resident_prefill` | **STALE-CLAIM → F191-1** |
+| O5 | Health checks interrupt the wait when an exclusive owner queues behind work of unknown completion; potentially-live resources are not freed just to move the queue | :433–436 | `write_guard_while_healthy` re-checks `backend_health.ensure_healthy()` during write-guard acquisition (`gpu_coordination.rs:61-75`); latch retains in-flight resources (`state.rs:3255-3273`) | CONSISTENT |
+| O6 | Failure table: validation / admission / request execution / adapter quarantine / backend-completion-unknown (quarantine until restart) / physical device loss (readiness fails) | :759–770 | Validation + admission gates (`api/*`), quarantine latch (`state.rs`), readiness quarantine reporting (`api/health.rs`), adapter canary quarantine (`adapter_swap.rs:635-649`) | CONSISTENT |
+| O7 | "Fallback is therefore route-specific… an unknown accelerator state [is] not a recoverable performance miss" | :771–774 | Route-specific fallbacks in capability contracts; unknown-state quarantine per M3/O5 | CONSISTENT |
+
+### Claim verdicts — adapter lifecycle
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| A1 | Live model has one physical adapter state at a time; transitions pause admission, settle rows, take exclusive ownership, change weights, invalidate caches/replay, resume; queued requests validate expected revision | :440–448 | Quiescence + exclusive swap (`adapter_swap.rs`, `batching_engine.rs:2223-2260`); stale-revision rejection "queued request adapter revision is stale: expected …, loaded …" (`batching_engine.rs:1125`) | CONSISTENT |
+| A2 | Per-request adapter selection uses the same transition machinery; composition produces a content-addressed composed artifact then loads it through the validated path | :450–452 | Per-request `LoadedAdapterIdentity` selection (`api/completions/generation.rs:8,311,356`); content-addressed composed cache in adapters config | CONSISTENT |
+| A3 | Publication is transactional: temporary output validated before rename into the adapter dir; manifests/receipts bind artifact to base model, inputs, config, provenance | :454–457 | `kiln-train/src/adapter_output.rs:537,601,627` (temp file + `std::fs::rename`); train receipt/manifest identity binding | CONSISTENT |
+| A4 | Canary failures quarantine an adapter independently of backend health | :457 | `adapter_canary_allows_auto_load` / "adapter canary quarantined {adapter_name}" (`adapter_swap.rs:616-649`); canary gate on auto-load (`training_queue.rs:5032-5049`) | CONSISTENT |
+
+### Claim verdicts — OpenEnv rollout and training (part 1)
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| E1 | Preflight (persisted `kind=train` and direct `POST /v1/openenv/training/preflight`) materializes the exact effective GRPO config before persistence/discovery/GPU work; validates environment-token loss, policy contract, LoRA scale, checkpoint interval, behavior-adapter layout, `post_eval` suite, serving profile, backend workload, optimizer tuple, rank ceiling | :524–530 | `validate_openenv_training_preflight` + `preflight_training_inner` (`api/openenv.rs:1638-1740`); full `GrpoConfig` (`kiln-train/src/lib.rs:1539+`, LoRA rank/alpha, optimizer kind); `validate_grpo_config_at_submit` + `enforce_training_workload_admission` (`openenv.rs:1607,1616`); env-token (ECHO) loss term in the GRPO/OPD tape (`kiln-train/src/lib.rs:20-26`, `trainer/grpo_jsonl.rs:2341,2455`) | CONSISTENT |
+| E2 | Preflight failure is synchronous, persists no run/direct artifact; returns point-in-time queue + tracked-job capacity snapshot with `capacity_reserved=false`; final native admission rechecks invariants + transient capacity | :530–533 | `preflight_training` is a plain sync handler returning the receipt — no spawn, no persistence (`openenv.rs:1740-1762`); `OpenEnvTrainingCapacitySnapshot` "evidence, not a reservation", `capacity_reserved` "Always false in v1" (`openenv_cli.rs:678-707`); `submit_grpo_request` admission rechecks (`api/training.rs:1763,1768`) | CONSISTENT |
+| E3 | Rollout-only requests reject every training-only field | :534–535 | "Remove training-only fields or set kind to train." (`api/openenv.rs:1499`) | CONSISTENT |
+| E4 | One typed `kiln.openenv-training-contract.v1`; persisted v5 status writes it to `run.json` atomically with queue admission; executor submits from that field, not request defaults; direct train builds the identical type from its receipt | :538–541 | `OPENENV_TRAINING_CONTRACT_SCHEMA_V1` = "kiln.openenv-training-contract.v1" (`openenv_cli.rs:74`); `OpenEnvTrainingContract` "Persisted workflows and direct CLI receipts use this same wire type" (`openenv_cli.rs:708-724`); contract persisted with run status (`openenv.rs:397` + v5 status) | CONSISTENT |
+| E5 | Every sampled action carries the exact base-model, inference-config/runtime, and optional adapter content revision; collection rejects identity drift; native admission compares identity with the selected policy | :541–544 | `RolloutSummary.behavior_policy` — "the exact base-model/runtime/adapter revision that sampled every action" (`openenv_cli.rs:726-760`); `environment_identity_changed` at `identity_verification` (`api/openenv/failure.rs`) | CONSISTENT |
+| E6 | After the final episode the collector re-reads every endpoint's complete discovery identity + schemas, requires exact equality, else `environment_identity_changed` and publishes nothing | :544–548 | Revalidation stage in collector; typed failure `identity_verification` (`api/openenv/failure.rs`); discovery digest `kiln.openenv-discovery.v1` (`kiln-openenv/src/client.rs:551`) | CONSISTENT |
+| E7 | Under the adapter-mutation barrier, execution revalidates identity and privately snapshots a distinct behavior adapter before GPU work | :549–551 | `adapter_mutation_guard_blocking` + `snapshot_openenv_behavior_adapter_locked` (`training_queue.rs:4202-4268`) | CONSISTENT |
+
+### Claim verdicts — OpenEnv rollout and training (part 2)
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| E8 | Shared GRPO admission: OpenEnv submissions use the same typed admission function as `POST /v1/train/grpo`; `ScoredRollout` carries optional OpenEnv provenance | :508–516 | `openenv.rs:2511` → `super::training::submit_grpo_request` = `api/training.rs:1763` (the same function the HTTP handler calls); `ScoredRollout` + `TrainingDataProvenance` imports (`api/openenv.rs:28`) | CONSISTENT |
+| E9 | Server control plane invokes the authoritative chat handler in process (no loopback HTTP) | :514–517 | `openenv_cli.rs:131,137` → `crate::api::completions::openenv_chat_completion` (`api/completions.rs:351`) called in-process | CONSISTENT |
+| E10 | Run lifecycle: permit spans collection + training + evals; v5 restart resumes pristine never-admitted entries (v4 sealed once into v5); interrupted admitted work → explicit terminal failure; idempotency-key semantics | :556–571 | `admit_and_execute_run` holds the permit across `execute_run` (`openenv.rs:2217-2272`); v4→v5 pristine-entry migration (`openenv.rs:450,704-717`); idempotency validation + conflict-on-change (`openenv.rs:233,628-637`) | CONSISTENT |
+| E11 | Byte bounds: 4 MiB train_receipt/adapter_manifest evidence, 512 MiB aggregate retained budget, 256 MiB replay artifact cap, independent caps on request/summary/dataset/response | :583–584, :659–665 | `MAX_OPENENV_TRAINING_EVIDENCE_BYTES = 4 MiB` + `train_receipt`/`adapter_manifest` kinds (`training_evidence.rs:11,25-40`); `MAX_OPENENV_RETAINED_BYTES = 512 MiB` (`openenv_cli.rs:62`); `MAX_OPENENV_ARTIFACT_BYTES = 256 MiB` (`openenv_replay.rs:30`); 1 MiB request / 16 MiB response / 256 MiB dataset+summary (`openenv_cli.rs:56-57,70-71`) | CONSISTENT |
+| E12 | WebSocket path: status-only `GET /health` immediately before upgrade; strict lock-step; ping-answered, unsolicited app message poisons the session; no server-initiated app messages | :586–597 | `kiln-openenv/src/client.rs:323-325,538,604` (readiness precondition + upgrade), `:893-898` (ping/pong discipline, unsolicited-message poison), test at `:1541` | CONSISTENT |
+| E13 | Action schema: compiled per inspection with draft auto-detection, no HTTP/file resolvers; internal refs available; malformed/external-ref schemas fail as non-retryable protocol error; mismatch → bounded evidence + protocol-error reward + `invalid_model_action`, action never written to the socket | :599–606 | `kiln-openenv/src/action_schema.rs` (jsonschema draft auto-detect, resolver policy, bounded diagnostics); `invalid_model_action` termination in `openenv_cli.rs` + interop contracts | CONSISTENT |
+| E14 | Discovery identity: canonicalized hash of `/metadata`, `/schema`, `/list_environments`, `/openapi.json` under `kiln.openenv-discovery.v1`; key order/whitespace irrelevant, unknown fields bound; digest carried in rollout + corpus provenance | :608–614 | `kiln-openenv/src/client.rs:551` (schema id) + canonicalization/hashing of the four discovery values; digest in rollout/provenance records | CONSISTENT |
+| E15 | Group/seed semantics: one environment + reset seed per group; identical initial messages or collection fails; step rewards (not reset rewards) sum to return; `CAPACITY_REACHED` terminal but acquisition continues with backoff; collector strips caller `seed`, inserts deterministic group seed, round-robin whole groups; ≥1 group per endpoint | :616–627 | `openenv_cli.rs:3421` (`seed = seed_start + group_index` injected into reset; caller seed overwritten), `environment_index = group_index % inspections.len()` (round-robin), `:3612-3613` (≥1 group per endpoint); `CAPACITY_REACHED` (`kiln-openenv/src/types.rs:218,240`); step rewards into return (`openenv_cli.rs:2777`) | CONSISTENT |
+| E16 | Replay/summary: content-addressed replay manifest (exact resets, observations, exchanges, finals); summary v5 hashes the ordered seed-free plan; offline verification reconstructs the plan from replay groups; artifacts unavailable before manifest publication; download re-verifies length + SHA-256, atomic publish | :630–645 | Summary v5 + seedless reset-template digest (`openenv_cli.rs:782,2667`); manifest-gated artifact serving (`openenv.rs:3260-3360` — single-FD verify, exact length/digest headers, truncation guard); CLI artifact checks | CONSISTENT |
+| E17 | Metrics: same work accumulated with closed termination labels; environment URLs, adapter names, run IDs never become metric dimensions | :647–651 | `metrics/openenv.rs:19,67-76` (closed label set; identifiers explicitly excluded) | CONSISTENT |
+| E18 | CI-only miniopenenv oracle: pinned counter, arcade/synthesis/math derived from that checkout's build graph; scheduled edge lane against upstream `main`; no production setting/type/branch identifies it | :666–670 | `.github/workflows/ci.yml:52,185-186` (pinned checkout + matrix); `.github/workflows/openenv-interop.yml` (weekly cron + `workflow_dispatch`, checks `origin/main` at `:31`); `scripts/check_miniopenenv_interop.sh:33,58`; `miniopenenv` appears only in CI/tests, never production code | CONSISTENT |
+| E19 | Hostile-group containment: redirects disabled, independent frame/body limits, session/group/candidate/step caps, latched terminal errors | :655–666 | Redirects disabled (`kiln-openenv/src/client.rs:273` + collector sites); per-category caps (`openenv_cli.rs:56-71`); terminal-error session latching in collector | CONSISTENT |
+
+### Claim verdicts — training path
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| T1 | Training worker executes jobs sequentially (FIFO queue; exclusive accelerator ownership) | :686–705 | `training_queue.rs:1` ("FIFO training job queue — accepts SFT and GRPO jobs, runs them sequentially"), `spawn_training_worker` (`:1187`) | CONSISTENT |
+| T2 | Workloads: SFT (next-token loss), GRPO (rollouts/rewards/advantages/policy updates), OPD (on-policy + teacher-guided distillation) | :707–712 | `kiln-train` SFT microtrainer (`native_online_lora_v1`), GRPO trainer, OPD (`QueuedJob::Opd`, teacher bindings `api/training.rs:2755-2790`) | CONSISTENT |
+| T3 | Admission asks the backend for training tape/loss/precision/optimizer routes; unavailable route fails before accelerator ownership | :714–717 | `admitted_sft_loss_route` + `resolve_device_for_weights` (`kiln-train/src/lib.rs:342,414-421,479`); `ensure_training_backend_admission` (`api/training.rs:2783-2799`) | CONSISTENT |
+| T4 | SFT may use gradient checkpointing + sparse boundary replay; planning identity records effective checkpoint/loss route; exact resume rejects drift | :719–722 | `GradientCheckpointPolicy` + `CheckpointBoundaryPolicy` ("every checkpoint-boundary policy dimension must be exact-resume identity", `kiln-train/src/lib.rs:2533-2583`); `resume_checkpoint` fields (`:1170,1667`) | CONSISTENT |
+| T5 | Checkpoints include declared resume-mode state; final adapters use project artifact format; cancellation checked at defined boundaries and must settle backend work before terminal | :724–727 | `kiln-train/src/checkpoint.rs`; `adapter_output.rs` publication; cooperative `TrainingCancellation` + `cancel_requested` boundary checks (`job_cancellation.rs:1-45`) | CONSISTENT |
+| T6 | Post-eval gate: on successful training, queue adapter (+optional baseline) evals, record IDs, apply promotion rule; auto-load on pass is explicit policy | :750–754 | `post_eval: Option<PostEvalConfig>` in `GrpoConfig` (`kiln-train/src/lib.rs:883`); auto-load gated by explicit `auto_load` + canary + promotion gate (`training_queue.rs:5032-5049`) | CONSISTENT |
+
+### Claim verdicts — evaluation pipeline
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| V1 | Datasets/suites under configured `eval.eval_dir`; separate FIFO worker runs registered suites, inline suites, comparisons, replay jobs | :728–733 | `eval/queue.rs:241` ("FIFO eval queue, sibling of TrainingQueue"), `spawn_eval_worker` serial poll (`eval/worker.rs:16-47`) | CONSISTENT |
+| V2 | CPU-only scoring proceeds without accelerator ownership; generation + model-based judging use the shared model runtime and ownership rules | :733–735 | Scorers are pure CPU (`kiln-eval/src/scorers/*`); eval generation takes the shared `state.gpu_lock` read guard (`eval/generator.rs:559-567`) | CONSISTENT |
+| V3 | Scorers: exact/structured, regex, numeric, code execution (when configured), local model judging; judge adapter loaded through the same adapter boundary | :737–742 | `kiln-eval/src/scorers/{builtin.rs,mod.rs:202-217,python_doctest.rs,llm_judge.rs}`; `JudgeRunner` trait + `judge_adapter` (`scorers/mod.rs:506-514`) | CONSISTENT |
+| V4 | Strict replay binds suite, generation settings, seeds, model+adapter identities, scorer config, execution provenance, raw completion references; admission re-verified; terminal verdict `matched`/`mismatch`/`error` | :743–746 | `EvalReplayRecordV1` binds suite/generation/seed/`model_target`/`judge_targets`/`scorer_identities`/`raw_completions`/`execution_provenance_sha256` (`kiln-eval/src/replay.rs:123-144`); `EvalReplayStatus { Matched, Mismatch, Error }` (`:549-554`) | CONSISTENT |
+| V5 | Judgment workflow turns local A/B preferences into judge-adapter training examples; no hosted frontier model required unless a remote teacher is configured | :756–758 | Judge-adapter training via the standard adapter pipeline; remote teacher support in `api/training.rs` | CONSISTENT |
+
+### Claim verdicts — observability, config, and documentation references
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| X1 | Endpoint table: `GET /health`, `GET /v1/config` (effective config + provenance), `GET /metrics`, `GET /v1/debug/model-state` ("disabled unless `server.debug_model_state = true` or eval mode enables it") | :779–791, :142 | Routes registered in `api/routes.rs`; `/v1/config` returns effective values + provenance (`api/config.rs`); debug model state gate `state.eval_mode \|\| state.debug_model_state` (`debug_model_state.rs:279-280`) | CONSISTENT |
+| X2 | "Kiln's HTTP API has no built-in authentication. The default loopback bind is the safe local boundary" | :793–795 | `DEFAULT_SERVER_HOST = "127.0.0.1"` (`config.rs:26`); no auth middleware in `api/routes.rs` | CONSISTENT |
+| X3 | Latency reporting separates queue time, accelerator-lock wait, prefill, decode, graph capture or replay, response backpressure, training, resizing, trimming, and more per-phase durations | :799–806 | `BackendPhaseDurations` with the full phase set (`api/latency_observability.rs:20`) | CONSISTENT |
+| X4 | All doc-relative references resolve: QUICKSTART.md, BENCHMARKS.md, SECURITY.md, `docs/contracts/{ADAPTER_MANIFEST,EXECUTION_PROVENANCE,CONFIGURATION,backend-capability-report}.md`, `docs/guides/{OPENENV_GUIDE,GRPO_GUIDE,EVAL_GUIDE}.md`, `docs/serving/LATENCY_OBSERVABILITY.md`, `docs/public/ARCHITECTURE.md` | :10, :73, :461–462, :673, :808, :820–835 | `test -e` on all 12 referenced paths: all exist | CONSISTENT (0 BROKEN-REF) |
+| X5 | Startup sequence (10 steps: config → runtime policy → model load → adapter dir → scheduler → governor → KV/decode sizing → readiness) with `GET /v1/config` reporting effective provenance | :121–142 | `main.rs` startup order matches (config load → policy → model/adapter init → engine spawn → readiness); effective-provenance reporting in `api/config.rs` | CONSISTENT |
+
+### Findings
+
+| ID | Class | Severity | Finding (both sides) | Evidence |
+|---|---|---|---|---|
+| F191-1 | STALE-CLAIM | MED | The profile table row says `stable` → "Training and live mutation: **Rejected**" (`ARCHITECTURE.md:422`) and the narrative says "Stable serving rejects real-backend training instead of quietly pausing traffic" (`:430-431`), but the code admits real-backend training under the stable profile with writer priority: `ServingProfile::Stable.runtime_policy()` = `training_gpu_ownership: true`, `adapter_weight_transitions: true`, `exclusive_gpu_behavior: "writer_priority"` — identical to experimental except `vulkan_resident_prefill`. The admission gate `ensure_training_gpu_ownership_allowed` passes for real backends under stable, and the default profile IS stable, so the doc describes a rejection that does not exist in the current matrix. Either the table/narrative is stale (code is canonical) or the matrix is stale (doc is canonical) — owner must adjudicate which side moves. | Doc: `ARCHITECTURE.md:422,430-431` vs Code: `crates/kiln-server/src/config.rs:844-854` (stable policy), `config.rs:10103-10114` (contract test `serving_profile_policy_matrix_is_fail_closed` asserting `training_gpu_ownership: true` for stable), `config.rs:966-973` (default = stable), `crates/kiln-server/src/state.rs:2997-3007` (gate passes under stable) |
+
+### UNRESOLVED (not locally verifiable as written; not queued)
+
+| ID | Claim | Why unresolvable |
+|---|---|---|
+| U191-1 | "A narrow direct-stream worker remains as a compatibility path when the actor is unavailable" (`ARCHITECTURE.md:198-200`) | No named "direct-stream worker" and no actor-unavailable fallback dispatch exist in kiln-server (all HTTP generation enqueues into the BatchingEngine actor: `api/completions/generation.rs:22,325` → `batching_engine.rs:2061`). kiln-model does contain a single-row "direct streaming" decode loop (`generate.rs:10100-10548`), which partially supports a "narrow direct streaming path", but the worker/fallback characterization matches no discoverable construct. Owner may reword (e.g., "a single-row direct-streaming decode path remains in kiln-model for compatibility") or point to the intended worker. |
+
+### Totals
+
+| Class | Count |
+|---|---|
+| CONSISTENT | 71 claim rows (S1–S4, P1–P2, P4–P8, M1–M5, R1–R5, B1–B6, O1, O3, O5–O7, A1–A4, E1–E19, T1–T6, V1–V5, X1–X5) |
+| STALE-CLAIM | 2 rows (O2, O4) = 1 finding (F191-1, MED) |
+| BROKEN-REF | 0 |
+| DRIFTED | 0 |
+| UNRESOLVED | 1 row (P3 = U191-1, LOW) |
+
+**Owner-queue delta: +1 (F191-1). Cumulative: 73 + 1 = 74.**
+
+### Gate-edit flag summary
+
+`CLEANUP.md` — append-only ledger entry; no gate flag set, artifact size contract, contract text, config, env var, version, URL, schema, test, docs-site content, lockfile, CI, generated artifact, or manifest. `git status --porcelain` before/after commit: ` M CLEANUP.md` only, then clean.
+
+### Standing gates (17/17 pass — literal CI commands, run before the ledger append)
+
+| # | Gate | Verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 120026160 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+Gate 1 re-run after the commit to confirm byte counts still pass (CLEANUP.md is the largest tracked file and grows by this entry).
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`, no push. Commit hash reported in the round 191 reply
+(single-commit pattern, post-commit gate re-run).
