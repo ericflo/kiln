@@ -11513,5 +11513,5 @@ the docs-manifest README absence. Owner to choose (a) or (b) above.
 
 ### Commit
 
-README 4 trims (T1–T4) + this ledger entry; the commit hash lands in the small
-follow-up commit per the round-154/166/167 precedent.
+`0d029ff6a` (README 4 trims T1–T4 + this ledger entry; no push); this hash
+line lands in the small follow-up commit per the round-154/166/167 precedent.
