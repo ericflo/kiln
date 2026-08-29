@@ -11069,5 +11069,5 @@ RESOLVED.
 
 ### Commit
 
-`<work-commit-hash>` (CLEANUP.md only; no push); this hash line lands in the
-small follow-up commit per the round-154/166 precedent.
+`dde275519` (CLEANUP.md only; no push); this hash line lands in the small
+follow-up commit per the round-154/166 precedent.
