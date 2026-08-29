@@ -717,9 +717,14 @@ kiln serve --config kiln.toml</code></pre>
           values, and vocabulary-width mismatches fail closed. Text prompts default to
           <code>add_special_tokens: true</code>; <code>-1</code> all-vocabulary requests are unsupported.
           The model ID must match the served base model, active LoRAs are rejected until adapter revision
-          identity can be pinned, and the response is capped at 65,536 candidates. Scoring takes exclusive
-          GPU admission, explicitly settles each projection chunk and final scorer state, and drains a timed-out
-          worker before responding. Failed or panicked settlement quarantines the backend and retains admission.
+          identity can be pinned, and the response is capped at 65,536 candidates. Real scoring uses the
+          runner&rsquo;s resident backend and inference recurrent-state policy, scores only the first N&minus;1
+          logits rows of an N-token prompt (omitting the unused final logits row), and takes exclusive GPU
+          admission so it cannot multiply vocabulary scratch allocations alongside generation or training.
+          The scorer explicitly settles backend work before reusing each projection chunk or releasing
+          admission, and a timed-out response drains the worker before returning. Failed or panicked
+          settlement quarantines the backend and retains ownership instead of admitting work against an
+          unknown GPU state; timeouts and dropped requests signal cancellation.
           Every response carries a canonical teacher identity whose inference-contract v2 hash binds the complete
           startup-resolved streaming-prefill policy. Changing mode, threshold, any tile, or final-tile LM-head
           behavior changes the teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
@@ -736,6 +741,17 @@ kiln serve --config kiln.toml</code></pre>
           <code>kiln_prompt_logprob_selection_chunks_total</code> and
           <code>kiln_prompt_logprob_selection_rows_total</code>, labeled with the closed routes
           <code>compact_device</code> and <code>bounded_host_fallback</code>.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Backend quarantine is process-wide and irreversible. Once completion cannot be proven,
+          <code>/health</code> reports <code>503 degraded</code> with
+          <code>backend_runtime.restart_required=true</code>, and Prometheus exposes
+          <code>kiln_backend_quarantined 1</code>. New completion and eval work, adapter mutations,
+          prewarm operations, and training submissions reject with HTTP 503 and error code
+          <code>backend_quarantined</code>; jobs already queued transition to <code>failed</code>, and
+          SFT job writers between steps and every job-wide training writer poll the same health latch
+          instead of waiting forever behind the intentionally retained GPU read owner. Restart the
+          process to construct fresh backend state; there is no unsafe reset endpoint.
         </p>
           </div>
         </details>
@@ -929,6 +945,10 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/recipes</code> &mdash; list built-in recipe descriptors with static <code>admission {supported, unavailable_reason}</code> derived from every step&rsquo;s workload and optimizer/rank tuple.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/recipes/run</code> &mdash; queue a typed multi-step recipe and return <code>effective_seeds</code> keyed by job ID.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/agent/judge_distill</code>, <code>/v1/agent/self_improve</code> &mdash; queue agent-training phases and return their exact seed or per-job seed map.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/agent/runs</code> &mdash; start an embedded run: the server spawns a managed <code>pi --mode rpc</code> child with the task, and the spawned pi talks back to this same server.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/agent/runs</code>, <code>/v1/agent/runs/{id}</code>, <code>/v1/agent/runs/status</code> &mdash; list runs (newest first), read one run record, or check gate state, pi availability, and capacity.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/agent/runs/{id}/events</code> &mdash; poll the live event feed; pass the response&rsquo;s <code>next_after</code> back as <code>after</code> to poll incrementally.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/agent/runs/{id}/steer</code>, <code>/v1/agent/runs/{id}/follow_up</code>, <code>/v1/agent/runs/{id}/abort</code> &mdash; queue a steering message, queue a follow-up task, or abort the run.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue, job state, and effective seeds.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/jobs/{job_id}</code> &mdash; rich job detail (base-weight identity, loss curve, linked evals, and latest exact SFT/GRPO/OPD resume checkpoint).</div>
@@ -943,6 +963,35 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           checkpoint&rsquo;s LoRA-initialization seed and rejects a conflicting request seed. A seed
           is an initial condition, not a promise of byte-identical results across builds, backends,
           devices, precision policies, or environments.
+        </p>
+        <h3 id="embedded-agent-runs" class="text-xl font-semibold mt-6 mb-3">Embedded agent runs</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Beyond serving pi as a model backend, the server can spawn <code>pi --mode rpc</code>
+          as a managed child, hand it a task, stream the trajectory live, and merge the finished
+          session straight into the agent-trace layer the self-improvement flywheel reads &mdash;
+          on-policy rollouts on demand, no human at the keyboard.
+        </p>
+        <div class="code-block mt-4"><pre><code># Start a run (the spawned pi talks back to this same server)
+curl http://localhost:8420/v1/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"task": "Run the test suite and fix the first failure", "cwd": "/path/to/project"}'
+
+# Watch it live (poll cursor), steer it, or abort it
+curl 'http://localhost:8420/v1/agent/runs/&lt;id&gt;/events?after=0'
+curl http://localhost:8420/v1/agent/runs/&lt;id&gt;/steer -d '{"message": "Prefer a minimal fix"}' -H 'Content-Type: application/json'
+curl -X POST http://localhost:8420/v1/agent/runs/&lt;id&gt;/abort</code></pre></div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Runs queue FIFO (<code>[agent].max_concurrent_runs</code>, default 2; <code>run_timeout_secs</code>,
+          default 900), persist across restarts, and auto-index into <code>GET /v1/agent/traces</code>
+          when they finish &mdash; so <code>kiln self-improve</code> trains on them in the same cycle.
+          Because embedded runs execute code on the server, they are enabled only on loopback
+          binds by default (<code>[agent].runs_access</code>: <code>loopback_only</code> default,
+          <code>enabled</code> opts in on network binds, <code>disabled</code> force-disables);
+          network-bound deployments should keep the run engine local rather than relying on
+          process-global tuning flags. The dashboard&rsquo;s <strong>Distill &rarr; Agent runs</strong>
+          tab provides a launch form and a live trajectory view. See the
+          <a href="docs/configuration-complete/#agent">complete configuration reference</a>
+          for the full <code>[agent]</code> field contract.
         </p>
         <details class="reference-details mt-5">
           <summary>

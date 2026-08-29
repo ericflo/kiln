@@ -126,9 +126,7 @@ See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for the loop, the rec
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
-For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-by-default** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026): the trajectory format carries environment segments end-to-end, from rollout JSONL through tokenization and masking to the training receipt, and the env-CE term **trains by default at `λ = 0.05`** on any trajectory with observation segments. ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens are already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1. Opt out per job with `--no-echo` or `loss.echo: null`.
-
-When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets, `λ_echo = 0.05` by default). The env-CE gradient lives on the same fused GRPO tape root as constant-coefficient `(softmax − one-hot)` rows, and the training receipt records `echo.enabled: true` plus the initial/final env-CE. Legacy single-turn rollouts (no `trajectory` field) behave bit-identically to the pre-ECHO loss — with no env tokens the term contributes exactly zero.
+For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-by-default**: the trajectory format carries environment segments end-to-end, from rollout JSONL through tokenization and masking to the training receipt, and the env-CE term **trains by default at `λ = 0.05`** on any trajectory with observation segments. ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, reusing the rollout's forward pass — the env tokens are already in the rollout context. Legacy single-turn rollouts contribute exactly zero; opt out per job with `--no-echo` or `loss.echo: null`.
 
 ```python
 import requests
@@ -156,7 +154,7 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 })
 ```
 
-See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
+See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for the objective, trajectory contract, full usage (CLI flags, env vars, verifier-free adaptation per paper §5.5), the paper citation and its TerminalBench-2.0 headline, and the receipt-grade diagnostics.
 
 ### Off-policy OPD teacher data
 
@@ -189,7 +187,21 @@ replay of completed runs. See [docs/guides/EVAL_GUIDE.md](docs/guides/EVAL_GUIDE
 
 **Supported hardware:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+, AMD GPU with ROCm/HIP 7.2.4+ on Linux, AMD/Intel GPU with Vulkan 1.2+ on Linux, **or** Apple Silicon Mac with 16GB+ unified memory. Kiln targets `Qwen/Qwen3.5-4B` and needs about 20GB of free disk for the server, model weights, and adapters.
 
-**Path 1 — Desktop App (recommended):** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading `Qwen/Qwen3.5-4B`. No Rust toolchain, CUDA toolkit, or source build is required for this path.
+**Path 1 — Desktop App (recommended):** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading `Qwen/Qwen3.5-4B`. No Rust toolchain, CUDA toolkit, or source build is required for this path. → [Desktop App quick path](QUICKSTART.md#quick-path-desktop-app-recommended-for-most-users)
+
+**Path 2 — Server binary (terminal-first, no source build):** Download the latest `kiln-v*` server artifact when you want the `kiln` server in your terminal with no source build, Desktop App, or Docker — Linux x86_64 + NVIDIA CUDA 12.4 is the compact path (run the `Qwen/Qwen3.5-4B` weights step above first):
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-linux-cuda.tar.gz "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz" && tar -xzf kiln-linux-cuda.tar.gz
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+```
+
+Full release artifact matrix (Linux ROCm, Linux Vulkan, macOS Metal, Windows CUDA, SHA-256 sidecar checks): [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
+
+**Path 3 — Container:** Run the prebuilt `ghcr.io/ericflo/kiln-server:latest` image (NVIDIA Container Toolkit required) with `./Qwen3.5-4B` mounted read-only at `/models/Qwen3.5-4B`. → [Running with Docker](QUICKSTART.md#running-with-docker)
+
+**Path 4 — Source / CLI:** Install Rust stable, then `cargo build --release` with `cuda`, `rocm`, `vulkan`, or `metal`. → [Build Kiln](QUICKSTART.md#1-optional-source-cli-branch-build-kiln)
 
 **Get the model weights** (Paths 2–4 share this step; the Desktop App handles it automatically):
 
@@ -198,61 +210,6 @@ pip install -U huggingface_hub
 hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 ```
 
-This downloads `Qwen/Qwen3.5-4B` into `./Qwen3.5-4B`, which the commands below reference directly.
-
-**Path 2 — Server binary (terminal-first, no source build):** Download the latest `kiln-v*` server artifact when you want the `kiln` server in your terminal with no source build, Desktop App, or Docker. Linux x86_64 + NVIDIA CUDA 12.4 is the compact path (run the `Qwen/Qwen3.5-4B` weights step above first):
-
-```bash
-KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
-curl -L -o kiln-linux-cuda.tar.gz \
-  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
-tar -xzf kiln-linux-cuda.tar.gz
-
-KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
-```
-
-For Linux ROCm, Linux Vulkan, macOS Metal, Windows CUDA, and SHA-256 sidecar checks, use the full release artifact matrix in [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
-
-**Path 3 — Container:** Run the prebuilt GHCR image when you prefer containerized deployment. This path requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Make sure the weights step above has placed the model under `./Qwen3.5-4B` (or substitute your own absolute path), then mount that directory into the container:
-
-```bash
-docker pull ghcr.io/ericflo/kiln-server:latest
-docker run --gpus all -p 8420:8420 \
-  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
-  -v "$(pwd)/Qwen3.5-4B:/models/Qwen3.5-4B:ro" \
-  ghcr.io/ericflo/kiln-server:latest serve
-```
-
-Open http://127.0.0.1:8420/ui/ after the container starts.
-
-**Path 4 — Source / CLI:** Install Rust stable, then build the CLI from source when you are contributing, scripting against a local checkout, or need to test unreleased changes.
-
-```bash
-git clone https://github.com/ericflo/kiln.git
-cd kiln
-
-# Linux / Windows + NVIDIA
-cargo build --release --features cuda     # ~15-30 min first build (CUDA kernels)
-
-# Linux + AMD / Intel
-# Requires Vulkan 1.2+ runtime plus glslc or glslangValidator for shader embedding.
-cargo build --release --features vulkan   # Vulkan compute kernels via ash + SPIR-V
-
-# Linux + AMD ROCm/HIP
-# Requires ROCm/HIP SDK plus hipBLASLt; the release build emits CDNA, RDNA3, and Strix Halo.
-ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' cargo build --release --no-default-features --features rocm
-
-# macOS + Apple Silicon
-cargo build --release --features metal    # native Metal backend (kiln-owned MSL kernels)
-```
-
-Start the source-built server (using the weights downloaded above):
-
-```bash
-KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
-```
-
-Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. Select it through `accelerator.vulkan_device_index` or `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`; retired `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` inputs are ignored. ROCm builds use the HIP backend compiled into the binary. Local builds target the installed GPU; set `KILN_ROCM_ARCHS` at build time to emit an explicit semicolon-separated target set for release or cross-build artifacts.
 
 ```
   ┌─────────────────────────────────────┐
@@ -271,16 +228,9 @@ Vulkan builds auto-select a Vulkan physical device at startup. Until backend sel
   Endpoints: /ui/, /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
-The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed.
-
 **Verify the server is up.** Run `kiln health` (binary at `./kiln` for Path 2/3 or `./target/release/kiln` for Path 4) before sending real requests — it prints a readable tree with model, scheduler, training, and GPU status, and exits non-zero if anything is wrong. See [troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html#start-with-three-probes) for the full three-probe sequence.
 
 ```bash
-./kiln health
-```
-
-```bash
-# Chat
 curl http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
@@ -289,7 +239,6 @@ curl http://localhost:8420/v1/chat/completions \
 The default server is `stable` and admits training, so submit directly:
 
 ```bash
-# Train
 curl http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
   -d '{"examples": [{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hey there!"}]}], "config": {"training_profile": "native_online_lora_v1"}}'
@@ -298,165 +247,40 @@ curl http://localhost:8420/v1/train/sft \
 curl http://localhost:8420/v1/train/status
 ```
 
-Every accepted SFT, GRPO, OPD, or distillation submission materializes one
-immutable effective seed before the job becomes visible in the queue. The
-submit response, status/detail APIs, CLI, and dashboard report it as an exact
-decimal string so all 64 bits survive browser clients. Set `config.seed` to
-choose it; when omitted, Kiln chooses and persists it. An exact-resume request
-inherits the checkpoint's original LoRA-initialization seed and rejects a
-conflicting caller value. A seed makes a run repeatable only inside the rest of
-the declared deterministic environment; it is not a promise of byte-identical
-output across different builds, drivers, devices, precision policies, or
-backends.
+Every accepted SFT, GRPO, OPD, or distillation submission materializes one immutable
+effective seed (exact decimal string, so all 64 bits survive browser clients) before the job
+enters the queue; set `config.seed` or omit it, and exact resume inherits the checkpoint's
+LoRA-initialization seed — a repeatable initial condition, not byte-identical output. See the [API reference's training section](https://ericflo.github.io/kiln/api.html#training).
 
-Native SFT uses a source-pinned Qwen/Hugging Face token-and-label oracle. It
-renders with `add_generation_prompt=false` and supervises complete assistant
-turn bodies plus their terminator while masking assistant role headers and all
-system, user, and tool-response turns. See
-[SFT Tokenization and Assistant-Only Loss](docs/training/sft-tokenization.md) for the
-exact assistant mask and local reproduction command.
+The training deep-dive lives in the canonical docs:
 
-Native SFT is deliberately the fixed
-[`native_online_lora_v1` microtrainer profile](docs/training/NATIVE_SFT_PROFILE.md): one
-conversation and one optimizer update at a time, constant learning rate, no
-gradient accumulation, warmup, decay, or clipping. Unsupported general-trainer
-fields fail closed.
+- [Native SFT Profile](docs/training/NATIVE_SFT_PROFILE.md) — the fixed `native_online_lora_v1` microtrainer profile (one conversation, one optimizer update at a time, constant learning rate, no gradient accumulation, warmup, decay, or clipping; unsupported general-trainer fields fail closed), the optimizer tagged objects (omission selects Muon), the precision and optimizer-state matrix, and the rank ceilings (1024 for AdamW/SGD on canonical Qwen3.5-4B; 48 on CUDA/ROCm, 32 on Metal/Vulkan for Muon).
+- [SFT Tokenization and Assistant-Only Loss](docs/training/sft-tokenization.md) — the source-pinned Qwen/Hugging Face token-and-label oracle: `add_generation_prompt=false`, complete assistant turn bodies plus their terminator supervised, assistant role headers and all system, user, and tool-response turns masked.
+- [HF/TRL Interoperability](docs/training/HF_TRL_INTEROP.md) — the portable `export-sft` / `export-grpo` / `import-peft` bundles with the pinned correctness runner, the versioned identity/envelope/receipt model, and the fail-closed DistillRefresh workload and its stable reason.
+- [SFT Ingestion, Invalid Rows, and Row Identity](docs/training/sft-ingestion.md) — one row-admission contract across every source; `invalid_row_policy: fail|skip` semantics and receipt-recorded kept/rejected hashes.
+- [Site API reference — training](https://ericflo.github.io/kiln/api.html#training) — the running contract, including the `kiln.training-optimizer-support` schema, `GET /v1/config`, and `GET /v1/recipes`.
 
-Optimizer requests are tagged objects: `{"kind":"sgd"}`,
-`{"kind":"adam_w","beta1":0.9,"beta2":0.999,"eps":1e-8,"weight_decay":0.0}`,
-or `{"kind":"muon","momentum":0.95,"nesterov":true,"ns_iters":5,"weight_decay":0.0}`.
-Omission selects Muon. CUDA/ROCm accept F32 or BF16 base weights and preserve
-that dtype for LoRA; Metal accepts BF16 and rejects SGD; resident Vulkan accepts
-F32/BF16 base weights but uses F32 LoRA; CPU exposes portable F32 optimizer
-tuples, but current CPU server workloads remain unsupported. F16 is
-inference-only. Muon requires rank 2+ on CPU. The server validates the requested
-SFT/GRPO/OPD/DistillRefresh substrate plus kind, hyperparameters, exact
-backend/device,
-base/LoRA dtype, fixed round-to-nearest policy, and rank before checkpoint or
-corpus materialization and revalidates before memory reservation and residency.
-Static workload gates include serving-profile training ownership, resident
-weight identity, no Marlin-packed projection, and authoritative tape/loss
-routes. Invalid kind, rank, or hyperparameters return
-`training_invalid_request`; unsupported base dtype, backend identity, or
-complete training substrate return `training_backend_unsupported`. See the
-[native profile matrix](docs/training/NATIVE_SFT_PROFILE.md#precision-and-optimizer-state)
-and inspect the running contract with:
+**Optional: use Kiln as pi's local agent model.** With the server running on
+`localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without
+deleting your other providers or settings (existing files backed up first as
+`models.json.bak-<timestamp>` / `settings.json.bak-<timestamp>`); Kiln accepts
+Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible
+clients receive normal `tool_calls` in both streaming and non-streaming responses.
+See [QUICKSTART.md §4](QUICKSTART.md#optional-point-pi-at-kiln) for the exact commands and the remote `--kiln-url` form:
 
 ```bash
-curl -s http://localhost:8420/v1/config \
-  | jq '.training.native_training_supported, .training.optimizer_support'
+./kiln pi-setup                                    # local server at localhost:8420
+./kiln pi-setup --kiln-url http://office-kiln:8420  # remote kiln server
 ```
 
-In schema `kiln.training-optimizer-support` v1,
-`backend_implementation` is only the raw update hook,
-`optimizer_tuple_kinds` and `optimizers[].optimizer_tuple` describe the exact
-resident tuples, and `workloads[]` is the server-execution authority with
-`supported`, `unavailable_reason`, and `allowed_optimizer_kinds` for SFT, GRPO,
-OPD, and the distinct DistillRefresh workload.
-`live_memory_admission_required=true` means a statically supported request can
-still fail current capacity; Kiln never lowers rank or substitutes an
-optimizer. `GET /v1/recipes` reports the same static decision as
-`admission {supported, unavailable_reason}` for every built-in recipe.
-
-Every `optimizers[].optimizer_tuple.lora_rank` reports `minimum`, the effective
-static `maximum`, the optional optimizer `backend_maximum`, and the resident
-`model_maximum`. Effective `maximum` is the smaller ceiling. A null
-`backend_maximum` means the backend itself is unbounded, not that the request is:
-for canonical Qwen3.5-4B, `model_maximum` and therefore AdamW/SGD `maximum` are
-1024, while Muon's backend ceiling lowers its effective maximum to 48 on
-CUDA/ROCm and 32 on Metal/Vulkan. Live memory can reject a lower rank without
-rewriting this static contract.
-
-DistillRefresh currently fails closed on every backend. It is a sequential SFT
-knowledge phase followed by an OPD behavior-recovery phase, not an OPD alias.
-Its stable reason is `distill_refresh is unavailable until admission pins
-separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves
-the maximum sequential working set`. The route remains unavailable until one
-admission record binds both plans and the precise SFT rows and reserves the
-larger phase peak. Cheap teacher-alias validation and metadata pinning retain
-their established request-error ordering; the workload rejection still occurs
-before checkpoint loading, remote/local teacher materialization, corpus
-scanning, memory preflight, or GPU reservation.
-
-For broader training, create a portable bundle containing the pinned
-HF/TRL/PEFT correctness runner:
-
-```bash
-kiln train hf export-sft \
-  --file /data/corrections.jsonl \
-  --name support-hf-01
-
-# Recorded GRPO uses canonical provenance-complete JSONL.
-kiln train hf export-grpo \
-  --file /data/recorded-rollouts.jsonl \
-  --name support-grpo-01
-
-tar -xzf support-hf-01.kiln-hf.tar.gz
-python support-hf-01.kiln-hf/train.py support-hf-01.kiln-hf \
-  --base-model /absolute/path/to/the/hf-model
-
-kiln train hf import-peft \
-  --bundle ./support-hf-01.kiln-hf \
-  --name support-v2
-```
-
-`--file` is read by the running server, not uploaded by the CLI. Use
-`--dataset corrections:active` for the active corrections snapshot, or another
-named server dataset for SFT. `export-grpo` requires canonical compact,
-final-LF JSONL with exact recorded provenance and uniform group width. Both
-export commands stream to a same-directory temporary file,
-rejects redirects, links, unsafe/multiple archive roots, identity drift, and
-existing outputs, and publishes only after complete manifest verification.
-It removes the server copy after success unless `--keep-server-copy` is set;
-`kiln train hf list` and `kiln train hf delete --name NAME` manage retained
-exports. After the embedded runner publishes its SFT or GRPO result,
-`import-peft` verifies
-the completed extracted directory before connecting, derives and streams only
-the bounded ten-file result envelope, and requires the server's HTTP 201,
-strong ETag, import digest, content revision, installed size, and file count to
-match values derived locally. It never modifies or removes the completed
-bundle. The lower-level API is `POST /v1/train/hf/peft/imports/{name}`. The
-versioned identity, envelope, receipt, and failure model is documented in the
-[HF/TRL Interoperability Contract](docs/training/HF_TRL_INTEROP.md).
-
-SFT row admission is also identical across inline examples, server-local
-JSONL, named datasets, corrections, recipes, and direct Rust calls. The default
-`config.invalid_row_policy: "fail"` rejects the full submission; explicit
-`"skip"` records ordered stable hashes for every kept and rejected row in
-`train_receipt.json`. Local JSONL is revalidated before training so a queued
-file cannot change unnoticed. See
-[SFT Ingestion, Invalid Rows, and Row Identity](docs/training/sft-ingestion.md).
-
-**Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
-
-```bash
-# Local server
-./kiln pi-setup
-
-# Remote office/server box
-./kiln pi-setup --kiln-url http://office-kiln:8420
-
-# pi now uses model Qwen3.5-4B through http://.../v1
-pi -p "Use the bash tool to run: pwd"
-```
-
-Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. pi should execute the tool call instead of printing raw `<tool_call>` XML.
-
-**Embedded agent runs: kiln drives pi itself.** Beyond serving pi as a model backend, the server can spawn `pi --mode rpc` as a managed child, hand it a task, stream the trajectory live, and merge the finished session straight into the agent-trace layer the self-improvement flywheel reads — on-policy rollouts on demand, no human at the keyboard:
-
-```bash
-# Start a run (the spawned pi talks back to this same server)
-curl http://localhost:8420/v1/agent/runs \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Run the test suite and fix the first failure", "cwd": "/path/to/project"}'
-
-# Watch it live (poll cursor), steer it, or abort it
-curl "http://localhost:8420/v1/agent/runs/<id>/events?after=0"
-curl http://localhost:8420/v1/agent/runs/<id>/steer -d '{"message": "Prefer a minimal fix"}' -H "Content-Type: application/json"
-curl -X POST http://localhost:8420/v1/agent/runs/<id>/abort
-```
-
-Runs queue FIFO (`[agent].max_concurrent_runs`, default 2; `run_timeout_secs`, default 900), persist across restarts, and auto-index into `GET /v1/agent/traces` when they finish — so `kiln self-improve` trains on them in the same cycle. Because embedded runs execute code on the server, they are enabled only on loopback binds by default; network-bound deployments should keep the run engine local rather than relying on process-global tuning flags. The dashboard's **Distill → Agent runs** tab provides a launch form and a live trajectory view.
+**Embedded agent runs: kiln drives pi itself.** The server can spawn `pi --mode rpc`
+as a managed child, hand it a task, stream the trajectory live, and merge the
+finished session straight into the agent-trace layer the self-improvement
+flywheel reads — on-policy rollouts on demand. `POST /v1/agent/runs` plus the
+events/steer/abort surface, the FIFO queue (`[agent].max_concurrent_runs` default
+2, `run_timeout_secs` default 900), and the loopback-only default live in the
+[API reference's Embedded agent runs section](https://ericflo.github.io/kiln/api.html#embedded-agent-runs); the
+dashboard's **Distill → Agent runs** tab provides a launch form and a live trajectory view.
 
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/ROCm/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
@@ -535,232 +359,32 @@ Prometheus contract are documented in [`docs/serving/LATENCY_OBSERVABILITY.md`](
 ### Prompt logprobs
 
 `POST /v1/completions` is a deliberately bounded vLLM-shaped scoring subset:
-set `max_tokens` to `0` or `1`, disable streaming, and request
-`prompt_logprobs` from `0` through `256`. Prompts may be text or token-ID
-arrays and are capped at the smaller of 4096 tokens and the served model's
-context window. Text prompts default to
-`add_special_tokens: true`, matching vLLM; set it to `false` explicitly when
-the supplied text already contains the required boundaries. Kiln does not
-support vLLM's `prompt_logprobs: -1` all-vocabulary extension.
+`max_tokens` `0` or `1`, no streaming, `prompt_logprobs` from `0` through
+`256`, prompts (text or token IDs) capped at the smaller of 4096 tokens and
+the served model's context window. The first result is `null`; position `i`
+scores the observed prompt token at `i` from logits row `i-1` and returns that
+token plus the requested top K (K entries when the observed token is already
+top K, K+1 otherwise; K=0 returns only the observed token). The response is
+additionally capped at 65,536 candidate entries: real scoring uses the
+runner's resident backend and inference recurrent-state policy, omits the
+unused final logits row, and takes exclusive GPU admission so it cannot
+multiply vocabulary scratch allocations alongside generation or training.
 
-The first result is `null`. Position `i` scores the observed prompt token at
-`i` from logits row `i-1` and returns that token plus the requested top K. The
-map therefore contains K entries when the observed token is already top K and
-K+1 otherwise; K=0 returns only the observed token. Extra observed tokens carry
-their full-vocabulary rank. Scores remain F32, ties are deterministic by token
-ID, and split UTF-8 display tokens are decoded independently against preceding
-actual prompt context. Vocabulary drift, decoder failures, wrong-width rows,
-and non-finite logits or scores fail the request instead of producing partial
-JSON. The optional `model` must exactly match the one served model. Every real
-response carries a canonical identity binding the loader-owned base bytes,
-numeric tokenizer vocabulary/config, executable, numerical runtime, backend,
-scoring limits, and the complete startup-resolved streaming-prefill execution
-policy. The local inference-contract v2 hash changes with any policy field,
-preventing a different tiling policy from reusing teacher or logit-cache
-provenance. Scoring remains base-model only and rejects an active LoRA until the
-loaded-adapter revision barrier is implemented.
-The runtime digest includes OS/kernel build, stable CPU model/features and
-microcode, loaded numerical-library mappings, and accelerator/driver evidence.
-External probes have a five-second deadline, bounded output, process-group
-cleanup, and explicit missing/timeout markers in the digest.
+Settlement is part of the contract: the scorer settles backend work before
+reusing each projection chunk or releasing admission; a failed or panicked
+settlement quarantines the backend and retains ownership rather than admitting
+work against an unknown GPU state. Quarantine is process-wide and irreversible
+— `/health` becomes `503 degraded` with `backend_runtime.restart_required=true`,
+new completion/eval/adapter/training work rejects with HTTP 503
+`backend_quarantined`, and queued jobs fail; restart the process, there is no
+unsafe reset endpoint.
 
-CUDA and ROCm keep each projected vocabulary chunk resident and return only
-the observed-token statistics plus K `(logit, token_id)` pairs per row. Device
-to host transfer and host selection work are O(TK): 36 fixed bytes plus 12
-bytes per requested candidate per scored row. The device still scans every
-vocabulary value to preserve exhaustive finite-value validation, stable F32
-normalization, exact full rank, and original-logit ordering. Vulkan, Metal, and
-CPU use the correctness-first O(TV) host fallback; it remains bounded to 64 MiB
-and at most 32 projected rows per chunk. Route choice follows the compiled
-backend and has no tuning variable. `/metrics` reports completed chunks and
-rows through `kiln_prompt_logprob_selection_chunks_total` and
-`kiln_prompt_logprob_selection_rows_total`, with the closed `route` values
-`compact_device` and `bounded_host_fallback`.
+The [site API reference](https://ericflo.github.io/kiln/api.html#prompt-logprobs)
+documents the full result shape, the CUDA/ROCm O(TK) vs O(TV) fallback routes,
+the teacher identity binding, and the settlement/quarantine boundary; the
+generated [training and agent control plane schema](contracts/kiln-control-plane-v1.schema.json)
+owns the wire semantics.
 
-Before parsing weights, Kiln creates a private read-only checkpoint snapshot and
-loads only from that snapshot. Linux reflink and macOS clonefile make this
-copy-on-write when the filesystem supports it; otherwise startup performs a
-full bounded copy and requires enough free space plus a reserve. Set
-`model.snapshot_dir` (or its `KILN_MODEL_SNAPSHOT_DIR` override) to a private
-filesystem with suitable capacity when the model directory's parent is not
-appropriate. On Linux, a copied snapshot is synchronized and Kiln asks the OS
-to release both source and destination page-cache ranges before parsing so the
-fallback copy does not leave two checkpoint-sized cache populations competing
-with model materialization. Startup logs report attempts, successes, and
-failures. The snapshot stays alive for
-deferred MTP loading. The server explicitly removes it after model-backed work
-drains; the loader lease also removes it on drop for startup errors and library
-callers. Cleanup retries after restoring owner-only deletion permissions and a
-server shutdown fails with the exact residual path if removal still fails.
-Mutating the original checkpoint after startup cannot change loaded bytes or
-their revision. A user
-with the same UID (or root) can still discover and rewrite process-owned files;
-Kiln treats that as part of the trusted host boundary.
-
-On hosts where copying or hashing a checkpoint creates sustained host pressure,
-set `model.checkpoint_read_mib_per_second` to `1..=16384`. The private snapshot
-copy, initial full content verification, and post-upload full verification each
-receive a fresh cumulative schedule; reflinked bytes do not consume the read
-budget. Reads use bounded chunks, check shutdown between chunks, and poll at
-most every 25 ms while waiting. Omission leaves reads unlimited without
-removing cancellation. The policy applies to real-model startup on every
-backend, ends before readiness, and is reported with per-phase logical bytes,
-physically rate-limited bytes, elapsed time, and pacing time under
-`GET /v1/config.model_startup.checkpoint_read`.
-
-On hosts where eager accelerator materialization creates unacceptable memory or
-I/O pressure, set `model.accelerator_weight_upload_mib_per_second` to a
-rate in `1..=16384`. Kiln reserves the cumulative source-byte budget before the
-base group and before each transformer layer, then verifies it again after the
-unit. Within the base group it checks shutdown after the embedding upload,
-transpose, W8 pack, final norm, and rotary initialization;
-backend transforms can add work, so this is pressure shaping rather than an
-exact interconnect cap. The current backend operation is not interruptible, but
-shutdown is checked at each boundary and every 25 ms during reservation waits.
-Omitting the field removes rate limiting without removing boundary
-cancellation. Mock and CPU-only execution report the field as inapplicable and
-do not pace. This policy ends before readiness and cannot cause an
-inference-time pause. `GET /v1/config` reports the configured rate and exact
-completed byte/layer observation under
-`model_startup.accelerator_weight_upload`.
-
-Vulkan startup populates its backend-private decode-weight caches by default,
-but materialization is paced at 256 MiB/s rather than uploaded as an unbounded
-burst. Configure `model.vulkan_decode_weight_prewarm` and
-`model.vulkan_decode_weight_prewarm_mib_per_second` in TOML; their canonical
-environment names are mechanically derived from those paths. The prewarm task
-observes process shutdown, is joined before accelerator teardown, and never
-outlives the server's clean-shutdown log.
-
-That startup hash pass also retains a strict manifest for every safetensors
-shard: portable filename, exact byte length, complete SHA-256, and one
-relocation-independent aggregate. `/health` exposes its bounded digest/count/
-byte summary; gated `/v1/debug/model-state` exposes the full list. Exact
-checkpoints, training receipts, adapter manifests, and eval results persist the
-same identity without re-reading weights during inference. See
-[Base-Weight Provenance](docs/contracts/BASE_WEIGHT_PROVENANCE.md) for the schema,
-aggregate algorithm, legacy behavior, and exact-resume rules.
-
-After backend initialization, Kiln also binds the resident runner to a strict
-self-verifying execution envelope: backend/device, numerical runtime,
-executable and optional source identity, tokenizer/template, precision, kernel
-contract, and effective configuration/environment digests. Health exposes a
-bounded summary and requires a valid record for real-backend readiness; the
-gated debug endpoint exposes the complete record. See
-[Execution Provenance](docs/contracts/EXECUTION_PROVENANCE.md) for the schema, evidence
-sources, secret-redaction policy, and integrity scope.
-
-Exact native checkpoints require that complete record and compare its canonical
-digest before resume. Successful model-backed training receipts and adapter
-manifests persist it, together with the trainer's concrete parameter,
-optimizer-state, activation, gradient, and stochastic-rounding precision
-contract. Legacy serving artifacts remain readable, but a partial legacy
-runtime string is not accepted as evidence for exact continuation.
-
-Server training now admits only round-to-nearest. A legacy exact checkpoint
-that records stochastic rounding fails precision comparison before GPU
-ownership; it is not silently resumed under a different update rule. The old
-`KILN_BF16_STOCHASTIC_ROUND` and optimizer fallback environment switches have
-no replacements and should be removed from service definitions.
-
-The kt autograd tape is likewise execution authority, not configuration. SFT,
-GRPO, and OPD open an internal tape scope only around the forward/backward work
-that must record gradients; requests and operators cannot open, close, or
-partially disable it. Outside that scope, ordinary inference keeps its
-forward-only fast paths, including GDN chunkwise recurrence and CUDA's
-weight-aware embedding lookup. Inside it, a kernel may run only when its
-backward remains connected to the same tape; debug tuning is not allowed to
-sever the graph or select a different update rule.
-
-The former `KILN_USE_TAPE_FORWARD`, `KILN_USE_TAPE_FLASH_ATTN`,
-`KILN_USE_TAPE_SDPA`, `KILN_USE_TAPE_LORA_ADD`, `KILN_USE_TAPE_GDN`,
-`KILN_USE_TAPE_GDN_CONV`, `KILN_USE_TAPE_GDN_QK_NORM`, and
-`KILN_USE_TAPE_GDN_GATED_NORM` inputs were removed without aliases or
-replacement fields. Delete them from launch scripts. Because there is no typed
-field, the mechanical environment-name rule derives no replacement. This is a
-static routing and admission contract; accelerator qualification still requires
-the platform-specific evidence described in the native profile.
-
-Native training treats LoRA A/B tensors as the only trainable model leaves.
-Embedding tables, base projection matrices, RMSNorm and gated-RMSNorm weights,
-GDN gate parameters, MTP projection weights, and SFT/GRPO/OPD loss heads are
-saved constants, not differentiable tape inputs. Their backward operators
-produce only the activation gradients and LoRA gradients needed upstream: they
-do not allocate, retain, deposit, or run matrix products for frozen-weight
-gradients. An embedding lookup therefore starts an activation leaf without
-recording token IDs or the table, a frozen normalization returns only its input
-gradients, and a frozen loss head returns only the hidden-state gradient.
-
-The split Q/gate projection follows the same rule without changing parameter
-identity. Each output slice records the original full LoRA A/B IDs, pads its B
-contribution back to the full parameter shape, and accumulates both chunks
-before the optimizer boundary. Tape-aware reshapes preserve the graph after the
-split. Temporary base-weight or LoRA slices are never optimizer leaves. These
-ownership rules remove frozen dWeight GEMMs and multi-GiB frozen gradient
-residency; they are correctness and memory invariants, not an accelerator
-throughput claim.
-
-The optimizer consumes an exact LoRA gradient set. Before any parameter,
-moment, momentum, or step counter changes, observed tensor IDs must equal the
-configured trainable leaves and every gradient must match its leaf's shape,
-backward dtype, and master device and contain only finite values. Missing or
-unknown entries fail the step; an all-zero but otherwise valid gradient is not
-mistaken for a disconnected graph. Checkpointed reverse passes enforce the
-exact leaves for each layer range. The tape bridge produces one accumulated
-entry per leaf, including when distinct recorded inputs contribute to that
-leaf. Every registered differentiable input must contribute a gradient before
-that reduction, so one connected clone cannot hide another disconnected use.
-Sliced output projections assemble their chunk gradients back into the
-original full LoRA leaf rather than exposing temporary slice IDs. A checkpoint
-range with no configured LoRA leaves accepts only an empty gradient set, and
-the merge rejects duplicate leaf IDs across disjoint segments. GRPO
-accumulation checks identity and metadata as it combines
-completions, then performs one finite-value scan on the final accumulated set at
-the optimizer boundary instead of synchronizing every leaf twice per
-completion. CUDA, ROCm, and Vulkan use backend finite reducers; Metal currently
-uses a synchronized full-gradient host scan at this boundary until a native
-Metal reducer is qualified. That fallback preserves correctness but is not a
-large-batch performance claim.
-
-Resume also re-applies the current per-workload and resident optimizer-tuple
-gates before materializing the checkpoint or corpus. Exact backend/device,
-base/LoRA precision, optimizer kind/state, rank, serving-profile ownership,
-non-Marlin resident weights, and authoritative tape/loss/checkpoint routes must
-still agree. A raw CPU reference or Vulkan optimizer hook is not a compatibility
-escape hatch.
-
-The response is additionally capped at 65,536 candidate entries. Real scoring
-uses the runner's resident backend and inference recurrent-state policy, omits
-the unused final logits row, and takes exclusive GPU admission so it cannot
-multiply vocabulary scratch allocations alongside generation or training. The
-scorer explicitly settles backend work before recycling each projection chunk
-or releasing admission; a failed or panicked settlement quarantines the
-backend and retains ownership instead of admitting work against an unknown GPU
-state. Timeouts and dropped requests signal cancellation, and timeout responses
-wait for worker settlement. Prompt-logprob scoring remains a serialized teacher
-query rather than a high-throughput generation endpoint even when compact
-selection removes the CUDA/ROCm vocabulary-wide host transfer.
-
-Backend quarantine is process-wide and irreversible. Once completion cannot be
-proven, `/health` becomes `503 degraded` with
-`backend_runtime.restart_required=true`, and Prometheus reports
-`kiln_backend_quarantined 1`. New completion and eval work, adapter mutations,
-prewarm operations, and training submissions reject with HTTP 503 and error
-code `backend_quarantined`. Jobs already queued transition to `failed`; an SFT
-job between steps and every job-wide training writer poll the same health latch
-instead of waiting forever behind the intentionally retained GPU read owner.
-Restart the process to construct fresh backend state; there is no unsafe reset
-endpoint.
-
-```json
-{
-  "model": "Qwen3.5-4B",
-  "prompt": [1, 42, 314],
-  "max_tokens": 0,
-  "prompt_logprobs": 5,
-  "add_special_tokens": true
-}
-```
 
 ### Chat adapter selection
 

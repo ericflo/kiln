@@ -11,6 +11,17 @@ defaults, aliases, and constraints. This guide explains when the term is active,
 how trajectories identify its tokens, and what evidence a completed run
 records.
 
+## Provenance and paper evidence
+
+Kiln's ECHO term follows [ECHO: Terminal Agents Learn World Models for
+Free](../papers/echo/echo_paper.md) (Shrivastava, Awadallah, Papailiopoulos,
+MSR AI Frontiers 2026). Paper headline: ECHO roughly doubles TerminalBench-2.0
+pass@1 — the archived paper quantifies Qwen3-8B from 2.70% to 5.17% and
+Qwen3-14B from 5.17% to 10.79%. Treat that as paper-reported evidence for the
+published recipe, not a guarantee for a local run: the held-out comparison
+this guide describes still decides whether a local adapter should be
+promoted.
+
 ## The objective
 
 For a trajectory with action tokens \(A\) and environment-observation tokens
@@ -42,8 +53,9 @@ step depends on the data:
 | Any rollout | `loss.echo: null` or lambda `0` | ECHO contributes zero |
 | Observation-only adaptation | `no_policy_loss: true` and ECHO enabled | Policy-gradient coefficients are removed; environment cross-entropy drives the update |
 
-Legacy single-turn GRPO remains valid. Its synthesized trajectory has one
-`action` segment and no `observation` segment, so the ECHO term is zero.
+Legacy single-turn GRPO remains valid and behaves bit-identically to the
+pre-ECHO loss: its synthesized trajectory has one `action` segment and no
+`observation` segment, so the ECHO term contributes exactly zero.
 
 ECHO does not make an unsupported training backend available. It follows the
 backend and route admitted for GRPO or OPD. On Vulkan, an ECHO-active GRPO step
@@ -76,6 +88,16 @@ boundary explicitly.
 Kiln renders the prompt and trajectory as one conversation, tokenizes it, and
 builds disjoint action and environment masks. A token cannot belong to both
 masks.
+
+## Implementation notes
+
+- `crates/kiln-train/src/trajectory_mask.rs` builds `(input_ids, action_mask,
+  env_mask)` from a `Trajectory`: a separate `action_mask` (policy-gradient
+targets) and `env_mask` (ECHO env-CE targets, `λ_echo = 0.05` by default);
+  the GRPO JSONL path drives this through `tokenize_grpo_group` in
+  `crates/kiln-train/src/trainer/grpo_jsonl.rs`.
+- The env-CE gradient lives on the same fused GRPO tape root as the
+  constant-coefficient `(softmax − one-hot)` rows.
 
 ## Submit an agentic group
 

@@ -282,7 +282,7 @@ The versioned wire shapes and executable semantics are normative in the
 
 ### Optional: point pi at Kiln
 
-If you use [pi](https://github.com/earendil-works/pi) as your terminal agent, run the setup helper after Kiln is serving. It merges a `kiln-local` provider into `~/.pi/agent/models.json`, sets `defaultProvider` / `defaultModel` in `~/.pi/agent/settings.json`, and writes timestamped backups before touching either file.
+If you use [pi](https://github.com/earendil-works/pi) as your terminal agent, run the setup helper after Kiln is serving. It merges a `kiln-local` provider into `~/.pi/agent/models.json`, sets `defaultProvider` / `defaultModel` in `~/.pi/agent/settings.json`, and writes timestamped backups (`models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`) before touching either file.
 
 ```bash
 # Local Kiln server at http://localhost:8420
