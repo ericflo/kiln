@@ -12551,3 +12551,90 @@ this ledger append — and again after commit)
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 174b reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 175) — 2026-08-29
+
+### Scope
+
+READ-ONLY freshness audit of the owner-facing `assets/` index
+(`assets/README.md`) against the current `assets/` tree. No edits to the
+index (owner-facing; findings routed to owner queue). Only write: this
+ledger append.
+
+### Actual state (proof commands)
+
+- `find assets -type f | wc -l` → **3** (`assets/README.md`,
+  `assets/logo.png`, `assets/profiling/mtp-phase-b3-aggregate.py`)
+- `find assets -mindepth 1 -maxdepth 1 -type d | sort` → **1** subdir:
+  `assets/profiling`
+- `git ls-files assets/ | wc -l` → **3** (all files tracked)
+- `git status --porcelain assets/` → **empty** (no untracked/staged
+  files in the subtree)
+- Per-subtree: assets/ root (excl. subdirs) = 2 files (`README.md`,
+  `logo.png`); `assets/profiling/` = 1 file
+
+### Claim table
+
+| # | claim (assets/README.md) | verdict | proof |
+|---|---|---|---|
+| 1 | Header: "Tracked static assets and their tooling (2 files)" | **ACCURATE** | 2 table rows, both exist and both tracked: `git ls-files assets/` lists exactly `assets/README.md`, `assets/logo.png`, `assets/profiling/mtp-phase-b3-aggregate.py`; the "2 files" count covers the two indexed files (excluding the index itself; tracked total incl. index = 3). Header count (2) == table rows (2) → internally consistent. |
+| 2 | `logo.png` — "Kiln logo (branding, referenced by docs/site and desktop)" | **DRIFTED (partial)** | File exists (1,447,368 B, tracked). docs/site half TRUE: `grep -rn 'assets/logo' docs/site --include='*.html'` → all 9+ pages use `href="assets/logo.png"` (favicon/apple-touch-icon). desktop half NOT SUPPORTED: `grep -rn "logo.png" desktop --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.html' --include='*.json'` (excl. `desktop/target`) → **no hits**; desktop uses its own `desktop/icons/` set (`128x128.png`, `icon.ico`, `icon.icns`, …, per `tauri.conf.json:67-72`); only prose echoes exist (`desktop/ui/_kiln-tokens.css:16`, `desktop/ui/index.html:37`). |
+| 3 | `profiling/mtp-phase-b3-aggregate.py` — "Evidence tool: aggregates Phase B3 MTP A/B sweep logs (`mtp-b3-seed{0..7}-{off,on}.log`) into per-run metrics (alpha, identity_bias, norm ratios, OOV drafts)" | **ACCURATE** | File exists (6,035 B, tracked). Script docstring (`head -40`) matches exactly: reads `mtp-b3-seed{0..7}-{off,on}.log`; computes `alpha`, `identity_bias`, `mean_halves_ratio`/`mean_norm_emb_l2`/`mean_norm_h_l2` (norm ratios), `oov_draft_count`. |
+| 4 | "Pairs with the frozen reports in `docs/archive/phase-c/` (B3 era)" | **ACCURATE** | `ls docs/archive/phase-c/` → exists (subtrees `phase-c1`…`phase-c18`). |
+| 5 | "the raw logs it consumes are local evidence, not tracked" | **ACCURATE** | `git ls-files \| grep -i "mtp-b3-seed"` → **empty** (no such logs tracked anywhere). |
+| 6 | "this index covers …" statements | **N/A** | No coverage statement beyond the header (claim 1). |
+| 7 | Last-updated / date claims | **N/A** | None present in the index (read in full; 13 lines). |
+
+### Files not mentioned by the index / index paths missing
+
+- Files under `assets/` NOT mentioned by the index: only
+  `assets/README.md` (the index file itself) — no unindexed content
+  files.
+- Index-cited paths that no longer exist: **none** (`logo.png`,
+  `profiling/mtp-phase-b3-aggregate.py`, `docs/archive/phase-c/` all
+  exist) → **0 BROKEN-REF**.
+
+### Internal consistency
+
+- Per-subtree counts: the index has no per-subtree counts (flat 2-row
+  table); header "(2 files)" == 2 table rows → consistent.
+- Tracked-subset check: `git ls-files assets/ | wc -l` = 3 = 2 indexed
+  files + the index itself; both indexed files are tracked → the
+  "tracked" adjective holds for every file the index names.
+
+### Drift table
+
+| # | drifted claim | index says | actual | proof command |
+|---|---|---|---|---|
+| D1 | `logo.png` row — "referenced by docs/site and desktop" | logo.png is referenced by docs/site **and desktop** | referenced by docs/site (all HTML pages, favicon links) but **no** `assets/logo.png` reference anywhere in tracked desktop sources; desktop brands via its own `desktop/icons/` set | `grep -rn "logo.png" desktop --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.html' --include='*.json' \| grep -v "desktop/target"` → 0 hits; `grep -n icon desktop/tauri.conf.json` → `icons/128x128.png` etc. |
+
+### Owner-queue additions (delta: 1)
+
+1. **`assets/README.md` (owner-facing, not edited this round)** — logo row
+   over-claims desktop reference. Either correct to "referenced by
+   docs/site (favicon/apple-touch-icon); desktop ships its own derived
+   icon set in `desktop/icons/`", or add a genuine desktop reference. See
+   drift row D1.
+
+### Standing gates (17/17 pass, literal CI commands, run before the only
+write — this ledger append — and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119774477 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (802.5 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
