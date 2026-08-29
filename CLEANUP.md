@@ -19,11 +19,35 @@ Each agent that receives a cleanup task should:
    Anything that moves us closer to pristine.
 3. **Verify nothing breaks.** Build, test, and check references before and
    after your change. A cleanup that breaks something is not a cleanup.
-   Required standing gates on every round: `python3
-   scripts/check_repository_artifacts.py` (the artifact gate) and
-   `python3 scripts/check_production_file_budget.py` (the CI file-budget
-   gate from repository-hygiene.yml — the 2da875018 exact-ceiling
-   precedent).
+   Required standing gates on every round — the full "Fast repository
+   contracts" job of
+   `.github/workflows/repository-hygiene.yml`, run in CI order (round-168
+   precedent: rounds 162–167 shipped a tree that CI rejected because the
+   local suite omitted six of these gates — `check_runtime_defaults.mjs`
+   failed on the split README; the four `generate_*_schema.py --check`
+   gates and `check_release_versions.py` were also never in the local
+   list):
+   `python3 scripts/check_repository_artifacts.py`,
+   `python3 scripts/check_production_file_budget.py`,
+   `python3 scripts/check_runtime_env_contract.py --check`,
+   `python3 scripts/check_source_parsing_tests.py`,
+   `python3 scripts/check_config_schema.py --self-test`,
+   `python3 scripts/check_openenv_contract.py --self-test`,
+   `python3 scripts/check_http_api_contract.py --self-test`,
+   `python3 scripts/generate_observability_schema.py --check`,
+   `python3 scripts/generate_artifact_schema.py --check`,
+   `python3 scripts/generate_eval_schema.py --check`,
+   `python3 scripts/generate_control_plane_schema.py --check`,
+   `node scripts/check_thinking_budget_contract.mjs`,
+   `node scripts/check_runtime_defaults.mjs`,
+   `python3 scripts/check_release_versions.py`;
+   plus, whenever docs/ or any site-published file changes: the docs-site
+   build validate (`node scripts/docs-site/build.mjs --validate-only`),
+   the docs-site build tests (`node scripts/docs-site/test/build.test.mjs`),
+   and the static smoke
+   (`KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs`).
+   The CI job is the source of truth for the gate list; if the workflow
+   gains a gate, the local round list gains it too.
 4. **Relentlessly pursue that one cleanup** until it is fully done.
 5. **Commit your work.** `git add` the changed files and `git commit` with a
    clear message describing the cleanup. Every improvement lands as its own
