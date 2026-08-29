@@ -13945,3 +13945,36 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 181 reply
 (single-commit pattern).
+
+## Cleanup Agent (round 181c — orchestrator correction) — 2026-08-29
+
+**Correction to round 181, row D-2 — title misdescription (cites valid,
+decision mislabeled).** R181's canonical table row D-2 is titled
+"`#[allow(type_complexity)]` on `max_seqlen_k` ×4" with action
+"Simplify the field types or ratify each allow". The original D-2 item
+(round 159 queue, ledger L10158) is a different decision:
+
+> **D-2 (original):** `max_seqlen_k` field family — 4 parallel struct
+> families, rocm lane never reads (R122 #12; open since R113). Options:
+> (a) delete all 4 (net removal) · (b) keep for backend parity.
+
+Verification at HEAD `a47fca644`:
+- The four field cites hold: `crates/kiln-model/src/forward/
+  full_attention.rs:2165` (`pub max_seqlen_k: usize`), `:2224`
+  (same), `:2661` (same), `:2666` (`pub kernel_max_seqlen_k: usize`).
+- The file contains exactly one `type_complexity` allow, at
+  `:3112` (`#[allow(clippy::type_complexity)]` over the local 7-tuple
+  binding `let (max_seqlen_k, kernel_max_seqlen_k, …)` at
+  `:3113–:3121`), with a ratification comment at `:3108–:3111`
+  (documented judgment-keep — this is the D-3 family, not D-2).
+- So no allow attribute sits on any of the four fields, and the
+  "ratify each allow" action has no referent.
+
+**Canonical D-2 row (supersedes the R181 row title/action; cites
+unchanged):** the owner decision is to **delete or keep the four
+`max_seqlen_k`/`kernel_max_seqlen_k` struct fields** (rocm lane never
+reads them; keep-for-parity was option (b) in the original). Class
+OWNER-DECISION, severity MED, no gate-edit, no bundle (unchanged). The
+R181 row's `type_complexity` framing is withdrawn as a misdescription
+introduced during the re-anchor; D-3 (judgment-class lint keeps) is the
+correct home for the `:3112` allow, where it already sits.
