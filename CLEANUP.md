@@ -13066,3 +13066,205 @@ L2578–2624 asset-pin region that was inspected).
 
 **Owner-queue delta correction:** round 177's delta was 4 (F1–F4); the
 corrected delta is 3 (F2, F3, F4) + F5 minor note.
+
+## Cleanup Agent (round 178) — 2026-08-29
+
+**Scope.** Owner-directed: inline `#[cfg(test)]` module audit across
+`crates/*/src/` — three censuses (corpus inventory of the 512
+`#[cfg(test)]` attributes; runtime-load census restricted to the
+`cfg(test)` spans: `fs::read*` / `File::open` / `include_dir` / `dunce` /
+`tokio::fs` / `env!("CARGO_MANIFEST_DIR")` / path literals /
+`include_str!`+`include_bytes!`; retired-token census: env vars, CLI flags,
+config keys) plus a stale-repo-citation spot-check of comments/strings in
+the spans. Strictly read-only on the tree: grep/sed/awk/python3 only — no
+cargo builds, no test execution. The only write is this ledger append.
+Span extraction: each `#[cfg(test)]` attribute's span runs to the next
+blank/`fn`/`mod`/`}` boundary; every matched line was read in context.
+
+### Census 1 — Corpus inventory (512 `#[cfg(test)]` attrs, 430 files, 32 crates)
+
+Proof: `grep -c '#\[cfg(test)\]'` per file summed → 512 (417 attach to
+`mod tests` modules, 95 to individual test-only items).
+`grep -rl '#\[cfg(test)\]' crates --include='*.rs' | wc -l` → 432, of which
+2 are out-of-scope `examples/` files
+(`crates/kiln-eval/examples/trace_api_eval.rs`,
+`crates/kiln-model/examples/rocm_hf_path_attribution.rs`) → 430 `src/`
+files.
+
+| crate | attrs | crate | attrs |
+|---|---:|---|---:|
+| kiln-autograd | 41 | kiln-memory | 3 |
+| kiln-blas | 4 | kiln-model | 84 |
+| kiln-core | 11 | kiln-mps | 3 |
+| kiln-eval | 21 | kiln-nvtx | 1 |
+| kiln-flash-attn | 3 | kiln-opd-loss-kernel | 2 |
+| kiln-flce-kernel | 2 | kiln-openenv | 3 |
+| kiln-gdn-kernel | 1 | kiln-optim | 7 |
+| kiln-graph | 2 | kiln-param | 4 |
+| kiln-graph-cuda | 1 | kiln-resource | 1 |
+| kiln-graph-metal | 1 | kiln-rmsnorm-kernel | 1 |
+| kiln-graph-vulkan | 1 | kiln-rocblas | 4 |
+| kiln-hip | 1 | kiln-scheduler | 1 |
+| kiln-kt-bridge | 2 | kiln-server | 106 |
+| kiln-marlin-gemm | 1 | kiln-tensor | 144 |
+| kiln-tensor-id | 1 | kiln-train | 39 |
+| kiln-vulkan-blas | 4 | kiln-vulkan-kernel | 12 |
+
+### Census 2 — Runtime-load census (`cfg(test)` spans only)
+
+**2A. Compile-time embeds** — 13 `include_str!`/`include_bytes!` calls,
+10 distinct targets, all verified EXISTS (byte sizes below):
+
+| site (span line) | target | status |
+|---|---|---|
+| `kiln-core/src/thinking_budget.rs:919-921` | `contracts/thinking-budget-v1.conformance.json` | EXISTS (7,310 B) |
+| `kiln-core/src/thinking_budget.rs:1028-1030` | `contracts/thinking-budget-v1.schema.json` | EXISTS (14,483 B) |
+| `kiln-core/src/tokenizer.rs:1845,:1953,:2039,:2160,:2300,:2504,:2774` | `crates/kiln-core/test_fixtures/{qwen35_4b,llama31_8b_instruct,qwen25_7b_instruct,mistral_7b_instruct_v03,deepseek_v3,hermes3_llama31}_chat_template.jinja` | all 6 EXISTS (7,756 / 4,614 / 2,507 / 3,960 / 2,302 / 5,004 B) |
+| `kiln-server/src/latency_observability.rs:945-947` | `contracts/kiln-observability-v1.schema.json` | EXISTS (302,341 B) |
+| `kiln-server/src/rollout_generate_cli.rs:1244-1246` | `contracts/thinking-budget-v1.conformance.json` | EXISTS |
+| `kiln-train/src/grpo_tape_shim.rs:2608` | `crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` | EXISTS (10,408 B) |
+| `kiln-train/src/hf_interop_bundle.rs:1261` | `crates/kiln-core/test_fixtures/qwen35_4b_chat_template.jinja` (cross-crate) | EXISTS |
+
+**2B. `CARGO_MANIFEST_DIR` joins** — 2 sites, 1 target:
+`kiln-vulkan-kernel/src/cmd_batch.rs:521,:586` →
+`<crate>/csrc/shaders/add.comp` — EXISTS (942 B).
+
+**2C. Filesystem round-trips** — 99 `fs::read*` + 265 `fs::write*` +
+5 `File::open` sites inside spans; every one derives its path from a
+`tempfile::tempdir()` in the same test (234 `tempfile::tempdir()` call
+sites in spans) or is an intentional negative path. The 5 `File::open`
+sites, read in context: `kiln-model/src/loader.rs:2373` (safetensors
+copy test, `directory.path().join(...)`),
+`kiln-model/src/transposed_weight_cache.rs:644` (cache-key round-trip in
+tempdir), `kiln-server/src/request_log.rs:830` (rotated gzip in
+`dir.path()`), `kiln-train/src/logit_cache.rs:1336` (symlink-rejection,
+outside-tempdir negative path) and `:1396` (tar archive in tempdir).
+Negative paths asserted missing: `kiln-blas/src/algo_cache.rs:682` and
+`kiln-rocblas/src/algo_cache.rs:684`
+(`/tmp/kiln-nonexistent-algocache-xyz.json`).
+
+**2D. Path literals** — 59 `Path::new`/`PathBuf::from` string literals in
+spans, all classified: synthetic model/adapter fixtures
+(`/models/Qwen3.5-4B`, `/workspace/adapters/*`, `/tmp/adapters`),
+negative tests (`/nonexistent/pi-binary` ×3, `/nonexistent/pi/sessions`,
+`/tmp/kiln-nonexistent-algocache-xyz.json` ×2), cgroup parsing fixtures
+(`kiln-memory/src/vram.rs:2846-2854`), CLI parse round-trip assertions
+(`kiln-server/src/cli.rs:4644-5923` — assert the *parsed value* equals the
+input string; no load), archive-path validation negatives
+(`kiln-train/src/hf_train_cli.rs:1601-1604`), whitespace handling
+(`kiln-server/src/request_log.rs:761`), layout-resolution fixtures
+(`kiln-train/src/adapter_output.rs:1126-1228`). Zero reference a real
+repository file.
+
+**2E. Subprocess spawns** — exactly 2, both verified in context:
+`kiln-memory/src/vram.rs:3096-3101` — `#[cfg(target_os = "macos")]` test
+probes `nvidia-smi --version` and skips if it exists;
+`kiln-train/src/checkpoint.rs:1436-1445` — re-executes the test binary
+itself (`Command::new(std::env::current_exe()?)`; `--test-threads=1` is a
+valid libtest flag; self-contained `CHILD_ROOT_ENV`/`CHILD_STAGE_ENV`
+channel; 10 s watchdog). No other `Command::new`/`tokio::process` in
+spans.
+
+**2F. Zero-count patterns in spans** — `include_dir!`: 0; `dunce`: 0;
+`tokio::fs`: 0.
+
+**MISSING repository targets: 0. Stale include/read sites: 0.**
+
+### Census 3 — Retired-token census (`cfg(test)` spans only)
+
+**3A. Env vars** — 31 read sites, 7 distinct `KILN_*` tokens, all LIVE per
+`contracts/runtime-env-direct-reads-v1.json` (all also listed in
+`docs/contracts/RUNTIME_ENVIRONMENT_INVENTORY.md`), all used as graceful
+skip gates (test returns early when unset):
+
+| token | contract entries | span sites |
+|---|---:|---|
+| `KILN_TENSOR_VULKAN_TEST` | 18 | kiln-model ×4, kiln-tensor ×7, kiln-train ×4 |
+| `KILN_QUALIFICATION` | 27 | kiln-model ×1, kiln-tensor ×4, kiln-train ×3 |
+| `KILN_OPENENV_INTEROP_BANDIT_URL` | 3 | kiln-server/openenv_evaluation.rs:799 |
+| `KILN_TENSOR_CUDA_TEST` | 2 | kiln-tensor ×2 (cuda_allocator, cuda_storage) |
+| `KILN_TENSOR_METAL_TEST` | 2 | kiln-tensor ×2 (metal_allocator, metal_storage) |
+| `KILN_TENSOR_ROCM_TEST` | 1 | kiln-tensor/rocm_allocator.rs:188 |
+| `KILN_QWEN_TOKENIZER_PATH` | 1 | kiln-train/trajectory_mask.rs:853 |
+
+Plus build-time `env!` macros only: `CARGO_PKG_VERSION` (1 site) and
+`CARGO_MANIFEST_DIR` (2 sites, 2B). **RETIRED env tokens: 0; UNRESOLVED: 0.**
+
+**3B. CLI flags** — all flag-bearing span sites are parser round-trip tests
+of live CLIs (`kiln-server` cli.rs, `bin/kiln_eval_cli.rs`, `bench.rs`,
+`vulkan_decode_microbench`) that CI executes — a retired flag would fail
+the parse. The four individually suspicious ones, verified in context:
+`--mystery` (`kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs:3056-3060`
+— deliberate *unknown*-flag rejection test asserting `is_err()`);
+`--no-policy-loss` (`kiln-train/src/train_receipt.rs:3856-3860` — expected
+warning text; flag is LIVE: `kiln-train/examples/cuda_grpo_ablation.rs:379`
+parses it, and `config.loss.no_policy_loss` is a live config field used by
+`trainer/grpo_step.rs:1168,:1208` and `trainer/reporting.rs:860`);
+`--norc`/`--rcfile` (`kiln-eval/src/scorers/bash.rs:600-601` — negative
+`is_shell_c_flag` tests of bash's own flags, not kiln flags);
+`--session-dir` (`kiln-server/src/agent_runs.rs:972-977` — flag of the
+embedded fake-`pi` Python test double, self-contained fixture).
+`--test-threads=1` (`kiln-train/src/checkpoint.rs:1438`) — valid libtest
+flag on the re-executed test binary. **RETIRED flags: 0.**
+
+**3C. Config keys** — no span site asserts a retired config key; the
+canonical inventory is pinned by gate 5 ("117 canonical fields … 0
+executable retired environment references", PASS this round).
+**RETIRED config keys: 0.**
+
+### Stale repo-citation spot-check (comments/strings in spans)
+
+7 candidate hits for `/home/…`, `scripts/…`, `docs/contracts/…`,
+`.agents/skills/…` — all synthetic test *data*, not citations of this
+repository: `kiln-eval/src/scorers/bash.rs:556-558` (`scripts/run.py` is
+the introspected command *string* of a parser test),
+`kiln-eval/src/scorers/tool_call.rs:1426-1435`
+(`scripts/materialize_turn.py` inside scored command fixtures),
+`kiln-server/src/api/agent_traces.rs:626` and
+`kiln-server/src/api/self_improve.rs:632` (`/home/user/…` session fixture
+cwd/working_dir values). **STALE-COMMENT findings: 0.**
+
+### Findings + owner-queue additions
+
+**F178-1 (LOW, test isolation).** `crates/kiln-blas/src/algo_cache.rs`
+and `crates/kiln-rocblas/src/algo_cache.rs` (copied test module) share
+three *fixed* filenames in the shared system temp dir:
+`kiln-blas-test-algo-cache.json` (blas :551 / rocblas :551 — the rocblas
+copy retains the "blas" name), `kiln-corrupt-algocache.json`
+(blas :686 / rocblas :688), `kiln-algocache-disk-roundtrip.json`
+(blas :694 / rocblas :696). Both crates' `remove_file`-then-write
+sequences collide when the two test binaries run concurrently under a
+workspace `cargo test` (default parallelism) → cross-crate flake risk.
+Note the author was isolation-aware: the concurrent-save tests in both
+crates use PID-suffixed names (blas :572 / rocblas :571-575) — the three
+fixed names were simply missed. Suggested fix: PID- or crate-suffix these
+three names, or move them under `tempfile::tempdir()`.
+**Owner-queue delta: +1 (F178-1).**
+### Standing gates (17/17 pass, literal CI commands, run after the only write —
+this ledger append — and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119820557 bytes; CSV <= 1048576, each file <= 10485760" (byte count as of the post-append pass; PASS re-confirmed at the final pass) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, … continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "11 tests, pass 11, fail 0" (890.3 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke, no output) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 178 reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
