@@ -15332,3 +15332,327 @@ F191-1), all MED, all closed by one consistent rewording to the
 canonical stable semantics (`docs/serving/SERVING_PROFILES.md:42-51`
 + `docs/contracts/CONFIGURATION.md:179-187`). Cumulative owner-queue
 count unchanged: 74.
+
+
+## Cleanup Agent (round 192 — owner-queue cross-finding reconciliation) — 2026-08-29
+
+**Scope.** Read-only reconciliation of the **entire** open owner-decision
+queue at HEAD `3e4143854` (round 191b, clean tree). Per brief: (1)
+enumerate the full queue — round 181 canonical 52 + R185–R191 additions
+(22) — with each item's primary doc/code cite; (2) map all pairwise
+interactions with exact line/ID cites on **both** sides; (3) assign
+every item to the **minimal set of independent owner decisions**
+(canonical decision-dependency map); (4) surface two ledger bookkeeping
+inconsistencies (queue-count discrepancy; UNRESOLVED queue convention)
+**without adjudicating** any owner decision. Light tools only
+(grep/sed/python3/test); no cargo, no suites beyond the standing gates.
+Findings are owner-queue evidence, not fixes. Only file modified:
+CLEANUP.md.
+
+**Provenance anchor.** Queue anchor remains `a47fca644` (52 items,
+bundles B1–B6 per round 181). Every commit from `a47fca644` through
+`3e4143854` (rounds 180–191b) is ledger-only, so the working tree is
+byte-identical outside CLEANUP.md and all round-181 cites still hold.
+Spot re-verification at `3e4143854` (all confirmed):
+`kiln.example.toml:22-26/:259-260/:285-288/:309-311/:366/:411/:414/:431`
+(root file, 506 lines — no `docs/contracts/` copy exists);
+`docs/serving/SERVING_PROFILES.md:42-51`; `docs/contracts/
+CONFIGURATION.md:132/:134/:136/:140/:179-187/:2118`; `docs/site/
+index.html:295-297`; `ARCHITECTURE.md:422/:430-431`; `docs/serving/
+TRAJECTORY_TURN_THROUGHPUT.md:114-115`; `docs/training/
+OPENENV_REPLAY_REFERENCE.md:538-540`; `docs/guides/ECHO_GUIDE.md:96-98`;
+`docs/guides/EVAL_GUIDE.md:651`; `crates/kiln-blas/README.md:65/:71/:92-93`;
+`THIRD_PARTY_LICENSES.md:3/:30-33/:5394/:6733`; `desktop/README.md:164/:170/:186`;
+`docs/desktop/signing.md:92-95`; `.github/workflows/desktop-build.yml:101-102`;
+`docs/public/QUICKSTART.md:25-28`; `docs/public/BENCHMARKS.md:25`;
+`CONTRIBUTING.md:16`; `SECURITY.md:10`; `CODE_OF_CONDUCT.md:32`.
+
+### 1. Queue enumeration
+
+**1A. Canonical 52 items (round 181 table; cites re-verified at HEAD).**
+
+| # | ID | Title (short) | Primary cite(s) | Bundle | Gate-edit |
+|---|---|---|---|---|---|
+| 1 | D-2 | `max_seqlen_k` field family: delete 4 or keep for parity | `crates/kiln-model/src/forward/full_attention.rs:2165/:2224/:2661/:2666` | — | no |
+| 2 | D-3 | 9 judgment-class lint keeps, resolve or ratify | `tokenizer.rs:449/:602/:785`; `cuda_graph.rs:1477`; `forward/tests/mod.rs:3159/:3192/:3885/:8530/:8547`; `grpo_step.rs:1003`; `forward_backward.rs:335-336`; `opd_tape_shim.rs:508`; `grpo_tape_shim.rs:1197`; `real_model_integration.rs:1463/:1999/:2029/:2059`; `cuda_storage.rs:2338`; (+ `full_attention.rs:3112` per R181c) | — | no |
+| 3 | D-4 | `expected_identity` required vs absent from example | `crates/kiln-train/examples/cuda_opd_remote.rs:289-304` vs `crates/kiln-train/src/remote_teacher.rs:149-153` | — | no |
+| 4 | D-5 | Two byte-identical file pairs (blas/rocblas) | `backend_matmul.rs` pair (12,115 B) + `workspace_pool.rs` pair (3,819 B) | — | no |
+| 5 | D-6 | Three zero-dependent scaffold crates | kiln-mps, kiln-graph-cuda, kiln-vulkan-blas manifests | — | no |
+| 6 | D-7 | 7 woff2 collapse to 2 unique binaries | `docs/site/fonts/*.woff2` (Inter ×4 md5 `260c81a4…`, JetBrainsMono ×3 md5 `b636a65d…`) | B3 | no |
+| 7 | D-8 | kiln-blas README cites absent ARCHITECTURE.md probe story | `crates/kiln-blas/README.md:65/:71` | — | no |
+| 8 | D-9 | 29 unused Python imports across 20 scripts | 20 files (19 under `scripts/investigations/`) | — | no |
+| 9 | D-10 | Seven duplicate-utility helper pairs | `check_production_file_budget.py:42/:75` ≡ `check_repository_artifacts.py:62/:95` (+5 pairs per R181) | — | no |
+| 10 | D-11 | server-release.yml step duplication + `free-disk-space@main` | `.github/workflows/server-release.yml` (+ `ci.yml:144/:250/:306` etc.) | — | **cond.** |
+| 11 | D-12 | Dead `KILN_CUDA_NATIVE_TRAINING` setter | `scripts/investigations/cuda_qwen_sft_smoke.sh:89-92` | — | no |
+| 12 | D-13 | Duplicated `is_lower_sha256` identity check | `crates/kiln-train/src/teacher_identity.rs:502` | — | no |
+| 13 | D-14 | desktop-build.yml `workflow_dispatch`-only | `.github/workflows/desktop-build.yml` `on:` block | B5 | **cond.** |
+| 14 | D-15 | desktop README lists retired Apple-secret vars | `desktop/README.md:136-141` | — | no |
+| 15 | D-16 | `docs/desktop/about.png` no live embed; gate asserts absence | `docs/desktop/about.png`; `scripts/capture-desktop-screenshots.mjs:43`; `scripts/check_docs_site_smoke.mjs:1819` | — | no |
+| 16 | A-1 | Retired `[batching]`/`effective_enabled`/FP8/W4A16/CUDA_GRAPHS claims | `QUICKSTART.md:1055/:1060-1063/:1088/:1096/:1110-1117`; `BENCHMARKS.md:217-226/:237/:245-258/:733/:423/:547-548/:606/:650-651/:775` | — | no |
+| 17 | A-2 | Phantom llama.cpp bench-result cites | `BENCHMARKS.md:467-468` + `:705-707` (0 files in `bench-results/`) | — | no |
+| 18 | A-3 | Pre-migration baselines section | `bench-results/README.md:50/:54` | — | no |
+| 19 | A-4 | `candle` references in parity test + 4 doc/error sites | `crates/kiln-model/tests/tape_forward_parity.rs` (76 refs); `vram.rs:1717/:1732`; `dtype.rs:49/:55`; 2× `kt_api.rs` | — | no |
+| 20 | A-5 | tape/forward candle naming incl. misnomer doc | `tape_forward.rs:811/:826`; `forward.rs:710/:723/:741/:748`; `training_primitives.rs:147`; `tape_forward_parity.rs:74-80` | — | no |
+| 21 | A-6 | Font + foldhash license gaps | 0 OFL/SIL mentions in `docs/site/`; `THIRD_PARTY_LICENSES.md:6733` (foldhash 0.2.0 only); Cargo.lock has 0.1.5 + 0.2.0 | — | no |
+| 22 | A-7 | desktop README bundle-id + tag-push claims | `desktop/README.md:186` + `:164` | B5 | no |
+| 23 | A-8 | Dead `--warmup`/`--mode` bench flags | `scripts/investigations/bench-concurrent-batch.py:5830-5833/:5938-5942` | — | no |
+| 24 | A-9 | Orphan TODO pointers | `BENCHMARKS.md:633`; `model_dispatch.rs:3212`; `c29_logits_compare_v2.py:53` | — | no |
+| 25 | A-10 | `[openenv]` block lacks credentials example | `kiln.example.toml:366` vs `:309-311` | — | no |
+| 26 | A-11 | Commented-out `# [agent]` header + §10.6/§8.7 refs | `kiln.example.toml:414/:411/:431` | B6 | no |
+| 27 | F-1 | MTP plan follow-ups + unreferenced blog post | `docs/archive/mtp-training/mtp-training-plan.md:98`; `echo_blog_post.md` (27,663 B) | — | no |
+| 28 | F-2 | RADV/driver SIGSEGV across 7 vulkan-kernel binaries | host environment (no repo cite) | — | no |
+| 29 | F-3 | Frozen candle-removal archive links (21) | `docs/archive/candle-removal/*.md` (11× CONFIGURATION + 10× NATIVE_SFT_PROFILE) | — | no |
+| 30 | F-4 | 24 phase-4 TODOs in kiln-tensor ops | `crates/kiln-tensor/src/ops/*.rs` (13 files) | — | no |
+| 31 | R165-1 | §8.7 promotion comment line | `kiln.example.toml:431` | B6 | no |
+| 32 | R165-2 | Stale "v0.5.1 is the latest published release" | `docs/public/BENCHMARKS.md:25` (tag `kiln-v0.5.2` exists) | — | no |
+| 33 | R166-1 | §10.6 self-improvement flywheel comment | `kiln.example.toml:411` | B6 | no |
+| 34 | R166-2 | 19 §N.M dev comments in the built server UI | `crates/kiln-server/src/ui/index.html` 12 lines (1471-1481/:1741/:1940/:1956/:2052) | B6 family (standalone) | no |
+| 35 | R167 | SCRIPT.md claims README embed sets `data-theme` | `docs/site/demo/SCRIPT.md:233` (0 `data-theme` in README.md) | — | no |
+| 36 | R170 | Quickstart heading vs single-hyphen anchor | `QUICKSTART.md:96`; `check_docs_site_smoke.mjs:3176` + `docs-site/lib.mjs:91`; `README.md:204` | — | **cond.** |
+| 37 | R173-1 | index.html "stable = inference-only" prose | `docs/site/index.html:295-297` | B1 | no |
+| 38 | R173-2 | Route-count "twenty-five" where native_default keeps 24 | `docs/site/troubleshooting.html:503-504` | — | no |
+| 39 | R174a-1 | Test comment reads `#define` as env var | `crates/kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs:290` vs `csrc/optimizer_step.cu:184` | — | no |
+| 40 | R175-1 | Root `assets/` index over-claims logo referrers | `assets/README.md:7` | — | no |
+| 41 | R176-1 | CHANGELOG stale/dangling path refs (21) | `CHANGELOG.md` P1–P15 + D1–D6 (e.g. P13 at :1696) | B4 | no |
+| 42 | R176-2 | CHANGELOG stale "latest" claim | `CHANGELOG.md:1708` | B4 | no |
+| 43 | R176-3 | v0.2.16 duplication; missing v0.2.18/19 entries | `CHANGELOG.md:1220/:1269` | B4 | no |
+| 44 | R177-F2 | Orphan `Inter-500.woff2` not served | `docs/site/fonts/Inter-500.woff2`; `css/fonts.css:31/:40/:49`; `scripts/docs-site/social-preview.html:24` (JetBrainsMono-500) | B3 | no |
+| 45 | R177-F3 | asciinema vendor + gate vs no playback | `docs/site/demo/vendor/asciinema-player/`; `scripts/check_docs_site_smoke.mjs:2578-2624` | B2 | **yes** (retire path) |
+| 46 | R177-F4 | Demo README documents player flow | `docs/site/demo/README.md:5/:37/:41` | B2 | no |
+| 47 | R177-F5 | 404 page relative favicon + missing icon pair | `docs/site/404.html:109`; 404.html vs README pair | — | no |
+| 48 | R178-1 | Shared temp file name in both blas/rocblas algo_cache | `kiln-blas/src/algo_cache.rs:551/:686/:694` ↔ `kiln-rocblas/src/algo_cache.rs:551/:688/:696` | — | no |
+| 49 | F179-1 | Comment: stable "inference only" | `kiln.example.toml:22-26` | B1 | no |
+| 50 | F179-2 | `kv_autoscale` comment claims stable is off | `kiln.example.toml:285-288` | B1 | no |
+| 51 | F179-3 | `[kv_autoscale]` comment says 16-token blocks (actual 64) | `kiln.example.toml:259-260` | — | no |
+| 52 | F180-1 | docs-site gate 3-file push trigger vs 4th file | `scripts/check_docs_site_smoke.mjs:4309`; `.github/workflows/pages.yml:41-44` | — | **yes** |
+
+**1B. R185–R191 additions (22 items; cites re-verified at HEAD).**
+
+| # | ID | Round | Title (short) | Primary cite(s) | Gate-edit |
+|---|---|---|---|---|---|
+| 53 | F185-1 | R185 | SKILL.md missing template files | `.agents/skills/capability-creator/SKILL.md:318` | no |
+| 54 | F185-2 | R185 | SKILL/LAYOUT `kiln rollout` command name | `.agents/skills/capability-creator/SKILL.md:410`; `capabilities/LAYOUT.md:506` | no |
+| 55 | F185-3 | R185 | Phase-3 checklist pointer (missing §11) | `.agents/skills/capability-creator/SKILL.md:269-270/:231/:334`; `capabilities/NEXT_ROUND.md:413` | no |
+| 56 | F185-4 | R185 | Shipped round-3 recipe misdescribed (SFT→OPD→GRPO) | `capabilities/NEXT_ROUND.md:471`; `capabilities/README.md:106`; `capabilities/LAYOUT.md:545` | no |
+| 57 | F185-5 | R185 | "round-2 winner" attribution (win was round 1) | `capabilities/METHODS.md:525/:527` | no |
+| 58 | F185-6 | R185 | `run_stage.sh` references (repo uses `run_iter.sh`) | `.agents/skills/capability-creator/SKILL.md:231/:334`; `capabilities/{LAYOUT:459, NEXT_ROUND:22-23, README:149/:162/:203}` | no |
+| 59 | F185-7 | R185 | `integration/` vs `caps/` placement | `capabilities/README.md:57-59`; `capabilities/LAYOUT.md:174-175`; `capabilities/NEXT_ROUND.md:506` | no |
+| 60 | F185-8 | R185 | DISTILLATION §5 rounds/ tree (absent in live layout) | `capabilities/DISTILLATION.md` §5 (~:138-147); `capabilities/README.md:9` | no |
+| 61 | F185-9 | R185 | README caps/ tree missing postbreach cap | `capabilities/README.md:59-85` | no |
+| 62 | F186-1 | R186 | CONFIGURATION.md 16/112/107 vs 17/117/112 | `docs/contracts/CONFIGURATION.md:132/:134/:136/:140` vs `contracts/kiln-config-v1.schema.json` (17/117/112) + `crates/kiln-server/src/config.rs:135` | no |
+| 63 | F186-2 | R186 | CONFIGURATION.md "all 112 fixed typed leaves" | `docs/contracts/CONFIGURATION.md:2118` vs `config.rs:135/:7915` (117) | no |
+| 64 | F186-3 | R186 | backend-capability-report rocm row thresholds | `docs/contracts/backend-capability-report.md:86` vs `docs/contracts/CONFIGURATION.md:1707-1723` | **yes** (generator + Rust test) |
+| 65 | F186-4 | R186 | Observability schema/checker pin `fixed_field_count: 118` (code emits 117) | `contracts/kiln-observability-v1.schema.json:38/:4172/:4188`; `scripts/generate_observability_schema.py:1565/:1574`; `scripts/check_http_api_contract.py:1132/:1135` vs `config.rs:135/:7915` | **yes** (generator + checker) |
+| 66 | F187-1 | R187 | CONTRIBUTING "Start here" config link → curated copy | `CONTRIBUTING.md:16` vs canonical `docs/contracts/CONFIGURATION.md` | no |
+| 67 | F187-2 | R187 | SECURITY.md + CODE_OF_CONDUCT.md email has no canonical pin | `SECURITY.md:10`; `CODE_OF_CONDUCT.md:32` | no |
+| 68 | F188-1 | R188 | docs/public/QUICKSTART serve flags don't exist | `docs/public/QUICKSTART.md:25-28` vs `crates/kiln-server/src/cli.rs:534-546` + root `QUICKSTART.md:158` | no |
+| 69 | F189-1 | R189 | signing.md guard wording vs actual workflow guards | `docs/desktop/signing.md:92-95` vs `.github/workflows/desktop-build.yml:101-102` | **cond.** (workflow side) |
+| 70 | F189-2 | R189 | desktop README Settings UI labels don't exist | `desktop/README.md:170` vs `src-tauri/src/` (0 matches) | no |
+| 71 | F190-1 | R190 | THIRD_PARTY_LICENSES.md:3 "and desktop binaries" | `THIRD_PARTY_LICENSES.md:3` vs `desktop/Cargo.toml:1-3` + `desktop/Cargo.lock` (281/526 names absent) | no |
+| 72 | F190-2 | R190 | "third-party" header lists first-party kiln-hip | `THIRD_PARTY_LICENSES.md:3` + `:5394`; `about.toml:35` | no |
+| 73 | F190-3 | R190 | OFL self-satisfaction claim; full OFL 1.1 not reproduced | `THIRD_PARTY_LICENSES.md:30-33` | no |
+| 74 | F191-1 | R191b | ARCHITECTURE.md stable-profile table + narrative vs code | `ARCHITECTURE.md:422` + `:430-431` vs `crates/kiln-server/src/config.rs:844-854` (+ test `config.rs:10103-10114`) | **cond.** (code side) |
+
+**1C. Five items declared as queue additions by their own round but
+omitted from every subsequent running total (see BK-1).**
+
+| # | ID | Round | Title (short) | Primary cite(s) |
+|---|---|---|---|---|
+| c1 | F182-1 | R182 | "all nine batching values" (actual 10) | `docs/serving/TRAJECTORY_TURN_THROUGHPUT.md:114-115` vs canonical `docs/contracts/CONFIGURATION.md:895-911` |
+| c2 | F182-2 | R182 | miniOpenEnv oracle unpinned (UNRESOLVED) | `docs/training/OPENENV_REPLAY_REFERENCE.md:538-540` |
+| c3 | F183-1 | R183 | ECHO_GUIDE tokenize_grpo_group attribution | `docs/guides/ECHO_GUIDE.md:96-98` (impl actually in `crates/kiln-echo/src/prompt_format.rs:25`) |
+| c4 | F183-2 | R183 | "24 examples" vs 23 constructors | `docs/guides/EVAL_GUIDE.md:651` + `crates/kiln-eval/src/builtin.rs:3/:298` (23 constructors) |
+| c5 | F184-1 | R184 | kiln-blas README `probe_ffi` file attribution | `crates/kiln-blas/README.md:92-93` (actual `crates/kiln-blas/src/lib.rs:48`) |
+
+### 2. Interaction map (pairwise; exact cites on both sides)
+
+Relation vocabulary: **SAME-CLAIM** (one stale assertion, one reword
+closes all) · **SAME-EDIT-REGION** (both fixes land in one file
+block; one coordinated edit can close both) · **SHARED-DECISION** (one
+owner decision closes all) · **FAMILY** (same comment family,
+different surfaces) · **DEPENDS-ON** (forced resolution order) ·
+**SAME-FILE** (independent claims, same file; coordinate edits) ·
+**SURFACE-ADJACENT** (same doc cluster, independent decisions) ·
+**SOFT-TIE** (shared policy theme, independent decisions) ·
+**GATE-SIBLINGS** (both fixes need gate edits) ·
+**CONVENTION** (ledger-level interaction, not a code interaction).
+
+| # | Type | Side A (ID + cite) | Side B (ID + cite) | Effect |
+|---|---|---|---|---|
+| I-01 | SAME-CLAIM (B1) | R173-1 `docs/site/index.html:295-297` | F179-1 `kiln.example.toml:22-26` ↔ F179-2 `kiln.example.toml:285-288` ↔ F191-1 `ARCHITECTURE.md:422` + `:430-431` | All four assert "stable = inference-only"; canonical side is `docs/serving/SERVING_PROFILES.md:42-51` + `docs/contracts/CONFIGURATION.md:179-187` + `crates/kiln-server/src/config.rs:844-854` (stable `training_gpu_ownership: true`). One consistent reword closes all four — or one code change (policy + contract test `config.rs:10103-10114`) if the owner picks the doc side. |
+| I-02 | SAME-EDIT-REGION (B6) | A-11 `kiln.example.toml:414` | R165-1 `kiln.example.toml:431` ↔ R166-1 `kiln.example.toml:411` | One commented `# [agent]` block (lines 408–434); one decision (uncomment-with-fixed-refs or delete) closes all three. |
+| I-03 | FAMILY | R166-2 `crates/kiln-server/src/ui/index.html:1471-1481/:1741/:1940/:1956/:2052` (19 §N.M refs) | I-02 trio (same §N.M family) | Same dev-comment family, different surface (shipped UI vs sample TOML); separate decision (K3). |
+| I-04 | SHARED-DECISION (B3) | D-7 `docs/site/fonts/*.woff2` (Inter ×4 identical; JetBrainsMono ×3 identical) | R177-F2 `docs/site/fonts/Inter-500.woff2` + `css/fonts.css:31/:40/:49` + `scripts/docs-site/social-preview.html:24` | One font-set policy (keep/dedupe/alias/orphan); the Inter-500 orphan deletion is a consequence of that policy. |
+| I-05 | SHARED-DECISION (B2) | R177-F3 `docs/site/demo/vendor/asciinema-player/` + gate `scripts/check_docs_site_smoke.mjs:2578-2624` | R177-F4 `docs/site/demo/README.md:5/:37/:41` | Restore or retire; the retire path is gate-locked (smoke gate must change). |
+| I-06 | SHARED-DECISION (B4) | R176-1 `CHANGELOG.md` 21 refs (P13 at :1696) | R176-2 `CHANGELOG.md:1708` ↔ R176-3 `CHANGELOG.md:1220/:1269` (+ missing v0.2.18/19 entries) | Rewrite-as-history vs freeze-as-archive; one decision covers all 21 refs + :1708 + version gaps. |
+| I-07 | SHARED-DECISION (B5) | D-14 `.github/workflows/desktop-build.yml` `on:` block (dispatch-only) | A-7 `desktop/README.md:164` (tag-push claim) + `:186` (bundle id ×3) | Trigger policy; README wording follows the decision. |
+| I-08 | DEPENDS-ON | F189-1 `docs/desktop/signing.md:92-95` (claims `runner.os == 'macOS' && tag` on both signing steps) | D-14 side `.github/workflows/desktop-build.yml:101-102` (build step guarded tag-only) | If the owner fixes the workflow side, F189-1 joins K7 (trigger/guard design); if the doc side, it is an independent reword (K8). |
+| I-09 | SURFACE-ADJACENT | D-15 `desktop/README.md:136-141` (retired Apple-secret list) | F189-2 `desktop/README.md:170` (Settings UI labels) ↔ F189-1 `docs/desktop/signing.md:92-95` ↔ I-07 (same cluster) | Four independent decisions in the same desktop-doc cluster (secrets list, UI labels, guard wording, trigger policy); coordinate one pass over `desktop/README.md` to avoid edit collisions. |
+| I-10 | SAME-EDIT-REGION | F190-1 `THIRD_PARTY_LICENSES.md:3` ("and desktop binaries") | F190-2 `THIRD_PARTY_LICENSES.md:3` ("third-party") + `:5394` (kiln-hip row) | One :3 sentence rewrite can close both; the underlying decisions differ (coverage vs wording). |
+| I-11 | SAME-EDIT-REGION | F190-3 `THIRD_PARTY_LICENSES.md:30-33` ("this section satisfies that" OFL claim) | A-6 `THIRD_PARTY_LICENSES.md:6733` (foldhash 0.2.0 only) + 0 OFL mentions in `docs/site/` | Adding the OFL 1.1 text + font credits + both foldhash versions (0.1.5/0.2.0) in one coordinated license-section pass closes A-6 and answers F190-3's OFL-preservation question. |
+| I-12 | DEPENDS-ON (forced order) | F186-4 `contracts/kiln-observability-v1.schema.json:38/:4172/:4188` + `scripts/generate_observability_schema.py:1565/:1574` + `scripts/check_http_api_contract.py:1132/:1135` (all 118) | F186-1 `docs/contracts/CONFIGURATION.md:132/:134/:136/:140` (16/112/107) ↔ F186-2 `docs/contracts/CONFIGURATION.md:2118` (112) | Live code says 117 (`config.rs:135`, test `config.rs:7915`); schema/checker say 118; docs say 112. F186-4 (which side is canonical + gate edit) must be decided **first**; F186-1/F186-2 then align doc numbers to the chosen value. |
+| I-13 | SURFACE-ADJACENT | F186-1 `docs/contracts/CONFIGURATION.md:132-140` | F187-1 `CONTRIBUTING.md:16` (canonical target = same file) | F187-1's "canonical side" is the very file F186-1 edits; decisions are independent but a single pass over `docs/contracts/CONFIGURATION.md` avoids double-touching :132-:140. |
+| I-14 | SAME-FILE (order) | D-2 `crates/kiln-model/src/forward/full_attention.rs:2165/:2224/:2661/:2666` (4 `max_seqlen_k` fields) | D-3 same file `:3112` (`type_complexity` allow over the `:3113-:3121` tuple that binds `max_seqlen_k`/`kernel_max_seqlen_k`) | D-2's delete-or-keep decision changes D-3's `:3112` binding; resolve D-2 before ratifying D-3's allow. |
+| I-15 | SHARED-DECISION (narrative) | F185-4 `capabilities/NEXT_ROUND.md:471` + `capabilities/README.md:106` + `capabilities/LAYOUT.md:545` (round-3 recipe misdescribed) | F185-5 `capabilities/METHODS.md:525/:527` ("round-2 winner"; win was round 1) | Both are round-attribution of the same pi-faithful-completion win; one consistent narrative (round-1 win + shipped prompting+SFT chain) closes both. |
+| I-16 | SAME-EDIT-REGION | F185-7 `capabilities/README.md:57-59` (+ `LAYOUT.md:174-175`, `NEXT_ROUND.md:506`) | F185-9 `capabilities/README.md:59-85` (caps/ tree missing postbreach cap) | Both land in the README.md `caps/` tree block; one coordinated rewrite closes both. |
+| I-17 | cite clarity | F185-2 `capabilities/LAYOUT.md:506` | F185-7 `capabilities/NEXT_ROUND.md:506` | Same line number 506 in **different** files; no collision (recorded to prevent a mis-merge by a future editor). |
+| I-18 | SAME-CLAIM (command form) | F188-1 `docs/public/QUICKSTART.md:25-28` (`--model-path`/`--host`/`--port`) | Root `QUICKSTART.md:158` (`KILN_MODEL_PATH=… kiln serve`) + `crates/kiln-server/src/cli.rs:534-546` (serve declares only `--served-model-id`/`--eval-mode`) | The public quickstart documents flags the `serve` subcommand does not define; the canonical env-var form is the existing fix direction. |
+| I-19 | SOFT-TIE (version currency) | R165-2 `docs/public/BENCHMARKS.md:25` ("v0.5.1 is the latest") | R176-2 `CHANGELOG.md:1708` ("production line is now at kiln-v0.2.8") | Same stale-latest-release pattern in two files; a single "version-currency policy" (update-on-release vs mark-historical) would close both coherently. |
+| I-20 | SAME-FILE | D-8 `crates/kiln-blas/README.md:65/:71` (absent probe narrative) | F184-1 `crates/kiln-blas/README.md:92-93` (probe_ffi file attribution) | Independent claims, same file; one README pass avoids double edits. (F184-1 is BK-1-disputed.) |
+| I-21 | RELATED-SURFACE | D-5 blas/rocblas `backend_matmul.rs` + `workspace_pool.rs` byte-identical pairs | R178-1 `kiln-blas/src/algo_cache.rs:551/:686/:694` ↔ `kiln-rocblas/src/algo_cache.rs:551/:688/:696` (shared temp file) | Both are the same two crates' duplication theme; independent decisions (file dedupe vs test isolation) but one consolidation review covers both. |
+| I-22 | SURFACE-ADJACENT (curated docs) | F187-1 `CONTRIBUTING.md:16` → `docs/public/CONFIGURATION.md` | F188-1 `docs/public/QUICKSTART.md:25-28` ↔ R165-2 `docs/public/BENCHMARKS.md:25` | The curated-public-docs cluster; three independent decisions that a single "curated-copy policy" (track canonical / freeze / drop copies) would subsume if the owner chooses one. |
+| I-23 | SAME-FILE (BENCHMARKS.md) | A-1 `BENCHMARKS.md:217-226/:237/:245-258/:733/:423/:547-548/:606/:650-651/:775` | A-2 `BENCHMARKS.md:467-468/:705-707` ↔ A-9 `BENCHMARKS.md:633` (+ `model_dispatch.rs:3212`, `c29_logits_compare_v2.py:53`) | Three independent claims in the same root file; coordinate one rewrite pass. |
+| I-24 | SAME-FILE (QUICKSTART.md) | A-1 `QUICKSTART.md:1055/:1060-1063/:1088/:1096/:1110-1117` | R170 `QUICKSTART.md:96` (heading/anchor) | Same root file; independent claims. (F188-1's file is the *different* `docs/public/QUICKSTART.md`.) |
+| I-25 | CONVENTION (queue policy) | F182-2 queued per R182 (`CLEANUP.md:14033`: "Both findings are additions to the owner queue") | U191-1 **not** queued per R191 (`CLEANUP.md:15262-15272`) ↔ R190 U1/U2 **not** queued (`CLEANUP.md:15073-15081`) | Inconsistent UNRESOLVED-class queue treatment across rounds (see BK-2). |
+| I-26 | DOC+CODE (one fix spans both) | F183-2 `docs/guides/EVAL_GUIDE.md:651` ("Its 24 hand-authored examples") | `crates/kiln-eval/src/builtin.rs:3` + `:298` (code metadata also says 24; actual constructors = 23) | Fix touches the doc **and** two code-metadata strings; owner picks add-24th-example vs correct-the-count. (BK-1-disputed item.) |
+| I-27 | GATE-SIBLINGS | F186-3 `docs/contracts/backend-capability-report.md:86` (rocm row) | F186-4 (I-12, schema 118) | Both fixes require gate-side edits (generator + test/checker); independent claims, same approval class. |
+| I-28 | SAME-FILE (kiln.example.toml) | K1 lines `kiln.example.toml:22-26/:285-288` (B1) | K2 lines `:411/:414/:431` (B6) ↔ K45 `:366/:309-311` (A-10) ↔ K61 `:259-260` (F179-3) | 8 queued lines across 4 independent decisions in one 506-line file; a single coordinated pass over the example file avoids edit collisions. |
+
+### 3. Decision-dependency map (minimal independent owner decisions)
+
+Every queued item is assigned below to exactly one **independent owner
+decision** (K1–K64). Items in the same K-row close with one consistent
+decision + reword; cross-row orderings are marked. 79 distinct item
+IDs map to 64 independent decisions (5 items are BK-1-disputed and
+marked **[D]**; excluding them: 74 items → 59 decisions). No
+decision in this map is adjudicated.
+
+| K | Independent owner decision | Items | Ordering / notes |
+|---|---|---|---|
+| K1 | **Stable-profile semantics: which side is canonical** (code `config.rs:844-854` stable = full product, or docs = inference-only) | R173-1, F179-1, F179-2, F191-1 | Doc-side: one reword closes 4. Code-side: policy change + contract test `config.rs:10103-10114`. |
+| K2 | `[agent]` block in `kiln.example.toml`: uncomment (with corrected §refs) or delete | A-11, R165-1, R166-1 | One block (lines 408–434). See I-28 file-coordination. |
+| K3 | Dev §N.M comments in the **built server UI**: strip from shipped build or keep | R166-2 | Same family as K2, different surface. |
+| K4 | asciinema player: restore or retire | R177-F3, R177-F4 | Retire path is gate-locked (`check_docs_site_smoke.mjs:2578-2624`). |
+| K5 | docs-site font-set policy (dedupe/alias/keep; orphan handling) | D-7, R177-F2 | Soft tie with K12 (font license credits). |
+| K6 | CHANGELOG.md: rewrite-as-history vs freeze-as-archive | R176-1, R176-2, R176-3 | Soft tie with K16 (version currency). |
+| K7 | Desktop build trigger policy (dispatch-only vs tag-push; guard design) | D-14, A-7 | If workflow-side, K8 folds in (I-08). |
+| K8 | signing.md guard wording: reword docs to match workflow (or fold into K7) | F189-1 | DEPENDS-ON K7 only on the workflow side. |
+| K9 | **Canonical fixed-field count + which side moves** (117 code / 118 schema / 112 docs) | F186-4 → F186-1, F186-2 | F186-4 first (gate edit: generator + checker or code); doc numbers then align. See I-12/I-27. |
+| K10 | THIRD_PARTY_LICENSES.md coverage: regenerate incl. desktop workspace or narrow the :3 claim | F190-1 | Shares the :3 edit region with K11 (I-10). |
+| K11 | "third-party" wording + kiln-hip over-credit | F190-2 | Shares the :3 edit region with K10 (I-10). |
+| K12 | OFL 1.1 text + font/foldhash license-gap closure | A-6, F190-3 | One coordinated license-section pass closes both (I-11). |
+| K13 | Public quickstart serve command form (env-var canonical) | F188-1 | — |
+| K14 | CONTRIBUTING.md:16 config link: curated vs canonical target | F187-1 | Canonical file is K9's surface (I-13). |
+| K15 | Canonical maintainer contact pin (SECURITY + CoC emails) | F187-2 | — |
+| K16 | docs/public/BENCHMARKS.md:25 latest-release pointer: update vs mark historical | R165-2 | Soft tie with K6 (I-19). |
+| K17 | Capability SKILL.md: create missing template files or reword references | F185-1 | — |
+| K18 | `kiln rollout` → `rollout-generate` command rename in skill docs | F185-2 | Deterministic once K18's code side is canonical. |
+| K19 | Phase-3 checklist pointer: point at NEXT_ROUND.md | F185-3 | — |
+| K20 | Capability narrative: round-1 win + shipped prompting+SFT chain (round-3 recipe as not-shipped) | F185-4, F185-5 | One consistent narrative closes both (I-15). |
+| K21 | Per-cap runner contract: migrate `caps/` to `run_stage.sh` or reword docs to `run_iter.sh` | F185-6 | — |
+| K22 | Capability tree: `integration/` → `caps/` placement + add postbreach cap to README tree | F185-7, F185-9 | Same README.md tree block (I-16). |
+| K23 | DISTILLATION.md §5 `rounds/` tree reword | F185-8 | — |
+| K24 | `max_seqlen_k` field family: delete 4 fields or keep for parity | D-2 | Affects K25's `full_attention.rs:3112` binding (I-14) — resolve before K25 ratification. |
+| K25 | Ratify or resolve the 9 judgment-class lint keeps | D-3 | — |
+| K26 | `expected_identity` in the remote-teacher example: add or relax the field | D-4 | — |
+| K27 | blas/rocblas byte-identical pairs: dedupe or declare | D-5 | Related surface with K56 (I-21). |
+| K28 | Three zero-dependent scaffold crates: ship / trim / retire | D-6 | — |
+| K29 | kiln-blas README probe narrative reword | D-8 | Same file as K30 (I-20). |
+| K30 **[D]** | kiln-blas README `probe_ffi` file attribution | F184-1 | BK-1-disputed; same file as K29 (I-20). |
+| K31 | 29 unused Python imports: remove or pin a linter | D-9 | — |
+| K32 | Seven duplicate-utility helper pairs: consolidate or document | D-10 | — |
+| K33 | server-release.yml: dedupe repeated steps + pin `free-disk-space` | D-11 | Gate-conditional (workflow). |
+| K34 | Delete dead `KILN_CUDA_NATIVE_TRAINING` setter | D-12 | — |
+| K35 | `is_lower_sha256`: share or keep the fork | D-13 | — |
+| K36 | Desktop README retired Apple-secret list reword | D-15 | Same cluster as K7/K8/K64 (I-09). |
+| K37 | `docs/desktop/about.png`: regenerate-and-relink or retire the generator | D-16 | — |
+| K38 | Rewrite the retired-claims cells (QUICKSTART/BENCHMARKS) | A-1 | Same-file coordination with K39/K44 (I-23) and K51 (I-24). |
+| K39 | Remove phantom llama.cpp bench-result cites | A-2 | Same file as K38/K44 (I-23). |
+| K40 | Add the pre-migration baselines section (or fix the cites) | A-3 | — |
+| K41 | Reword `candle` references in parity test + doc/error sites | A-4 | — |
+| K42 | Rename candle-era tape/forward identifiers | A-5 | — |
+| K43 | Bench script `--warmup`/`--mode` flags: wire or drop | A-8 | — |
+| K44 | Orphan TODO pointers: complete or point at owners | A-9 | Same file as K38/K39 (I-23). |
+| K45 | `[openenv]` credentials example or pointer | A-10 | See I-28 file-coordination. |
+| K46 | MTP follow-ups + blog-post home | F-1 | — |
+| K47 | RADV/driver SIGSEGV: track upstream (no repo action expected) | F-2 | — |
+| K48 | Archive protocol for frozen candle-removal links | F-3 | — |
+| K49 | kiln-tensor phase-4 TODO scheduling | F-4 | — |
+| K50 | SCRIPT.md `data-theme` claim reword | R167 | — |
+| K51 | Anchor convention (heading/link/slugger) | R170 | Gate-conditional (slugger). |
+| K52 | Route-count prose "twenty-five" → "twenty-four of twenty-five" | R173-2 | — |
+| K53 | muon threshold test comment reword | R174a-1 | — |
+| K54 | `assets/README.md:7` logo row reword | R175-1 | — |
+| K55 | 404 favicon relative path + missing icon pair | R177-F5 | — |
+| K56 | blas/rocblas temp file name disambiguation | R178-1 | Related surface with K27 (I-21). |
+| K57 **[D]** | batching "nine" → correct count reword | F182-1 | BK-1-disputed. |
+| K58 **[D]** | miniOpenEnv oracle: pin an upstream reference or add a count assertion | F182-2 | BK-1-disputed; UNRESOLVED class (BK-2). |
+| K59 **[D]** | ECHO_GUIDE tokenize_grpo_group cite fix | F183-1 | BK-1-disputed. |
+| K60 **[D]** | 24 vs 23 examples: add a 24th or correct doc + code metadata | F183-2 | BK-1-disputed; fix spans doc + code (I-26). |
+| K61 | `[kv_autoscale]` 16→64 token block comment | F179-3 | See I-28 file-coordination. |
+| K62 | docs-site gate push trigger: add 4th file/glob | F180-1 | Gate edit (pages.yml + smoke gate). |
+| K63 | backend-capability-report rocm row threshold reconciliation | F186-3 | Gate edit (generator + Rust test); gate-sibling of K9 (I-27). |
+| K64 | Desktop Settings UI labels: retire the claim or add the UI | F189-2 | Same cluster as K7/K8/K36 (I-09). |
+
+**Map statistics.** 79 item IDs → 64 independent decisions (10
+multi-item decisions: K1(4), K2(3), K4(2), K5(2), K6(3), K7(2), K9(3),
+K12(2), K20(2), K22(2) = 25 items; 54 single-item decisions = 54
+items; 25+54 = 79 ✓). Excluding the 5 BK-1-disputed items
+(K30, K57, K58, K59, K60): **74 items → 59 independent decisions**.
+Forced orderings: K24→K25 (I-14); K9-internal (F186-4 first, I-12);
+K8⊆K7 only on the workflow side (I-08). File-coordination notes:
+I-02, I-10, I-11, I-16, I-20, I-23, I-24, I-28.
+
+### 4. Bookkeeping findings (surfaced, not adjudicated)
+
+**BK-1 — Queue-count discrepancy (74 running total vs 79 ID set).**
+Rounds 182–184 each declared their findings as owner-queue additions in
+their own entry text — R182 `CLEANUP.md:14033` ("Both findings are
+additions to the owner queue"), R183 `CLEANUP.md:14119` (same
+wording), R184 `CLEANUP.md:14264` ("queue delta +1") — but every
+subsequent running total restarts from the 52-item R181 base plus only
+R185+ deltas: R185 `CLEANUP.md:14418-14422` (52+9 = 61; note its
+disjointness line explicitly names the pre-queued "D-1…D-8 /
+F182-1…F184-1"), R186 `:14619-14622` (65), R187 `:14787-14788` (67),
+R188 (`68`), R189 `:14982-14983` (70), R190 `:15091` (73), R191
+`:15286` (74), R191b `:15334` ("unchanged: 74"). The five IDs
+**{F182-1, F182-2, F183-1, F183-2, F184-1}** are therefore declared as
+queued by their own rounds but absent from the running count. The
+ID-complete queue is **79**; the running total is **74**. Owner call:
+adopt 79 (formally add the 5 to the canonical table) or formally
+reclassify them (e.g. superseded / out-of-scope). This round enumerates
+all 79 (§1A+1B+1C) and maps all 64 decisions, with the 5 marked
+**[D]**, without taking a side.
+
+**BK-2 — UNRESOLVED-class queue convention is inconsistent across
+rounds.** R182 queued an UNRESOLVED item (F182-2, miniOpenEnv oracle;
+`CLEANUP.md:14033` counts it as a queue addition). R190 explicitly
+excluded its two UNRESOLVED externals from the queue (`CLEANUP.md:15073`
+"UNRESOLVED (not locally verifiable; not queued)"). R191 likewise
+excluded U191-1 (`CLEANUP.md:15262-15272` "not queued"). Owner call:
+define the UNRESOLVED queue policy (queued-as-open vs parked-out-of-
+queue) and apply it uniformly.
+
+### 5. Standing gates (CI order) — 17/17 PASS at HEAD `3e4143854`
+
+| # | Command | Verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "4564 tracked paths, 120064178 bytes; CSV ≤ 1048576, each file ≤ 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "448 reads, 19 process mutations; 0 runtime migration reads" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "0 tests, 0 reads, 0 text assertions" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "117 canonical fields, 3 dynamic templates, 112 canonical environment overrides" (confirms K9's code side; F186-1/F186-2 canonical counts) |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS (full contract list) |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "111 paths, 125 operations … 172 observability definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "172 closed definitions" (schema/generator agree at 118; code emits 117 — F186-4) |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "127.0.0.1:8420; 21 server CLI URL fields" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — 11/11 tests |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (exit 0) |
+
+### 6. Gate-edit flag summary
+
+`CLEANUP.md` — append-only ledger entry; no gate flag set, artifact
+size (gate 1 re-verified after commit), contract text, config, env
+var, version, URL, schema, test, docs-site content, lockfile, CI,
+generated artifact, or manifest. Gate-conditional items referenced
+above (K4/K7/K8/K9/K33/K51/K62/K63 + F191-1 code-side) all require
+their respective gate/workflow edits **only if the owner picks the
+gate-touching side** — none is forced by this round's report.
+`git status --porcelain` before/after commit: ` M CLEANUP.md` only,
+then clean.
