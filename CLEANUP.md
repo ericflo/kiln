@@ -13268,3 +13268,229 @@ this ledger append — and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 178 reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 179) — 2026-08-29
+
+**Scope.** Owner-directed: read-only consistency audit of the published
+artifact `kiln.example.toml` against the canonical field reference
+`docs/contracts/CONFIGURATION.md` (120 rows: 117 canonical fields + 3 dynamic
+credential templates, per gate 5's self-test) and the runtime-env contract
+`contracts/runtime-env-direct-reads-v1.json`. Three censuses: (1) every key in
+`kiln.example.toml` (83 active + 38 commented optional-example keys = 121
+surface keys) classified CONSISTENT / DRIFTED / UNDOCUMENTED against its doc
+row, with the example value checked against the documented default/domain and
+the example comment checked against documented semantics; (2) reverse census
+of doc top-level sections absent from the example, marked optional/N-A or
+required/GAP; (3) env-override consistency of documented `KILN_*` names
+against the runtime-env contract. Strictly read-only: python3/tomllib
+parsing + grep/sed/awk + code citation checks; no builds, no test execution.
+The only write is this ledger append. `kiln.example.toml` is a published
+artifact: fixes require owner approval, so findings go to the owner queue
+unfixed.
+
+### Census 1 — Field census of `kiln.example.toml` (121 keys)
+
+Coverage proof: every one of the 121 surface keys maps to a doc row in
+CONFIGURATION.md (row numbers below; dynamic-template rows resolve
+`teachers.credentials.<id>.*` and the open `agent.self_improve` subtree,
+whose three commented leaves `agent/judge/post_eval` count under that one
+row). **UNDOCUMENTED: 0. DRIFTED: 2. CONSISTENT: 119.**
+
+Per-section counts (CONSISTENT / DRIFTED / UNDOCUMENTED):
+
+| section | keys | C / D / U | section | keys | C / D / U |
+|---|---:|---|---|---:|---|
+| server | 22 | 21 / 1 / 0 | openenv | 5 | 5 / 0 / 0 |
+| accelerator | 15 | 15 / 0 / 0 | logging | 2 | 2 / 0 / 0 |
+| batching | 4 | 4 / 0 / 0 | prefix_cache | 3 | 3 / 0 / 0 |
+| model | 10 | 10 / 0 / 0 | speculative | 3 | 3 / 0 / 0 |
+| paths | 1 | 1 / 0 / 0 | streaming_prefill | 6 | 6 / 0 / 0 |
+| memory | 13 | 12 / 1 / 0 | adapters | 4 | 4 / 0 / 0 |
+| training | 12 | 12 / 0 / 0 | teachers (template ×2) | 2 | 2 / 0 / 0 |
+| eval | 4 | 4 / 0 / 0 | request_log | 6 | 6 / 0 / 0 |
+| agent (7 rows, open subtree ×3 leaves) | 9 | 9 / 0 / 0 | | | |
+
+Every active (uncommented) example value equals the documented default
+(83/83), so the file's "all values shown are defaults" header holds for the
+active surface. Every commented optional-example value is inside its
+documented domain (e.g. `server.http_send_buffer_bytes = 4096` within
+`1024..=16777216`; `training.grad_checkpoint_segments = 4` positive;
+`prefix_cache.max_blocks = 64` / `max_entries = 20` positive;
+`model.checkpoint_read_mib_per_second = 256` within `1..=16384`;
+`memory.kv_cache_fp8 = true` boolean, documented default `false` — shown as
+an optional example, so the effective default `false` is preserved by
+omission). Teachers template sample values are valid: origin
+`https://vllm.example.com:8443` is a canonical scheme://host:port origin
+(no path/trailing slash), `api_key_env = "KILN_VLLM_API_KEY"` matches the
+documented `[A-Za-z_][A-Za-z0-9_]*` name pattern.
+
+**DRIFTED-1 — `server.serving_profile` (example L22-26).** Comment reads
+"stable: inference only, no live physical mutation; experimental: dynamic
+development behavior; maintenance: inference disabled, drained exclusive
+work." The canonical profile table (CONFIGURATION.md L179-183) grants
+`stable`: Inference admitted, **Training GPU ownership allowed, adapter
+weight transitions allowed, Dynamic KV resize / allocator reclaim enabled,
+Live graph capture enabled**, writer priority — and L185-187 states the
+default `stable` "is the normal full product: inference, training, adapter
+transitions, memory management, and guarded graph capture do not need a
+special opt-in." Implementation agrees with the doc:
+`crates/kiln-server/src/config.rs:846-855` (stable runtime policy:
+`training_gpu_ownership: true, adapter_weight_transitions: true,
+dynamic_kv_resize: true, allocator_reclaim: true, live_graph_capture: true`).
+The example comment's "inference only, no live physical mutation" therefore
+contradicts documented semantics on both clauses.
+
+**DRIFTED-2 — `memory.kv_autoscale` (example L285-288).** Comment reads
+"Stable mode and backends without device-resident KV pressure keep it
+unavailable." The doc row (CONFIGURATION.md L1070) lists exactly one
+unavailable condition — "Backends without device-resident KV pressure report
+the request as unavailable" — with no stable-mode clause, and the profile
+table (L180) marks stable "Dynamic KV resize / allocator reclaim: enabled".
+Implementation agrees with the doc: `config.rs:848/858/868` set
+`dynamic_kv_resize: true` for all three profiles, and
+`crates/kiln-server/src/state.rs:4393-4412` marks the autoscaler
+unavailable only when `!serving_policy.dynamic_kv_resize`
+(`serving_profile_disallows_dynamic_kv_resize`) or
+`!backend_capabilities.storage.kv_cache_device_memory_pressure`
+(`backend_pool_not_device_resident`). The example's "Stable mode" clause
+is the contradiction.
+
+**Verification notes on additional (non-contradicting) example claims.**
+- `server.stream_stall_grace_ms` "full 64-event response channel" —
+  verified: `batching_engine.rs:51` `DEFAULT_RESPONSE_CHANNEL: usize = 64`.
+- `server.default_thinking_enabled` "eval mode still defaults omitted
+  requests to enable_thinking=false" — verified: `cli.rs:86-87`
+  ("no-thinking chat-template defaults" for `--eval-mode`).
+- `memory.kv_cache_fp8` "halves memory, ~2x longer context" — matches the
+  QUICKSTART.md:1077 table row; "FP8 (E4M3)" is shorthand for the doc's
+  E4M3FN (cosmetic).
+- `memory.kv_force_blocks` "accepted only in the maintenance serving
+  profile with kv_autoscale=true" — matches doc L1071 exactly.
+- `batching.prefill_admission_quantum` auto-policy (CUDA/Vulkan decode
+  width, ROCm/Metal/CPU 4, clamped to effective max_decode_batch) — matches
+  the doc auto-policy table.
+- `memory.num_blocks` "Each block holds 16 tokens of K+V" — see F179-3.
+
+### Census 2 — Reverse census (doc sections absent from the example)
+
+All 17 top-level sections in CONFIGURATION.md are present in
+`kiln.example.toml`: 16 as active TOML sections, plus `[agent]` present
+entirely as a commented optional example (L414-436).
+
+| doc section | in example? | doc status | marking |
+|---|---|---|---|
+| server, accelerator, batching, model, paths, memory, training, openenv, logging, prefix_cache, speculative, streaming_prefill, adapters, teachers, eval, request_log | active sections with active defaults | fields carry built-in defaults (no section is required to be present) | N/A — present |
+| agent | present, entirely commented (illustrative) | doc L2006-2014: all 7 fields optional, section optional | N/A — optional |
+
+**Required-but-absent (GAP): 0.** No section needs fixing.
+
+### Census 3 — Env-override consistency (example + doc vs runtime-env contract)
+
+- `kiln.example.toml` contains 59 distinct `KILN_*` tokens; **0** are
+  outside the doc's canonical set. The two exceptions to the field-override
+  set are expected: `KILN_CONFIG` (documented file selector, CONFIGURATION.md
+  L66-70; example header L7) and `KILN_VLLM_API_KEY` (an operator-chosen
+  secret-variable *name* in the teachers sample, valid per the documented
+  `api_key_env` pattern — not a config override).
+- Of the 112 documented canonical field overrides marked implemented
+  (117 canonical fields minus 5 target-only: `eval.*` ×4 and
+  `agent.self_improve`; the 5 target-only names have zero contract hits,
+  consistent with "not implemented"), **none** appears in
+  `contracts/runtime-env-direct-reads-v1.json` as a production direct read.
+  They are read by the centralized loader in
+  `crates/kiln-server/src/config.rs`, which the contract pins as a closed
+  public boundary with the expression-form read `var_os(name)` (argument
+  `name`, not literal names) — plus literal `KILN_CONFIG` reads in
+  config.rs and logging.rs (`public_stable`).
+- Literal contract entries for documented names are test-only:
+  `KILN_MODEL_PATH` (test_only, `kiln-train/examples/cuda_grpo_ablation.rs`,
+  documented compatibility alias for `model.path`),
+  `KILN_MODEL_SERVED_MODEL_ID` (test_only, config.rs),
+  `KILN_SERVER_EVAL_MODE` (test_only, config.rs).
+- No `public_stable` contract name is undocumented (`KILN_CONFIG` is the
+  only public_stable field-related name and is documented in both files).
+
+**ENV-OVERRIDE CONSISTENCY: CONSISTENT** — documented overrides are confined
+to the closed centralized-loader boundary; no rogue direct reads; no
+retired names in the example.
+
+### Findings + owner-queue additions
+
+**F179-1 (MED, published-artifact drift).** `kiln.example.toml:22-26`
+(`server.serving_profile` comment) — "stable: inference only, no live
+physical mutation" contradicts the canonical profile table
+(CONFIGURATION.md:179-183, stable: training GPU ownership allowed,
+adapter transitions allowed, dynamic KV resize / allocator reclaim enabled,
+live graph capture enabled; L185-187 "stable … is the normal full product")
+and the implementation (`config.rs:846-855`). Suggested fix: rewrite the
+per-profile comment lines to the doc table's semantics (stable = full
+product incl. training/KV-resize/graph capture with writer priority;
+experimental = same grants plus Vulkan resident prefill under correctness
+quarantine; maintenance = inference not admitted, live graph capture
+disabled, drain-then-exclusive).
+
+**F179-2 (MED, published-artifact drift).** `kiln.example.toml:285-288`
+(`memory.kv_autoscale` comment) — "Stable mode … keep it unavailable"
+contradicts the doc row (CONFIGURATION.md:1070: unavailability is
+backend-KV-pressure-only) and the profile table (L180: stable dynamic KV
+resize enabled); implementation marks it unavailable only for
+`serving_profile_disallows_dynamic_kv_resize` (currently no profile) or
+`backend_pool_not_device_resident` (`state.rs:4393-4412`). Suggested fix:
+drop the "Stable mode" clause; state that unavailability is
+backend-specific (non-device-resident KV pools) and profile-gated only if a
+profile disables dynamic KV resize.
+
+**F179-3 (LOW, suspected stale number).** `kiln.example.toml:259-260`
+(`memory.num_blocks` comment) — "Each block holds 16 tokens of K+V across
+all full-attention layers" is not in CONFIGURATION.md (the row is silent on
+per-block token count, so this is a comment-fact issue, not a documented
+semantics contradiction). Code evidence points to 64 tokens as the current
+default: `crates/kiln-model/src/generate.rs:203-212` ("With the #1082
+default `block_size = 64` … At the old `block_size = 16` it is 4 pages/tile")
+and `forward/full_attention.rs:2502` ("At block_size >= kBlockN (the #1082
+default 64)"). The "16" is the pre-#1082 value. Suggested fix: owner to
+confirm the effective per-block token count and update the comment (or make
+the sentence model/implementation-neutral, as the doc does).
+
+Non-queue observations (no owner action needed): `memory.kv_cache_fp8`
+"E4M3" shorthand vs doc "E4M3FN" (cosmetic; QUICKSTART.md:1077 carries the
+same "halves memory, ~2x context" claim); `prefix_cache.max_entries` "~49
+MiB of GDN state on Qwen3.5-4B" and `server.max_prefill_tokens_per_cycle`
+"the Vulkan development profile pins 128" are additional factual claims the
+canonical doc is silent on (not contradictions); `server.eval_mode` is a
+non-optional default field shown as a commented optional example (presentation
+choice; value equals the documented default `false`).
+
+**Owner-queue delta: +3 (F179-1 MED, F179-2 MED, F179-3 LOW).**
+
+### Standing gates (17/17 pass, literal CI commands, run after the only write —
+this ledger append — and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119833712 bytes; CSV <= 1048576, each file <= 10485760" (byte count as of the post-append pass; PASS re-confirmed at the final pass) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, … continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS |
+| 14 | `python3 scripts/check_release_versions.py` | PASS |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS |
+
+(Per-gate evidence strings for gates 12-17 recorded in the round 179 reply;
+all gates passed on both the post-append and post-commit runs.)
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 179 reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
