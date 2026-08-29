@@ -65,6 +65,32 @@ SLO-goodput, and keep correctness qualification separate from throughput mode.
 Until that receipt exists, the public position remains: choose Kiln for its
 integrated local improvement loop; choose vLLM for high-concurrency serving.
 
+## Memory budget (24GB GPU)
+
+Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, so long-context inference costs a fraction of what a pure transformer would.
+
+| Scenario | Total VRAM | Fits 24GB? |
+|---|---|---|
+| 128K context, 1 sequence, inference only | ~13 GB | Yes |
+| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
+| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
+| 32K context, 8 sequences, inference + training | ~22 GB | Yes |
+| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
+
+### Apple Silicon (M3 Max / M4 Max 64GB unified memory)
+
+On Apple Silicon, model weights, KV cache, and training state all live in unified memory shared with the OS. A 64 GB chip leaves generous headroom for long contexts and concurrent training.
+
+| Scenario | Unified Memory | Fits 64GB? |
+|---|---|---|
+| 128K context, 1 sequence, inference only | ~13 GB | Yes |
+| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
+| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
+| 128K context, 8 sequences, inference + training | ~32 GB | Yes |
+| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
+
+16 GB M-series chips fit short-context inference; 32 GB fits 64K context comfortably; 64 GB+ matches or exceeds the 24 GB CUDA envelope.
+
 ## Current serving acceptance protocol
 
 [`scripts/bench-concurrent-batch.py`](scripts/bench-concurrent-batch.py) is the

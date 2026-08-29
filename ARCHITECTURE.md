@@ -75,6 +75,47 @@ source-tree inventory for current trait coverage and known gaps. It is an
 engineering report, not a promise that every route is equally fast or
 qualified on every device.
 
+## Workspace layout
+
+The crate list below is the live workspace inventory — the 33 members of root `Cargo.toml`, descriptions abridged from each crate's manifest. Responsibility boundaries and layering are in [Package boundaries](#package-boundaries); this list is a point-in-time roll-call.
+
+```
+crates/
+  kiln-autograd/         Tape-based reverse-mode autograd for kiln-tensor (backend-generic)
+  kiln-blas/             kiln-tensor CUDA BLAS layer (cublasLt) [CUDA]
+  kiln-conv1d-kernel/    Vendored mamba-ssm causal_conv1d_update decode kernel [CUDA only]
+  kiln-core/             Core types: block manager, prefix cache, config, request lifecycle
+  kiln-eval/             Suites, scorers, results, dataset → eval synthesis (pure CPU, no GPU dep)
+  kiln-flash-attn/       Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI) [CUDA only]
+  kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)
+  kiln-gdn-kernel/       Vendored Gated DeltaNet chunkwise + recurrent kernels [CUDA only]
+  kiln-graph/            Backend-agnostic replay vocabulary and capture scaffolding
+  kiln-graph-cuda/       CUDA CapturedGraph scaffold for the replay vocabulary [CUDA]
+  kiln-graph-metal/      Metal CapturedGraph scaffold + ICB replay object [Metal]
+  kiln-graph-vulkan/     Vulkan CapturedGraph scaffold for the replay vocabulary [Vulkan]
+  kiln-hip/              Bounded Rust bindings to the AMD ROCm/HIP runtime [ROCm]
+  kiln-kt-bridge/        Shared helpers for kt-API ports (storage downcast, alloc, tape scopes)
+  kiln-marlin-gemm/      Vendored IST-DASLab Marlin W4A16 GEMM kernel [CUDA only]
+  kiln-memory/           Cross-engine memory awareness: VRAM/RAM probing, memory governor, budget arbiter
+  kiln-model/            Model loading, forward pass, LoRA, sampling
+  kiln-mps/              kiln-tensor Metal BLAS layer (MPSMatrixMultiplication + MSL) [Metal]
+  kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
+  kiln-opd-loss-kernel/  Fused top-K reverse-KL loss for OPD without full [T, V] logits
+  kiln-openenv/          Protocol-faithful OpenEnv client and episode runtime
+  kiln-optim/            Fused per-backend optimizer steps (AdamW / SGD / Lion / Muon)
+  kiln-param/            Unified Parameter handle: one stable TensorId, multiple physical storages
+  kiln-resource/         Cross-process resource persistence primitives
+  kiln-rmsnorm-kernel/   Fused RMSNorm CUDA kernel (Liger-style) [CUDA only]
+  kiln-rocblas/          kiln-tensor ROCm BLAS layer (hipBLASLt), analog of kiln-blas [ROCm]
+  kiln-scheduler/        Continuous batching scheduler with chunked prefill
+  kiln-server/           HTTP server, CLI, training queue, eval queue, metrics, config
+  kiln-tensor/           In-house tensor + storage substrate
+  kiln-tensor-id/        Stable TensorId leaf crate shared by tensor and kernel crates
+  kiln-train/            Bounded single-GPU LoRA loops for SFT, GRPO, and OPD
+  kiln-vulkan-blas/      kiln-tensor Vulkan BLAS layer [Vulkan]
+  kiln-vulkan-kernel/    Vulkan compute shaders for AMD/Intel GDN hot paths [Vulkan only]
+```
+
 ## Startup establishes the runtime contract
 
 Startup is the boundary where mutable inputs become immutable runtime policy:

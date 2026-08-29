@@ -296,29 +296,7 @@ Here is the embedded server dashboard running with healthy status, active adapte
 
 ## Memory Budget (24GB GPU)
 
-Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, so long-context inference costs a fraction of what a pure transformer would.
-
-| Scenario | Total VRAM | Fits 24GB? |
-|---|---|---|
-| 128K context, 1 sequence, inference only | ~13 GB | Yes |
-| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
-| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
-| 32K context, 8 sequences, inference + training | ~22 GB | Yes |
-| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
-
-### Apple Silicon (M3 Max / M4 Max 64GB unified memory)
-
-On Apple Silicon, model weights, KV cache, and training state all live in unified memory shared with the OS. A 64 GB chip leaves generous headroom for long contexts and concurrent training.
-
-| Scenario | Unified Memory | Fits 64GB? |
-|---|---|---|
-| 128K context, 1 sequence, inference only | ~13 GB | Yes |
-| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
-| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
-| 128K context, 8 sequences, inference + training | ~32 GB | Yes |
-| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
-
-16 GB M-series chips fit short-context inference; 32 GB fits 64K context comfortably; 64 GB+ matches or exceeds the 24 GB CUDA envelope.
+Qwen3.5-4B's hybrid KV architecture (only 8 of 32 layers cache) is what keeps 24 GB in reach; the per-scenario VRAM and Apple-Silicon unified-memory sizing tables (128K → ~13 GB, FP8 → ~19 GB) live in [BENCHMARKS.md](BENCHMARKS.md#memory-budget-24gb-gpu).
 
 ## API
 
@@ -421,23 +399,7 @@ sidecar. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
 ## Project Structure
 
-```
-crates/
-  kiln-core/             Core types: block manager, prefix cache, config, request lifecycle
-  kiln-model/            Model loading, forward pass, LoRA, sampling
-  kiln-scheduler/        Continuous batching scheduler with chunked prefill
-  kiln-server/           HTTP server, CLI, training queue, eval queue, metrics, config
-  kiln-train/            Bounded single-GPU LoRA loops for SFT, GRPO, and OPD
-  kiln-eval/             Suites, scorers, results, dataset → eval synthesis (pure CPU, no GPU dep)
-  kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
-  kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)
-  kiln-flash-attn/       Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI) [CUDA only]
-  kiln-gdn-kernel/       Vendored Gated DeltaNet chunkwise + recurrent kernels [CUDA only]
-  kiln-vulkan-kernel/    Vulkan compute shaders for AMD/Intel GDN hot paths [Vulkan only]
-  kiln-conv1d-kernel/    Vendored mamba-ssm causal_conv1d_update decode kernel [CUDA only]
-  kiln-rmsnorm-kernel/   Fused RMSNorm CUDA kernel (Liger-style) [CUDA only]
-  kiln-marlin-gemm/      Vendored IST-DASLab Marlin W4A16 GEMM kernel [CUDA only]
-```
+The 33-crate workspace roll-call (verified against root `Cargo.toml` members) is in [ARCHITECTURE.md](ARCHITECTURE.md#workspace-layout).
 
 ## Configuration
 
