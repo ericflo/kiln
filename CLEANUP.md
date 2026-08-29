@@ -14476,3 +14476,183 @@ The F185-2 verdict holds (SKILL.md :410 / LAYOUT.md :506 document
 `kiln rollout`, which fails as an unknown subcommand; the command is
 `kiln rollout-generate`), with the canonical cite corrected to
 `crates/kiln-server/src/cli.rs:626/:339`.
+
+## Cleanup Agent (round 186 — docs/contracts/ narrative-claims audit) — 2026-08-29
+
+**Scope.** Read-only audit of the narrative claim layer of all ten `.md`
+files under `docs/contracts/`, at HEAD `4d419b95b` (round 185c commit,
+clean tree): **ADAPTER_MANIFEST.md, backend-capability-report.md,
+backend-latency-result-schema.md, BASE_WEIGHT_PROVENANCE.md,
+CONFIGURATION.md, DATASET_SPLITS.md, EXECUTION_PROVENANCE.md,
+REPLAY_INTEGRITY.md, RUNTIME_ENVIRONMENT_INVENTORY.md,
+VLLM_TEACHER_IDENTITY.md**. Per brief: (1) extract every path, count, ID,
+version, limit/threshold, behavior description, and cross-reference;
+(2) cross-check against the `contracts/` JSON, `crates/*/src` code, and
+the relevant generator/check scripts; (3) resolve all relative Markdown
+links and anchors; (4) CONFIGURATION.md key/default tables are gate-pinned
+(`scripts/check_config_schema.py`), so the audit covers prose, counts,
+IDs, behavior claims, and cross-references. grep/sed/python3/test only —
+no cargo builds, no full test suites. Class vocabulary (round 159):
+CONSISTENT / STALE-CLAIM / DRIFTED / BROKEN-REF / OWNER-DECISION / RISK /
+UNRESOLVED. Findings are owner-queue evidence, not fixes; the only file
+modified is CLEANUP.md.
+
+### Per-file verdicts
+
+| doc | verdict |
+|---|---|
+| ADAPTER_MANIFEST.md | CONSISTENT |
+| backend-capability-report.md | 1 DRIFTED (F186-3) |
+| backend-latency-result-schema.md | CONSISTENT |
+| BASE_WEIGHT_PROVENANCE.md | CONSISTENT |
+| CONFIGURATION.md | 2 STALE-CLAIM (F186-1, F186-2) |
+| DATASET_SPLITS.md | CONSISTENT |
+| EXECUTION_PROVENANCE.md | CONSISTENT |
+| REPLAY_INTEGRITY.md | CONSISTENT |
+| RUNTIME_ENVIRONMENT_INVENTORY.md | CONSISTENT |
+| VLLM_TEACHER_IDENTITY.md | CONSISTENT |
+
+42/42 relative Markdown links across the ten docs resolve; the three
+anchor-bearing links (`../training/training-checkpoints.md#checkpoint-planning-identity`,
+`../policies/qualification.md#resumable-gdn-prefill-residency-telemetry`,
+`../policies/qualification.md#batched-recurrent-state-cache-telemetry`)
+resolve to real headings. Zero BROKEN-REF findings this round.
+
+### Verified-consistent evidence (selected)
+
+- **ADAPTER_MANIFEST.md** — `manifest_type "kiln_adapter_manifest"`
+  (adapter_output.rs:332); full documented field set incl. optional lineage
+  (adapter_output.rs:28-58); manifest written only when
+  `receipt.status == Success` AND `adapter_config.json` +
+  `adapter_model.safetensors` both exist (adapter_output.rs:274-283);
+  `training_data_hash`/`source`/`path` semantics match
+  `validate_adapter_output_dir` + receipt mapping.
+- **BASE_WEIGHT_PROVENANCE.md** — `kiln.base-weight-shards.v1` /
+  `kiln.base-model-content.v1` (model_provenance.rs:9-12); max 4096
+  shards, 255-byte filename limit, required `.safetensors` suffix
+  (loader.rs:28, loader.rs:940); `/health` + `/v1/health`
+  `base_weight_identity` fields (api/health.rs); aggregate hash recipe
+  (ASCII domain `kiln.base-model-content.v1` + NUL + LE u64 shard count +
+  records sorted by digest then size, each record size LE + digest)
+  matches the doc's step list exactly.
+- **DATASET_SPLITS.md** — defaults seed 0 / 80 / 10 and validation
+  `train>0`, `train+val<100` (data_identity.rs:16, :54);
+  `kiln_dataset_provenance` metadata key (training.rs:2438);
+  train-set-eval diagnostic scope + no `min_accuracy` claim matches
+  `training.rs` eval wiring; `corrections:active` virtual dataset name
+  present in `kiln-eval`.
+- **EXECUTION_PROVENANCE.md** — `kiln.execution-provenance.v1`
+  (execution_provenance.rs:10); `execution_provenance_valid` health check
+  (api/health.rs:1093); redaction keyword list (doc says "such as", lists
+  a subset of the code's AUTH/CREDENTIAL(C)/KEY/PASSWORD/PRIVATE/SECRET/
+  TOKEN segments); accelerator probes (nvidia-smi / rocminfo + rocm-smi /
+  vulkaninfo --summary / system_profiler / CPU host-runtime-only) and
+  `RUNTIME_COMMAND_TIMEOUT = Duration::from_secs(5)` (teacher_identity.rs
+  :24, :106).
+- **REPLAY_INTEGRITY.md** — hash input order (replay.rs:282-310: parent
+  replay_hash or empty → base id → revision → config_digest → one line per
+  request record, NUL-separated, raw hex digest, no `sha256:` prefix);
+  RequestRecord fields `request_id, kind, request_body, seed,
+  kiln_commit, submitted_at` (replay.rs:119-136); outcome records
+  excluded; cycle + parent-hash mismatch detection (replay.rs:333-335);
+  success message verbatim (bin/kiln-replay.rs:44); `show` read-only
+  semantics (bin/kiln-replay.rs).
+- **RUNTIME_ENVIRONMENT_INVENTORY.md** — narrative counts 448 read sites /
+  19 mutation sites / 38 literal KILN names (128 literal sites) and the
+  six-row classification table match
+  `contracts/runtime-env-direct-reads-v1.json` summary exactly (16
+  mutation entries → 19 sites); `check_runtime_env_contract.py --check`
+  confirms "448 reads, 19 process mutations".
+- **VLLM_TEACHER_IDENTITY.md** — provenance read cap `1..=16384` MiB/s
+  (model_fingerprint.py:27 `MAX_READ_MIB_PER_SECOND = 16_384`, used at
+  vllm_teacher.py:93); `1_000_000` max prompt-logprob candidates
+  (vllm_teacher.py:62); `MAX_TOP_K = 65_536`, `MAX_VOCAB_SIZE =
+  16_777_216`, `MAX_MODEL_LEN = 16_777_216` (vllm_teacher.py:59-61);
+  `MAX_ACCELERATOR_DEVICES = 256` (vllm_teacher.py:149); min vLLM
+  `0.20.1rc0` (vllm_teacher.py:52-53); identity field order
+  (vllm_teacher.py:97-112) matches the doc's normative list exactly;
+  input-manifest field order likewise; `TRITON_ATTN` sole reviewed
+  backend (vllm_teacher.py:240); `VLLM_ALLOW_RUNTIME_LORA_UPDATING=0` +
+  `PYTHONDONTWRITEBYTECODE=1` (vllm_teacher.py:3517-3518); snapshot
+  bounds 100k files / 100k dirs / depth 128 / 4096 path bytes
+  (vllm_teacher.py:69-73); runtime content bounds 250k files / 100k dirs /
+  64 GiB / depth 128 / 4096 path bytes (vllm_teacher.py:85-89); defaults
+  `~/.cache/kiln/teacher-snapshots` + `~/.cache/kiln/vllm-runtime-caches`
+  (vllm_teacher.py:735-739).
+- **backend-latency-result-schema.md** — fixture status table matches
+  `docs/contracts/backend-latency-fixtures.json` exactly (status
+  `fixture_required`; schema_version 1; required backends cuda/rocm/
+  metal/vulkan; cuda 1 locked RTX 4090 matmul, rocm 1 locked gfx1151
+  matmul, metal 2 pending Apple Silicon matmul+sdpa, vulkan 1 pending
+  Strix Halo decode, with the named artifacts); artifact v3 closed field
+  set (18 keys) matches `RESULT_ARTIFACT_KEYS`
+  (write_backend_latency_result_artifact.py:28-46); `KILN_LATENCY_METRIC
+  <name> <value> <unit>` line format (writer :23); fixture digest covers
+  id/backend/hardware/source/command + metric name/unit/comparison +
+  selected_cases only, thresholds/threshold_state/result_artifact
+  excluded (writer :247-267) — as documented.
+- **backend-capability-report.md (consistent rows)** — "4 of 4 public
+  runtime crates declare CUDA, ROCm, Metal, Vulkan features" (Cargo.toml
+  `[features]` of kiln-server, kiln-model, kiln-tensor, kiln-train all
+  list all four); `BackendRuntime` trait has exactly 3 methods
+  (backend/mod.rs); optimizer rank/dtype table matches `capability.rs:1342
+  -1368` (CPU Muon min 2 unbounded, F32; CUDA/ROCm Muon `2..=48`,
+  F32/BF16; Metal Muon `2..=32`, SGD unsupported; Vulkan Muon `2..=32`,
+  F32/BF16); gate/migration/support counts are generator-computed and
+  `generate_backend_capability_report.py --check` passes;
+  CONFIGURATION.md's own migration index has exactly 82 rows, matching its
+  "all 82 former public spellings" claim (:141).
+
+### Findings
+
+Severity: MED = live misleading claim about runtime/backend behavior; LOW
+= FYI/cosmetic. Gate-edit column: F186-3 and F186-4 require
+generator/checker/test edits to fix; F186-1/F186-2 are doc-only.
+
+| ID | title | doc cite (verified at HEAD) | canonical side (verified at HEAD) | class | sev | gate-edit | one-line owner action |
+|---|---|---|---|---|---|---|---|
+| F186-1 | CONFIGURATION.md coverage summary pins the pre-OpenEnv counts (16 sections / 112 fields / 107 env names) | CONFIGURATION.md:132 ("contains 16 top-level sections and 112 fixed leaf fields"), :134 ("Of the 112 fixed fields"), :136 ("107 implement the canonical mechanical environment name"), :140 ("The tables below cover all 112 fixed fields") | `contracts/kiln-config-v1.schema.json` top-level `properties` = 17 (server, accelerator, batching, model, paths, memory, training, openenv, logging, prefix_cache, speculative, streaming_prefill, adapters, teachers, eval, request_log, agent); `x-kiln-field-count: 117`; `x-kiln-canonical-environment-count: 112`; `x-kiln-config-file-only-count: 5`; `check_config_schema.py --self-test` → "117 canonical fields … 112 canonical environment overrides"; `crates/kiln-server/src/config.rs:135` `EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 117` | STALE-CLAIM | MED | no | Rewrite :132-:140 to 17 sections / 117 fixed fields / 112 canonical env names (the "5 are config-file-only" line at :138 already matches the new numbers) |
+| F186-2 | CONFIGURATION.md effective-configuration prose claims "all 112 fixed typed leaves" | CONFIGURATION.md:2118 ("It always contains all 112 fixed typed leaves, including materialized defaults for optional `[eval]` and `[agent]` sections") | `config.rs:135` `EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT = 117`; `config.rs:7915` `assert_eq!(effective.fixed_field_count, 117)` (same test asserts `fields.len() == 121` = 117 fixed + 4 dynamic) | STALE-CLAIM | MED | no | Change :2118 "112" → "117" |
+| F186-3 | backend-capability-report.md ROCm streaming-prefill row is stale (auto ≥ 2048, base/tape tiles 1024/1024); the generator hardcodes the table and a Rust contract test pins the stale values | backend-capability-report.md:86 (rocm row: `prompt tokens ≥ 2048` / base tile `1024` / tape `1024`); :80 narrative "policy constants extracted from source" (inaccurate for this table) | Runtime code: `capability.rs:1841` `ROCM_AUTO_MIN_PROMPT_TOKENS: usize = 256`; `capability.rs:1844` `ROCM_TILE_TOKENS: usize = 256`; the ROCm `for_backend` branch (capability.rs:1859-1870) returns both. Root cause: `generate_backend_capability_report.py:1038-1086` `streaming_prefill_backend_policy_report()` hardcodes `rocm: 2048/1024/1024` (used at :3744) — `--check` therefore proves self-consistency, not source-consistency. Stale values also committed in `docs/contracts/backend-capability-report.json` and pinned by `crates/kiln-model/tests/backend_capability_contract.rs:1251` (`assert_eq!(policies["rocm"]["base_tile_tokens"], 1_024)` on the report JSON). History: ROCm 256 constants present since the first commit (`9371035bf`, 2026-07-27); the report's own audit date (2026-07-30) postdates that, so the 2026-07-30 audit shipped the stale hardcoded row | DRIFTED | MED | yes (generator + Rust test) | Source the generator's streaming-prefill policy from `capability.rs` (or refresh the hardcoded row to 256/256/256), regenerate report .md/.json, and update `backend_capability_contract.rs:1251` to the live value |
+| F186-4 | Observability schema + HTTP contract checker pin `fixed_field_count: 118`; the runtime server emits 117 (out-of-scope surface, surfaced while verifying F186-1/F186-2) | `contracts/kiln-observability-v1.schema.json`:38 (config-response example `"fixed_field_count": 118`), :4172 (`"fixed_field_count": {"const": 118}`), :4188 (`"x-kiln-fixed-field-count": 118`); `scripts/generate_observability_schema.py:1565,1574` (both 118); `scripts/check_http_api_contract.py:1132,1135` (require const 118 / x-kiln 118) | `crates/kiln-server/src/config.rs:135` `EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 117`; `config.rs:7915` asserts 117; git history: `118` is present in the generator and committed schema from the first commit (`9371035bf`, 2026-07-27) where the code already said 112; `40a55da71` (2026-07-30, "Make OpenEnv training a native server workflow") moved the code 112 → 117 — so 118 never matched the runtime (112, then 117). The schema's `const: 118` would reject the live server's emitted payload; `generate_observability_schema.py --check` passes only because schema and generator agree with each other | DRIFTED | MED | yes (schema generator + checker) | Reconcile the canonical fixed-field count (regenerate the observability schema + HTTP check from the code's 117, or justify 118 in code), then align F186-1/F186-2 doc numbers to the same value |
+
+**Owner-queue delta: +4 (F186-1 MED, F186-2 MED, F186-3 MED,
+F186-4 MED).** Canonical queue anchor remains a47fca644 (52 items,
+B1–B6) + 9 from round 185 (61 cumulative) + 4 this round = **65
+cumulative owner-queue items**.
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | F186-3 (report generator `--check` + Rust contract test pin the stale ROCm row), F186-4 (observability schema generator + HTTP contract checker pin 118) |
+| no gate edit | F186-1, F186-2 (doc prose only) |
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119955490 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this ledger append; post-amend re-run confirms PASS) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" (confirms the F186-1/F186-2 canonical side) |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" (passes against its own 118 pin — see F186-4) |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" (schema and generator agree at 118; code emits 117 — see F186-4) |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — node:test run, 0 failures (exit 0) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 186 reply
+(single-commit pattern, post-commit gate re-run).
