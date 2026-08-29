@@ -19,6 +19,7 @@ const files = {
   desktopReadme: 'desktop/README.md',
   exampleConfig: 'kiln.example.toml',
   readme: 'README.md',
+  configDoc: 'docs/contracts/CONFIGURATION.md',
   quickstart: 'QUICKSTART.md',
   siteQuickstart: 'docs/site/quickstart.html',
   phase2Validation: 'scripts/phase2_validation_steps_1_2_3.sh',
@@ -119,9 +120,15 @@ for (const [label, path] of [
 }
 
 requireText(read(files.exampleConfig), `port = ${port}`, 'example config');
-requireText(read(files.readme), `| \`server.port\` | \`KILN_SERVER_PORT\` | ${port} |`, 'README config table');
+// The README's configuration section is a stub that points at the canonical
+// configuration reference (README split, round 162); the documented
+// server.port default and the runtime-defaults contract link are pinned in
+// that canonical home instead.
+requireText(read(files.readme), 'docs/contracts/CONFIGURATION.md', 'README configuration pointer');
+const configDoc = read(files.configDoc);
+requireText(configDoc, `| \`server.port\` | unsigned 16-bit integer; \`${port}\` | \`KILN_SERVER_PORT\``, 'configuration doc: server.port default');
+requireText(configDoc, '(../../contracts/runtime-defaults-v1.json)', 'configuration doc: runtime-defaults link');
 requireText(read(files.quickstart), `| \`server.port\` | \`KILN_SERVER_PORT\` | ${port} |`, 'Quickstart config table');
-requireText(read(files.readme), '(contracts/runtime-defaults-v1.json)', 'README runtime-defaults link');
 requireText(read(files.quickstart), '(contracts/runtime-defaults-v1.json)', 'Quickstart runtime-defaults link');
 requireText(read(files.siteQuickstart), `${bindHost}:${port}</code> by default`, 'site quickstart');
 requireText(read(files.desktopReadme), '(../contracts/runtime-defaults-v1.json)', 'desktop runtime-defaults link');
