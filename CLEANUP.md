@@ -10122,15 +10122,15 @@ lint spans are cited from the round-122 measurements and were NOT re-run
 confirmed to still exist verbatim. Line numbers drift only if the owner edits
 the affected files first — re-anchor at execution time.
 
-**Counts.** DECISION 16 · APPROVAL 11 · FYI 4 = **31 open items**. Dropped as
-resolved: **12** (RESOLVED appendix). Prioritized by net repo improvement per
-owner minute; D-1..D-4 and A-1 are the highest-ROI items.
+**Counts.** DECISION 15 · APPROVAL 11 · FYI 4 = **30 open items**. Dropped as
+resolved: **13** (RESOLVED appendix). Prioritized by net repo improvement per
+owner minute; D-1..D-4 and A-1 were the highest-ROI items (D-1 now
+resolved, rounds 162–164).
 
 ### DECISION — owner judgment required (options listed; ledger cites source round)
 
 | ID | Item (source) | Files:lines (re-verified 2026-08-28) | Options | Suggested approval phrasing |
 |---|---|---|---|---|
-| D-1 | README.md split per round-157 plan (R157) | README.md — 1751 lines (largest tracked markdown; budget exception cap 1770 in contracts/production-file-budget-v1.json) | Phase 1 (b-removals, 17 sections, net −888 → ~863) · phases 1–2 (−1297 → ~454) · all phases 1–3 (−1340 → ~411) · reject | "approve README split phase 1" (or phases 1–2 / all phases 1–3, per R157) |
 | D-2 | `max_seqlen_k` field family — 4 parallel struct families, rocm lane never reads (R122 #12; open since R113) | crates/kiln-model/src/forward/full_attention.rs:2165, :2224, :2661 (+ `kernel_max_seqlen_k` :2666) | (a) delete all 4 (net removal) · (b) keep for backend parity (add allow + rationale) | "approve deletion of the max_seqlen_k family" / "keep the family for parity" |
 | D-3 | 9 judgment-class lint keeps (R122 #1–#9) | kiln-core/src/tokenizer.rs:449/:602 (type_complexity), :785 (too_many_arguments); kiln-model/src/cuda_graph.rs:1477 (too_many_arguments); kiln-model/src/forward/tests/mod.rs:3159/:3192/:3885/:8530/:8547 (unnecessary_mut_passed ×5); kiln-train/src/trainer/grpo_step.rs:1003, trainer/forward_backward.rs:335-336 (unused_assignments ×3); kiln-train/src/opd_tape_shim.rs:508 + grpo_tape_shim.rs:1197 (private_in_public); kiln-server/tests/real_model_integration.rs:1463 (too_many_arguments), :1999/:2029/:2059 (await_holding_mutex ×3); kiln-tensor/src/cuda_storage.rs:2338 (items_after_test_module) | Per item: waive (record rationale) or redesign. R122 constraints: #5 dropping initializers breaks the vulkan lane (R118 evidence); #4 fix = `&mut cache` → `&` library signature change (API-level); #8 fix changes lock-holding concurrency semantics | "waive items 1, 2, 7, 9 with recorded rationale; order redesign of 3, 4, 5, 6, 8" (or any per-item split) |
 | D-4 | `cuda_opd_remote.rs` example — the one remaining cuda-lane compile error (R123 #13, replaces R122 #11) | crates/kiln-train/examples/cuda_opd_remote.rs:289-304 (`RemoteTeacherConfig` literal omits required `expected_identity`; requirement at remote_teacher.rs:149-153) | (a) implement the discovery handshake in the example (net addition) · (b) delete the example (net removal). R123: the campaign will not choose | "approve deletion of crates/kiln-train/examples/cuda_opd_remote.rs" / "approve implementing the identity handshake" |
@@ -10188,6 +10188,7 @@ owner minute; D-1..D-4 and A-1 are the highest-ROI items.
 | Orphan navigation docs VIGNETTES.md / TRAJECTORY_TURN_THROUGHPUT.md (R62 follow-up) | R151/R152 — docs/README.md index now links both (verified present) |
 | `qwen35_shapes` pub exposure (R83) | No owner gate remains: `pub mod qwen35_shapes` at crates/kiln-model/src/lib.rs:41 with `pub const` values since the crate's first commit (`9371035bf`); replacing bench-local literals is an optional refactor, not a decision |
 | kiln-blas Cargo.toml comment mirror (R147 half) | No longer in the tree: current kiln-blas/Cargo.toml comment (verified today) is accurate; only the README's two references remain open (D-8) |
+| README.md split per round-157 plan (R157) | R162–R164 — all three phases executed: 1751 → 479 lines (−1272); work commits `887e944ba` (phase 1, b-removals) / `7e9c2db0f` (phase 2, c-reconciles) / `76f6e7a70` (phase 3, a-moves + stale 14→33-crate list fix); gates green; D-1 RESOLVED |
 
 ### Supersession note
 
@@ -10559,3 +10560,134 @@ restored Python example is byte-identical to HEAD's (`diff` clean).
 - Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
 - Phase 3 (a-class moves per the round-157 plan) remains pending owner
   approval for execution scope.
+
+## Cleanup Agent (round 164) — 2026-08-28
+
+**EXECUTED — D-1 phase 3: the 2 (a)-class README.md moves (owner-approved per
+the round-157 plan; rounds 162–163 completed phases 1–2).** Work commit
+`76f6e7a70` (README.md, BENCHMARKS.md, ARCHITECTURE.md; no push). This
+completes the owner-approved README split: **D-1 is now RESOLVED** (decision
+row + RESOLVED appendix updated in the ledger commit).
+
+### What changed
+
+**3.1 Memory budget (24GB GPU) → BENCHMARKS.md.** The full 23-line body
+(intro, 5-row CUDA VRAM table, `### Apple Silicon (M3 Max / M4 Max 64GB
+unified memory)` subheading, 5-row unified-memory table, outro) was
+extracted programmatically with hard assertions on both section boundaries
+and moved **verbatim, byte-identical** (region diff against
+`git show HEAD:README.md` clean) into a new `## Memory budget (24GB GPU)`
+section in BENCHMARKS.md, placed immediately after
+`## Current measured service envelope` — whose closing sentence is
+"…matches or exceeds the 24 GB CUDA envelope.", the exact claim these tables
+quantify — and before `## Current serving acceptance protocol`. The README
+keeps the `## Memory Budget (24GB GPU)` heading with a one-line pointer →
+`BENCHMARKS.md#memory-budget-24gb-gpu` (slug verified).
+
+**3.2 Project Structure → ARCHITECTURE.md (stale list fixed).** The section's
+14-crate code block was checked against the live workspace first: root
+`Cargo.toml` has **33 members** — the README list was stale (14 crates). Per
+the task instruction, the accurate list was moved instead of the stale one:
+new `## Workspace layout` section in ARCHITECTURE.md after
+`## Package boundaries`, carrying the full 33-crate roll-call — exact set
+match with the manifest members (verified), descriptions abridged from each
+crate's own `Cargo.toml`, and the 14 original README rows retained
+**byte-identical** where present (verified). A one-line intro marks it as a
+point-in-time roll-call and links `#package-boundaries` for responsibility
+boundaries. The README keeps the `## Project Structure` heading with a
+one-line pointer → `ARCHITECTURE.md#workspace-layout` (slug verified).
+
+Every other README region is byte-identical to the round-163 tree (region
+diff of all non-target regions).
+
+### Per-section accounting
+
+| Step | Section | Before | After | Save | Plan save |
+|---|---|---|---|---|---|
+| 3.1 | Memory Budget (24GB GPU) + Apple Silicon | 26 | 4 | 22 | 26 (heading + pointer retained) |
+| 3.2 | Project Structure | 20 | 4 | 16 | 17 (stale list → accurate 33-crate list) |
+| | **Total (a-class)** | **46** | **8** | **38** | **43** |
+
+Landing sides: BENCHMARKS.md 811 → 837 (+26); ARCHITECTURE.md 795 → 836
+(+41). Sanity: 517 − 38 = 479 = `wc -l` of the new README.
+
+### FINAL split summary (D-1 complete, rounds 162–164)
+
+**README.md: 1751 → 479 lines (−1272; 72.6% reduction).**
+
+| Phase | Scope | README lines | Commit |
+|---|---|---|---|
+| 1 (b-removals, 17 sections) | stubs to canonical docs | 1751 → 893 (−858) | `887e944ba` |
+| 2 (c-reconciles, 3 sections) | claims landed, then trimmed | 893 → 517 (−376) | `7e9c2db0f` |
+| 3 (a-moves, 2 sections) | verbatim moves + stale fix | 517 → 479 (−38) | `76f6e7a70` |
+
+Deviation from the plan final (~411): +68 = phase 1 +30 (per-section stub
+variance) + phase 2 +33 (ECHO gate-forced retention, 31 lines vs ~10) +
+phase 3 +5 (pointers at one line, not two). Inside the round-157 tolerance
+window ("post ~470 expected; plan final ~411 ± 60 given phase 2 deviation").
+
+**Final home of every README-unique claim (all verified post):**
+
+| README-unique claim | Final home |
+|---|---|
+| Per-scenario VRAM tables (128K → ~13 GB … FP8 → ~19 GB) + Apple Silicon unified-memory tables | `BENCHMARKS.md` `## Memory budget (24GB GPU)` (verbatim, round 164) |
+| Crate inventory (fixed: 33 crates, not the stale 14) | `ARCHITECTURE.md` `## Workspace layout` (round 164) |
+| 24-bullet feature index | per-bullet canonical docs (NATIVE_SFT_PROFILE.md, ECHO_GUIDE.md, EVAL_GUIDE.md, SERVING_PROFILES.md, …) via round-162 stubs |
+| OpenEnv discovery/episode/collect/train/replay curl flows | `docs/guides/OPENENV_GUIDE.md` (+ OPENENV_REPLAY_REFERENCE.md) |
+| GRPO recorded-policy loop | `docs/guides/GRPO_GUIDE.md` (canonical `POST /v1/train/agentic` example stays README-pinned by the smoke gate) |
+| ECHO paper citation + TerminalBench-2.0 headline + implementation notes | `docs/guides/ECHO_GUIDE.md` `## Provenance and paper evidence` / `## Implementation notes` |
+| Remote vLLM teacher provenance / K=1 probe / identity | VLLM_TEACHER_IDENTITY doc (round-162 stub) |
+| Adapter publication, `.failed` quarantine, conflict semantics | ADAPTER_MANIFEST doc (round-162 stub) |
+| Chat adapter selection semantics | site api.html (round-162 stub) |
+| Docker pull/build + systemd | `QUICKSTART.md` Docker/systemd anchors |
+| Eval-loop curl flows + judgment flywheel | `docs/guides/EVAL_GUIDE.md` |
+| Pipeline diagram narrative | `ARCHITECTURE.md` (round-162 stub) |
+| OPD teacher JSONL + 25-step checkpoint claim | OPD_TEACHER_JSONL doc (round-162 stub) |
+| Performance timing fields | LATENCY_OBSERVABILITY doc (round-162 stub) |
+| ~55-row settings table + provenance / prefill-quantum / thinking-budget prose | `docs/contracts/CONFIGURATION.md` + `kiln.example.toml` + site `GET /v1/config` |
+| Desktop App install matrix / screenshots | `desktop/README.md` |
+| Security model narrative | `docs/audits/security-audit-v0.1.md` |
+| Phase 1–11 status narrative | `CHANGELOG.md` (stale v0.1.0 wording dropped) |
+| 4 install paths + training deep-dive (7 sub-claims) + pi setup + embedded agent runs | `QUICKSTART.md` quick paths + training docs + site api.html `id="embedded-agent-runs"` (round 163) |
+| Prompt logprobs scoring detail (4096/65,536 caps, final-logits-row, quarantine) | site api.html `/v1/completions` (round 163) |
+| Six-cast demo player + dashboard screenshot | retained (a-class, README-native) |
+| Why narrative + curl demo, nav preamble, Prior Art credits, License | retained (a-class, README-native) |
+
+### Gate verdicts (pre on the committed round-163 tree / post on the new tree)
+
+| Gate | Pre | Post |
+|---|---|---|
+| `wc -l README.md` | 517 | 479 (target ~470) |
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths) | PASS (4564 tracked paths) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 exceptions) | PASS (646 files, 5000-line default, 14 exceptions) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) | PASS (59 documents) |
+| `node --test scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) | PASS (rc=0) |
+
+Proof greps (post): the moved memory section is 23 lines byte-identical
+between the old README region and the new BENCHMARKS.md region (region diff
+clean); the 33-crate list is an exact set match with root `Cargo.toml`
+members; all 14 original crate rows are byte-identical inside the new block;
+all 51 unique relative links in the README resolve (code-fence-aware
+extraction; anchor slugs checked against destinations, incl.
+`BENCHMARKS.md#memory-budget-24gb-gpu` and `ARCHITECTURE.md#workspace-layout`);
+both new anchor headings exist at the stated positions;
+`docs/site/docs-manifest.json` is unchanged (59 documents — the root
+BENCHMARKS/ARCHITECTURE files are not published site docs; `docs/public/*`
+are separate short pages and were not touched).
+
+### Lessons / follow-ups
+
+- **Mirrored inventories drift.** The README crate list went stale the moment
+  the workspace grew (14 listed vs 33 live). Any doc that copies a
+  machine-owned inventory (workspace members, endpoints, env vars) will
+  drift; the durable fix is to point at the machine source — the new
+  `## Workspace layout` names root `Cargo.toml` as the live inventory.
+- **Paren headings slug without punctuation**: `## Memory budget (24GB GPU)`
+  → `#memory-budget-24gb-gpu`. Pointers were verified against the actual
+  slug, not guessed.
+- D-1 is fully executed across rounds 162–164; the round-157 plan is
+  complete in all three phases. The 1770-line budget exception in
+  `contracts/production-file-budget-v1.json` remains accurate (479 ≤ 1770) —
+  no contract edit needed.
+- Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
