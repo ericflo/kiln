@@ -15317,3 +15317,18 @@ Gate 1 re-run after the commit to confirm byte counts still pass (CLEANUP.md is 
 
 CLEANUP.md append only (no other file touched); committed to local `main`, no push. Commit hash reported in the round 191 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 191b — orchestrator note) — 2026-08-29
+
+**Bundle cross-reference: F191-1 joins bundle B1.** Round 191's
+F191-1 (ARCHITECTURE.md:422,430-431 stable-profile "Rejected"
+table/narrative vs `config.rs:844-854` stable policy
+`training_gpu_ownership: true` / `adapter_weight_transitions: true` /
+`writer_priority`) is the same "stable = inference-only" stale
+semantics as R173-1 (docs/site/index.html:295-297), F179-1
+(kiln.example.toml:22-26) and F179-2 (kiln.example.toml:285-288).
+Bundle B1 therefore holds **4 items** (R173-1, F179-1, F179-2,
+F191-1), all MED, all closed by one consistent rewording to the
+canonical stable semantics (`docs/serving/SERVING_PROFILES.md:42-51`
++ `docs/contracts/CONFIGURATION.md:179-187`). Cumulative owner-queue
+count unchanged: 74.
