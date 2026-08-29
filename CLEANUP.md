@@ -10936,3 +10936,138 @@ F-1..F-4 (gated); both R165 queue items; D-1 remains RESOLVED.
 
 `c7fd55eec` (CLEANUP.md only; no push); this hash line lands in the small
 follow-up commit per the round-154 precedent.
+
+## Cleanup Agent (round 167) — 2026-08-28
+
+**RESULT — post-split README cross-reference integrity verified: every root-
+README reference from the hand-written site pages is still accurate against
+the 479-line hub; zero class-(b) candidates; zero fixes. README hub read top
+to bottom: coherent, all 33 references and every anchor resolve. One stale
+demo-narrative claim (README-embed theme) added to the owner queue. This is a
+valid "nothing stale" round per protocol.**
+
+### Ground truth (verified this round)
+
+- README.md = 479 lines (post-split hub; 1751 → 479 across rounds 162–164).
+- `docs/site/` exact inventory: 9 hand-written pages (404.html, api.html,
+  architecture.html, cli.html, evals.html, grpo.html, index.html,
+  quickstart.html, troubleshooting.html) + demo/index.html (demo player page)
+  + launch/README.md + assets/, css/, fonts/, js/, docs-manifest.json,
+  robots.txt.
+- Build tooling README handling: `grep -i readme scripts/docs-site/build.mjs
+  lib.mjs render-social-preview.mjs` → no matches; `docs-manifest.json` has no
+  README.md entry — the site never rendered the root README, so no manifest
+  doc went stale. README-related tooling is the smoke gate only.
+- Smoke gate = README-content source of truth (pinned and passing):
+  `validateReadmeStartupBanner` (banner labels, Mode line),
+  `validateReadmeMedia` (dashboard screenshot path + alt terms, demo/asciicast
+  links), `validateReadmeColdReaderCoverage` (what-it-is, serving-profile
+  contract, install/run paths incl. the Path-2 server-binary block, GRPO loop
+  "killer feature" text, demo coverage, dashboard screenshot, required links
+  QUICKSTART/CHANGELOG/LICENSE), and `expectedProductFooterOrder` (pins the
+  footer "README" nav link itself).
+
+### Inventory — README references from hand-written pages (12 items: 8 footer
+nav links, 1 desktop-README link, 3 demo-narrative claims)
+
+| Page:line | Reference | Class | Disposition |
+|---|---|---|---|
+| api.html:1390, architecture.html:764, cli.html:1009, evals.html:722, grpo.html:646, quickstart.html:955, troubleshooting.html:1138, demo/index.html:740 | Footer nav `README` → `https://github.com/ericflo/kiln/blob/main/README.md` (no anchor) | (a) accurate | Keep: hub exists at that URL; no anchor to rot; link itself is gate-pinned (`expectedProductFooterOrder`). No "deep doc" prose claim surrounds it (footer is bare nav) |
+| troubleshooting.html:372 | `desktop/README.md#troubleshooting` | (a) accurate | Not the root README; `## Troubleshooting` at desktop/README.md:166 → anchor valid |
+| demo/README.md:69 (claim) | "the `Demo` link in the center-aligned link row points here" | (a) accurate | README hero L11 center-aligned link row contains `Demo` → `https://ericflo.github.io/kiln/demo/`, the published page sourced from docs/site/demo/ |
+| demo/SCRIPT.md:242 (claim) | "In `README.md` hero block, the existing `Demo` link in the center-aligned link row points to `docs/site/demo/` — no change needed" | (a) accurate | Same hero row; link targets the published demo whose source is this directory — statement still true post-split |
+| demo/SCRIPT.md:233 (claim) | "the embed in `README.md` sets `data-theme=\"solarized-dark\"`" | (c) owner narrative — stale | No asciicast embed exists in README.md: `grep -i 'asciinema\|data-theme\|\.cast' README.md` → 0 matches (rc=1). README now only links the demo site (See it in action; gate-pinned URLs). Not precision-fixable: it describes a removed mechanism, not a re-pointable reference → owner queue |
+
+**Zero class-(b) candidates.** `grep -i readme docs/site/*.html` yields exactly
+the 9 hits above — no page cites a README section, anchor, or "README covers X
+in detail" claim. The split's canonical destinations
+(docs/contracts/CONFIGURATION.md, BENCHMARKS.md#memory-budget-24gb-gpu,
+ARCHITECTURE.md#workspace-layout, …) are referenced directly from the hub
+itself, which is the only surface carrying the stubs. (demo/SCRIPTS.md:4's
+"overview in [README.md](README.md)" is a relative link to demo/README.md —
+demo-internal, resolves, out of root-README scope.)
+
+### Coherence read — README hub, 479 lines top to bottom
+
+Section sequence: Hero → center-aligned link row (16 links) → preamble
+(profiles/scope) → Why → Features → The OpenEnv Loop → The GRPO Loop (+ ECHO,
+OPD, vLLM teachers) → The Eval Loop → Quick Start (Paths 1–4, banner, SFT,
+training deep-dives, pi-setup, agent runs) → See it in action → Memory Budget
+(stub) → API (table + 4 subsections) → Architecture (stub) → Project
+Structure (stub) → Configuration (stub) → Security model → Desktop App →
+Deployment → Status → Prior Art → Contributing → License.
+
+- Reads as a coherent landing page: narrative arc (why → features → the
+  loops, GRPO self-labeled "killer feature") → Quick Start → proof
+  (demo/dashboard/screenshot) → reference cluster (the three stubs + API)
+  → operating tail. Stubs cluster after Quick Start; the task's expected
+  "preamble → Why → Features → … → License" shape holds, with the loops as
+  the intentional centerpiece between Features and Quick Start.
+- All 33 in-hub references verified: every named file exists (24 doc/script
+  targets); every anchor resolves — BENCHMARKS.md#current-measured-service-
+  envelope (L8), #memory-budget-24gb-gpu (L68 `## Memory budget (24GB GPU)`),
+  ARCHITECTURE.md#workspace-layout (L78),
+  docs/training/training-checkpoints.md#opd (L275 `### OPD`),
+  docs/guides/EVAL_GUIDE.md#mine-your-own-request-log (L519), QUICKSTART.md
+  anchors at L33/L41/L96/L283/L618/L1147/L1178 (all 7 cited anchors),
+  desktop/README.md#releases (L13), in-hub `#desktop-app` (## Desktop App),
+  and 4 site ids (api.html `training`/`embedded-agent-runs`/`prompt-logprobs`,
+  troubleshooting.html `start-with-three-probes` — exactly 1 `id=` hit each).
+- No stub-vs-neighbor contradictions: Features ECHO bullet (λ=0.05 default,
+  `--no-echo` opt-out) matches the ECHO section; preamble's "concurrency 1
+  through 8" envelope matches Status; "Six short asciicasts" matches the 6
+  .cast files in docs/site/demo/ and the 6 player links in demo/index.html;
+  Path 1–4 model-weight note matches the Desktop App section.
+- Only seam noted (not a break, not fixed — report per rules): hero link row
+  orders Benchmarks→Configuration→Changelog while the body surfaces
+  Benchmarks inside the Memory Budget stub and the API section between the
+  stubs — a curation difference, not a contradiction; all targets resolve.
+
+### Fixes applied
+
+**None.** All 12 inventory items are (a) still accurate or (c) owner
+narrative; zero class (b). No file edits besides this ledger entry. The split's
+mechanical completion for the site pages is a no-op: nothing points at
+removed README content.
+
+### Gate verdicts (no edits; single pass on the committed round-166 tree)
+
+| Gate | Verdict |
+|---|---|
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths, 119,625,184 bytes) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 exceptions) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) — README-content source of truth: startup banner, cold-reader groups (install/run paths, GRPO loop, demo/asciicast, dashboard screenshot), required links, and the footer README link all pinned and passing against the 479-line hub |
+
+`git status --porcelain`: empty before this entry; only CLEANUP.md after.
+
+### Owner-queue additions (canonical list updated)
+
+Standing (R159 consolidated, all re-verified by later rounds; untouched):
+**DECISION D-2..D-16 (15) · APPROVAL A-1..A-11 (11) · FYI F-1..F-4 (4) = 30
+open** (D-1 RESOLVED, rounds 162–164).
+
+R165 additions (2): kiln.example.toml:431 "§8.7 promotion" (known-open);
+docs/public/BENCHMARKS.md:25 v0.5.1-latest line.
+
+R166 additions (2): kiln.example.toml:411 "§10.6 self-improvement flywheel
+scheduler"; crates/kiln-server/src/ui/index.html 14 §N.M grand-plan refs.
+
+**R167 additions (1):**
+1. docs/site/demo/SCRIPT.md:233 — "the embed in `README.md` sets
+   `data-theme=\"solarized-dark\"`" is stale post-split: README.md contains no
+   asciicast embed (grep asciinema/data-theme/.cast → 0 matches) and links the
+   demo site instead. Owner decision: rewrite the "Theme and font" paragraph
+   to describe the demo-page player, or drop the README-specific sentence.
+   Agent-side edit declined per the report-only rule (narrative, not a
+   re-pointable reference).
+
+**Total open owner items: 35.** Not touched: all A-1..A-11, D-2..D-16,
+F-1..F-4 (gated); both R165 queue items; both R166 queue items; D-1 remains
+RESOLVED.
+
+### Commit
+
+`<work-commit-hash>` (CLEANUP.md only; no push); this hash line lands in the
+small follow-up commit per the round-154/166 precedent.
