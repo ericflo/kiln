@@ -11800,5 +11800,5 @@ chosen, the gate's `stripCodeFences` inline-code handling
 
 ### Commit
 
-(hash line lands in the small follow-up commit per the round-154/166/167/170
-precedent; no push.)
+- Trim + ledger commit: `167923f62` (hash line lands in the small follow-up
+  commit per the round-154/166/167/170 precedent; no push.)
