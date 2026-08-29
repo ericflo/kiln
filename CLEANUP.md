@@ -11515,3 +11515,290 @@ the docs-manifest README absence. Owner to choose (a) or (b) above.
 
 `0d029ff6a` (README 4 trims T1–T4 + this ledger entry; no push); this hash
 line lands in the small follow-up commit per the round-154/166/167 precedent.
+## Cleanup Agent (round 171) — 2026-08-28
+
+**Cross-claim audit round: every README Quick-Start / path claim pointing into
+QUICKSTART.md was verified against the destination's exact text (16 scope
+items: 14 ACCURATE, 2 precision-trimmed, README-side only). Read-only anchor
+census: all 29 cross-file fragment links in the in-scope corpus classified —
+28 resolve identically under real GitHub and the repo sluggers, exactly one
+(gate-only) is the R170-routed `README.md:204` anchor. The slug-divergent
+heading population is 61 "Class A" (space-flanked punctuation) + 22 "Class B"
+(inline code in headings), all verified empirically against the real
+`github-slugger` npm package; only one has any live link. README L200's
+anchor is OK-BOTH (not conflict class). All 17 standing gates green
+pre- and post-edit.**
+
+### Scope and method
+
+- Scope 1 (cross-claims): the round charter's 16 README claims (path labels
+  1–4, the `Qwen/Qwen3.5-4B` model line, the `kiln-v${KILN_VERSION}`
+  artifact-matrix sentence, the Path 2 bash banner, the `./Qwen3.5-4B`
+  directory expectation, the Docker mount `/models/Qwen3.5-4B`, the
+  `cargo build --release` feature list, the `kiln health` lines, the
+  `#quick-path-server-binary...` anchor) were checked against QUICKSTART.md's
+  exact current text and classified ACCURATE / TRIM (README-side,
+  destination-cited) / ROUTE. Every cited line was re-verified by direct
+  read of both files in the final tree.
+- Scope 2 (anchor census, read-only, no fixes): every cross-file Markdown
+  link with a `#anchor` in README.md, QUICKSTART.md, CHANGELOG.md,
+  BENCHMARKS.md, ARCHITECTURE.md, and the live docs/ corpus (`docs/README.md`
+  + 37 manifest `.md` sources, `docs/archive` excluded) was resolved under
+  (a) the real GitHub slugger and (b) the repo sluggers
+  (`slugifyHeading` in `scripts/docs-site/lib.mjs`; `githubHeadingSlug` in
+  `scripts/check_docs_site_smoke.mjs`). Both sides were verified empirically
+  against the real `github-slugger` npm package (scratch install; every
+  conflict heading and all 29 target headings reproduce exactly; the real
+  slugger's source was read: lowercase, strip a fixed Unicode
+  punctuation/symbol set, then one hyphen per ASCII space — no collapse).
+- Scope 3 (charter item 3): README L200's
+  `#quick-path-server-binary-terminal-first-no-source-build` verified
+  against the real package — OK-BOTH, not conflict class.
+- Gates: the full standing suite (14 repository-hygiene gates in CI order +
+  docs-site validate + build tests + static smoke) was run on the pre-edit
+  baseline and again on the final tree. All green (below).
+
+### Cross-claim table (README Quick Start → QUICKSTART.md, final tree)
+
+| # | README line | Claim (short) | QUICKSTART evidence (line-verified) | Verdict |
+|---|-------------|---------------|-------------------------------------|---------|
+| 1 | L190 | Path 1 label "Desktop App (recommended)" | L9 table row `**Desktop App (recommended)**`; section heading L33 | ACCURATE |
+| 2 | L190 | Desktop platforms "Windows, Linux, or macOS" | L9 "…first run on Windows, Linux, or **Apple Silicon** macOS"; L35 "installers for Windows, Linux, and macOS **on Apple Silicon**"; L20 "…Apple Silicon Mac with 16GB+ unified memory. **Intel Macs are not supported.**"; README's own L188 + L438 agree | **TRIM (T2)** |
+| 3 | L190 | "auto-downloads and verifies the matching prebuilt `kiln` binary on first launch" | L35 "on first launch it auto-downloads the matching prebuilt `kiln` server binary … verifies it against the published SHA-256" | ACCURATE |
+| 4 | L190 | "choosing or downloading `Qwen/Qwen3.5-4B`" | L9 + L39 "choose or download the Qwen3.5-4B model weights" | ACCURATE |
+| 5 | L190 | "No Rust toolchain, CUDA toolkit, or source build is required" | L35 bold sentence, identical | ACCURATE |
+| 6 | L192 | Path 2 label "Server binary (terminal-first, no source build)" | L41 heading `## Quick path: Server binary (terminal-first, no source build)` | ACCURATE |
+| 7 | L192 | "(run the `Qwen/Qwen3.5-4B` weights step **above** first)" | weights step is at QUICKSTART L142–148 (§2), i.e. **below** the L41 quick path; README's own weights step is L206–211, also **below** L192 | **TRIM (T1)** |
+| 8 | L192 | "Linux x86_64 + NVIDIA CUDA 12.4 is the compact path" | L45 `**Linux x86_64 + NVIDIA CUDA 12.4:**` | ACCURATE |
+| 9 | L194–198 | Path 2 bash banner (KILN_VERSION resolve + cuda124 artifact + extract) | L48–51 same three commands (only line-wrapping differs); URL uses `kiln-v${KILN_VERSION}` + `x86_64-unknown-linux-gnu-cuda124.tar.gz` | ACCURATE (cosmetic wrap only) |
+| 10 | L200 | "Full release artifact matrix (Linux ROCm, Linux Vulkan, macOS Metal, Windows CUDA, SHA-256 sidecar checks)" | L43 sidecar sentence; L54–61 rocm724 (L59); L65–71 vulkan; L76–82 metal (aarch64, L81); L85–90 windows cuda124 (L90) | ACCURATE |
+| 11 | L202 | Path 3: `ghcr.io/ericflo/kiln-server:latest`, NVIDIA Container Toolkit, `./Qwen3.5-4B` RO at `/models/Qwen3.5-4B` | L1149 toolkit; L1153/1155 image; L1156 `-v …:/models/Qwen3.5-4B:ro` | ACCURATE |
+| 12 | L204 | Path 4: `cargo build --release` with `cuda`, `rocm`, `vulkan`, `metal` | L96–140 section uses exactly these four `--features` values | ACCURATE (the link anchor itself is the R170 conflict — routed, not trimmed) |
+| 13 | L206–211 | weights step `hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B`; "Paths 2–4 share this step" | L142 heading, L146–148 identical two commands; L9/L39 table assigns the step to those paths | ACCURATE |
+| 14 | L213–228 | `kiln health` startup banner block | QUICKSTART L197–212 **byte-identical** (verified by diff) | ACCURATE |
+| 15 | L231 | "readable tree with model, scheduler, training, and GPU status, and exits non-zero" | L228 "tree-style status of the server, model, and GPU and exits non-zero if the server is unreachable or unhealthy"; `crates/kiln-server/src/cli.rs` L107 (model/adapter/scheduler/GPU memory/training) is a superset both documents draw from | ACCURATE |
+| 16 | L285 | "full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd" | L33 (desktop), L96 (source), L650 (§9.4 GRPO), L456 (§8 adapters), L1147 (Docker), L1178 (systemd) | ACCURATE |
+
+Observation, not trimmed (looser than destination, not provably false):
+README L188 says "CUDA 12+" where QUICKSTART L20 requires "CUDA 12.4+".
+Tightening would add a number (a claim addition, outside a removal-style
+trim); left as-is, noted for the owner.
+
+### Precision trims applied (2; README-side, destination-cited)
+
+**T1 — Path 2 weights-step direction word (L192):**
+```
+- … (run the `Qwen/Qwen3.5-4B` weights step above first):
++ … (run the `Qwen/Qwen3.5-4B` weights step first):
+```
+Proven: the weights step is *below* L192 in the README (L206, "Get the
+model weights") and *below* the referenced section in the destination
+(QUICKSTART L41 quick path → L142 "## 2. Download Model Weights"). "above"
+is directionally wrong in both documents; the only "weights" mention above
+L192 is the L188 disk-size line, which is not a step. Removal-only.
+
+**T2 — Path 1 platform scope (L190):**
+```
+- Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS.
++ Install [Kiln Desktop](#desktop-app) on Windows, Linux, or Apple Silicon macOS.
+```
+Proven: QUICKSTART L9 "…first run on Windows, Linux, or Apple Silicon
+macOS", L35 "installers for Windows, Linux, and macOS on Apple Silicon",
+L20 "Intel Macs are not supported"; the README's own L188 ("Apple Silicon
+Mac") and L438 ("M-series hardware (Intel Macs are not supported)") agree.
+Bare "or macOS" over-claims Intel Macs, which every other statement in both
+documents excludes. The fix inserts the destination's own qualifier.
+
+Neither line is pinned by any gate: grep of `scripts/check_docs_site_smoke.mjs`
+for both phrases = 0 hits; the Path 2 required-terms list keeps
+`Qwen/Qwen3.5-4B` intact; the Path 1 label "Desktop App (recommended)" is
+untouched. Confirmed by both gate runs.
+
+### Anchor census (read-only; no fixes, per charter)
+
+**In-scope corpus:** 5 root files + `docs/README.md` + 37 live docs/
+corpus files (manifest `.md` sources; `docs/archive` excluded). A whole-repo
+sweep confirmed no additional in-scope sources; out-of-scope hits
+(`CLEANUP.md` ledger citations, `.qualification/*/demo` fixtures,
+`docs/audits/` line-anchor links, `docs/archive/`) were noted and excluded.
+
+**Cross-file fragment links: 29 total — 28 OK-BOTH, 1 GATE-ONLY.**
+
+| Source:line | Target | Real GitHub | Repo/gate | Status |
+|-------------|--------|-------------|-----------|--------|
+| README.md:42 | `BENCHMARKS.md#current-measured-service-envelope` | ✓ | ✓ | OK-BOTH |
+| README.md:97 | `docs/guides/EVAL_GUIDE.md#mine-your-own-request-log` | ✓ | ✓ | OK-BOTH |
+| README.md:165 | `docs/training/training-checkpoints.md#opd` | ✓ | ✓ | OK-BOTH |
+| README.md:190 | `QUICKSTART.md#quick-path-desktop-app-recommended-for-most-users` | ✓ | ✓ | OK-BOTH |
+| README.md:200 | `QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build` | ✓ | ✓ | OK-BOTH (charter item 3) |
+| README.md:202 | `QUICKSTART.md#running-with-docker` | ✓ | ✓ | OK-BOTH |
+| README.md:204 | `QUICKSTART.md#1-optional-source-cli-branch-build-kiln` | ✗ (true anchor `…source--cli…`) | ✓ | **GATE-ONLY — dead on GitHub (R170-routed)** |
+| README.md:269 | `QUICKSTART.md#optional-point-pi-at-kiln` | ✓ | ✓ | OK-BOTH |
+| README.md:285 | `QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts` | ✓ | ✓ | OK-BOTH |
+| README.md:299 | `BENCHMARKS.md#memory-budget-24gb-gpu` | ✓ | ✓ | OK-BOTH |
+| README.md:402 | `ARCHITECTURE.md#workspace-layout` | ✓ | ✓ | OK-BOTH |
+| README.md:442 | `desktop/README.md#releases` | ✓ | ✓ | OK-BOTH |
+| README.md:449 | `QUICKSTART.md#running-with-docker` | ✓ | ✓ | OK-BOTH |
+| README.md:450 | `QUICKSTART.md#running-with-systemd` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:37 | `README.md#desktop-app` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:217 | `README.md#security-model` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:321 | `docs/training/training-checkpoints.md#opd` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:339 | `docs/serving/SERVING_PROFILES.md#move-between-profiles` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:424 | `docs/training/training-checkpoints.md#api-cli-and-browser-workflow` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:674 | `docs/guides/GRPO_GUIDE.md#recommended-recorded-policy-workflow` | ✓ | ✓ | OK-BOTH |
+| QUICKSTART.md:701 | `docs/guides/GRPO_GUIDE.md#tuning-knobs` | ✓ | ✓ | OK-BOTH |
+| CHANGELOG.md:1725 | `SECURITY.md#supply-chain-provenance` | ✓ | ✓ | OK-BOTH |
+| docs/contracts/CONFIGURATION.md:2112 | `docs/policies/qualification.md#resumable-gdn-prefill-residency-telemetry` | ✓ | ✓ | OK-BOTH |
+| docs/contracts/CONFIGURATION.md:2113 | `docs/policies/qualification.md#batched-recurrent-state-cache-telemetry` | ✓ | ✓ | OK-BOTH |
+| docs/guides/OPENENV_GUIDE.md:62 | `docs/training/OPENENV_REPLAY_REFERENCE.md#training-admission` | ✓ | ✓ | OK-BOTH |
+| docs/guides/OPENENV_GUIDE.md:69 | `docs/training/OPENENV_REPLAY_REFERENCE.md#authentication-boundary` | ✓ | ✓ | OK-BOTH |
+| docs/guides/OPENENV_GUIDE.md:141 | `docs/training/OPENENV_REPLAY_REFERENCE.md#training-admission` | ✓ | ✓ | OK-BOTH |
+| docs/guides/OPENENV_GUIDE.md:246 | `docs/training/OPENENV_REPLAY_REFERENCE.md#troubleshooting` | ✓ | ✓ | OK-BOTH |
+| docs/guides/SUBSTRATE_QUICKSTART.md:17 | `ARCHITECTURE.md#package-boundaries` | ✓ | ✓ | OK-BOTH |
+
+**Class A — space-flanked punctuation (em-dash, ` / `, ` + `): 61 headings,
+4 files.** Real GitHub emits one hyphen per space after stripping the
+punctuation (double hyphen); repo sluggers collapse whitespace (single
+hyphen). Every line below verified against the real `github-slugger`:
+
+| File | Count | Lines |
+|------|-------|-------|
+| CHANGELOG.md | 49 (38 em-dash, 11 slash/plus) | 3, 127, 150, 560, 589, 665, 707, 734, 749, 770, 796, 818, 857, 908, 937, 1107, 1220, 1269, 1534, 1564, 1640, 1648, 1653, 1658, 1669, 1711, 1722, 1728, 1731, 1750, 1772, 1779, 1789, 1792, 1802, 1808, 1812, 1842, 1848, 1855, 1864, 1885, 1905, 1920, 1934, 1973, 2029, 2032, 2035 |
+| docs/public/CHANGELOG.md | 6 (all em-dash) | 7, 27, 43, 59, 70, 82 |
+| BENCHMARKS.md | 4 | 80, 457, 681, 800 |
+| QUICKSTART.md | 2 | 96, 481 |
+
+Slug-form pairs (repo/gate → real GitHub), all real-package-verified:
+
+- CHANGELOG L3 `kiln-v0.5.2 — 2026-08-01 — first-class OpenEnv RL and fast stable serving`:
+  `kiln-v052-2026-08-01-first-class-openenv-rl-and-fast-stable-serving` → `kiln-v052--2026-08-01--first-class-openenv-rl-and-fast-stable-serving`
+- CHANGELOG L818 `Unreleased — perf-regression CI ladder for SFT/GRPO/OPD (#1077)`:
+  `unreleased-perf-regression-ci-ladder-for-sftgrpoopd-1077` → `unreleased--perf-regression-ci-ladder-for-sftgrpoopd-1077`
+- CHANGELOG L1728 `Reproducibility / release`:
+  `reproducibility-release` → `reproducibility--release`
+- BENCHMARKS L80 `Apple Silicon (M3 Max / M4 Max 64GB unified memory)`:
+  `apple-silicon-m3-max-m4-max-64gb-unified-memory` → `apple-silicon-m3-max--m4-max-64gb-unified-memory`
+- BENCHMARKS L681 `kiln steady-state — refresh pending`:
+  `kiln-steady-state-refresh-pending` → `kiln-steady-state--refresh-pending`
+- QUICKSTART L96 `1. Optional Source / CLI Branch: Build Kiln`:
+  `1-optional-source-cli-branch-build-kiln` → `1-optional-source--cli-branch-build-kiln`
+- QUICKSTART L481 `9.1 Tool / Function Calling`:
+  `91-tool-function-calling` → `91-tool--function-calling`
+
+**Class B — inline code inside headings: 22 headings, 5 files.** The smoke
+gate's heading extractor strips inline-code spans *including their text*;
+real GitHub (and the site builder) keep the code text. 0 live references
+(cross-file or same-file) today — latent. Real-package-verified:
+
+| File | Line | Heading | Gate slug | Real GitHub slug |
+|------|------|---------|-----------|------------------|
+| docs/contracts/CONFIGURATION.md | 147 | `` `[server]` `` | (empty → deduped `section`) | `server` |
+| docs/contracts/CONFIGURATION.md | 202 | `` `[accelerator]` `` | (empty → deduped `section-N`) | `accelerator` |
+| docs/contracts/CONFIGURATION.md | 893 | `` `[batching]` `` | (empty → deduped `section-N`) | `batching` |
+| docs/contracts/CONFIGURATION.md | 913 | `Backend-owned `auto` policy` | `backend-owned-policy` | `backend-owned-auto-policy` |
+| docs/contracts/CONFIGURATION.md | 1025 | `` `[model]` `` | (empty → deduped `section-N`) | `model` |
+| docs/contracts/CONFIGURATION.md | 1040 | `` `[paths]` `` | (empty → deduped `section-N`) | `paths` |
+| docs/contracts/CONFIGURATION.md | 1058 | `` `[memory]` `` | (empty → deduped `section-N`) | `memory` |
+| docs/contracts/CONFIGURATION.md | 1174 | `` `[training]` `` | (empty → deduped `section-N`) | `training` |
+| docs/contracts/CONFIGURATION.md | 1632 | `` `[openenv]` `` | (empty → deduped `section-N`) | `openenv` |
+| docs/contracts/CONFIGURATION.md | 1680 | `` `[logging]` `` | (empty → deduped `section-N`) | `logging` |
+| docs/contracts/CONFIGURATION.md | 1692 | `` `[prefix_cache]` `` | (empty → deduped `section-N`) | `prefix_cache` |
+| docs/contracts/CONFIGURATION.md | 1732 | `` `[speculative]` `` | (empty → deduped `section-N`) | `speculative` |
+| docs/contracts/CONFIGURATION.md | 1766 | `` `[streaming_prefill]` `` | (empty → deduped `section-N`) | `streaming_prefill` |
+| docs/contracts/CONFIGURATION.md | 1920 | `` `[adapters]` `` | (empty → deduped `section-N`) | `adapters` |
+| docs/contracts/CONFIGURATION.md | 1933 | `` `[teachers]` `` | (empty → deduped `section-N`) | `teachers` |
+| docs/contracts/CONFIGURATION.md | 1965 | `` `[eval]` `` | (empty → deduped `section-N`) | `eval` |
+| docs/contracts/CONFIGURATION.md | 1981 | `` `[request_log]` `` | (empty → deduped `section-N`) | `request_log` |
+| docs/contracts/CONFIGURATION.md | 2000 | `` `[agent]` `` | (empty → deduped `section-N`) | `agent` |
+| BENCHMARKS.md | 690 | `Historical: llama.cpp head-to-head on RTX 6000 Ada (kiln `f3d5089`)` | `historical-llamacpp-head-to-head-on-rtx-6000-ada-kiln` | `historical-llamacpp-head-to-head-on-rtx-6000-ada-kiln-f3d5089` |
+| docs/contracts/REPLAY_INTEGRITY.md | 59 | `Exactly what `replay_hash` covers` | `exactly-what-covers` | `exactly-what-replay_hash-covers` |
+| docs/contracts/RUNTIME_ENVIRONMENT_INVENTORY.md | 83 | `Literal `KILN_*` catalog` | `literal-catalog` | `literal-kiln_-catalog` |
+| docs/training/OPD_TEACHER_JSONL.md | 154 | `` `teacher_tokens` fields `` | `fields` | `teacher_tokens-fields` |
+
+(The 17 bare `[word]` CONFIGURATION.md section headings all collapse to an
+empty base on the gate side and are deduped to `section`, `section-1`, …;
+on real GitHub each keeps its own distinct name. The docs site itself is
+unaffected either way: `lib.mjs` builds heading IDs from markdown-it tokens
+and keeps inline-code text, matching GitHub.)
+
+**Charter item 3 — README L200 anchor:** target heading `## Quick path:
+Server binary (terminal-first, no source build)` (QUICKSTART L41). Verified
+with the real `github-slugger`: real-GitHub slug =
+`quick-path-server-binary-terminal-first-no-source-build` = repo slug
+(colons/parens there are not space-flanked; no inline code). **Not conflict
+class — OK-BOTH; no action.**
+
+**Blast radius of the 83 divergent headings:** exactly **one** live link
+hits any of them — `README.md:204 → QUICKSTART.md#1-optional-source-cli-branch-build-kiln`
+(repo-form; resolves in gate + site, dead on real GitHub; the R170-routed
+item). The L96 heading is additionally pinned by exact text at
+`scripts/check_docs_site_smoke.mjs:2228`
+(`extractMarkdownSection(quickstart, '1. Optional Source / CLI Branch: Build Kiln')`),
+and quoted in the R170 ledger (`CLEANUP.md:11434` — ledger citation, not a
+doc link). No same-file link targets any Class A/B heading. Consequence for
+the owner's R170 choice: option (b) (rename the heading) would also break
+the `:2228` exact-text pin; option (a) (align both repo sluggers to
+GitHub's no-collapse behavior) leaves both pins untouched but changes the
+resolved anchor set of all 61 Class A headings gate- and site-wide, and
+option (a) does not by itself fix Class B (the gate's code-span stripping
+is a separate behavior).
+
+**Empirical slugger verification (scratch npm install of `github-slugger`;
+package source read):** `slug(value)` = lowercase → strip a fixed Unicode
+punctuation/symbol set → `.replace(/ /g, '-')` (one hyphen per ASCII space,
+no collapse). Reproduced: `"a / b"` → `a--b`; em-dash `—` → `--`;
+`(#1077)` → `-1077`; curly quotes stripped; `é` and `α` preserved; inline
+code text preserved (`replay_hash`, `f3d5089`, `KILN_*`). Every conflict
+heading and all 29 link targets above reproduced exactly. The R170
+conclusion (two mutually exclusive anchor forms for the L96 heading) is
+re-confirmed.
+
+### Gate verdicts (17/17 green on the pre-edit baseline AND the final tree)
+
+| Gate | Verdict (pre-edit → post-edit) |
+|---|---|
+| 01 `python3 scripts/check_repository_artifacts.py` | PASS → PASS |
+| 02 `python3 scripts/check_production_file_budget.py` | PASS → PASS |
+| 03 `python3 scripts/check_runtime_env_contract.py --check` | PASS → PASS |
+| 04 `python3 scripts/check_source_parsing_tests.py` | PASS → PASS |
+| 05 `python3 scripts/check_config_schema.py --self-test` | PASS → PASS |
+| 06 `python3 scripts/check_openenv_contract.py --self-test` | PASS → PASS |
+| 07 `python3 scripts/check_http_api_contract.py --self-test` | PASS → PASS |
+| 08 `python3 scripts/generate_observability_schema.py --check` | PASS → PASS |
+| 09 `python3 scripts/generate_artifact_schema.py --check` | PASS → PASS |
+| 10 `python3 scripts/generate_eval_schema.py --check` | PASS → PASS |
+| 11 `python3 scripts/generate_control_plane_schema.py --check` | PASS → PASS |
+| 12 `node scripts/check_thinking_budget_contract.mjs` | PASS → PASS |
+| 13 `node scripts/check_runtime_defaults.mjs` | PASS → PASS |
+| 14 `python3 scripts/check_release_versions.py` | PASS → PASS |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) → PASS |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail → 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0; all 8 README validators) → PASS |
+
+T1/T2 break no pin (grep of `scripts/check_docs_site_smoke.mjs` for both
+phrases: 0 hits; Path 2 required-terms list keeps `Qwen/Qwen3.5-4B` intact;
+Path 1 label untouched) — confirmed by both green runs.
+
+### Owner-queue notes
+
+**R170 (1) — anchor/slugger mismatch: evidence extended, decision unchanged.**
+This round supplies the blast-radius cost data for the (a)/(b) choice:
+(b) renaming `QUICKSTART.md:96` additionally breaks the exact-text pin at
+`scripts/check_docs_site_smoke.mjs:2228`; (a) changing both repo sluggers
+to GitHub's no-collapse behavior touches the resolved anchors of all 61
+Class A headings (gate + site must change together) and leaves the Class B
+code-span behavior untouched. The single live conflict remains
+`README.md:204`. No new owner item opened this round.
+
+**New note (informational, not a new owner item):** Class B (22
+inline-code headings) is a second, latent slugger divergence — the gate
+drops code text, GitHub keeps it; 0 live references today. If (a) is
+chosen, the gate's `stripCodeFences` inline-code handling
+(`scripts/check_docs_site_smoke.mjs`) should be reviewed at the same time.
+
+**Total open owner items: 37** (unchanged from R170; nothing newly routed).
+
+### Commit
+
+(hash line lands in the small follow-up commit per the round-154/166/167/170
+precedent; no push.)
