@@ -14068,3 +14068,89 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 182 reply
 (single-commit pattern, post-commit gate re-run).
+
+
+## Cleanup Agent (round 183 — full-claims audit of docs/guides) — 2026-08-29
+
+**Scope.** Read-only full claims audit of **all 6 `.md` files** under
+`docs/guides/` (`ECHO_GUIDE`, `EVAL_GUIDE`, `GRPO_GUIDE`, `OPENENV_GUIDE`,
+`SUBSTRATE_QUICKSTART`, `VIGNETTES`), ~2,150 lines, at HEAD `92ae4770d`
+(round 182 commit, clean tree). Every procedural claim (commands, env vars,
+config keys, CLI flags, file paths, versions, counts, error codes, schema
+IDs, numeric limits, default values) was cross-checked against canonical
+sources: `crates/*/src` (grep/sed/awk only),
+`contracts/kiln-http-api-v1.openapi.json`, `docs/contracts/*.md`, and
+`test -e` for every path-like reference. `VIGNETTES.md`'s benchmark
+transcripts, narrative user stories, and sample request payloads were
+classified SAMPLE-OUTPUT per brief; its concrete wiring claims (10 HTTP
+routes, 5 CLI subcommands + flags, 3 repo paths, loss/threshold values)
+were verified live. Light tools only — no cargo, no test suites beyond the
+standing gates. 128 discrete procedural claims audited (per-file tallies
+below). Findings are owner-queue evidence, not fixes; the only file
+modified is CLEANUP.md.
+
+### Per-file verdict table
+
+| File | Claims audited | Verdict |
+|---|---|---|
+| docs/guides/ECHO_GUIDE.md | 11 | **1 STALE-CLAIM** (F183-1) — otherwise CONSISTENT: `λ_echo` 0.05 default, `env_mask_mode` default `env_only`, `warning_filter` default `true`, `trajectory_mask.rs` builds `(input_ids, action_mask, env_mask)` (`MaskedRollout`, trajectory_mask.rs:77-82), CPU contract tests, paper headline Qwen3-8B 2.70%→5.17% + Qwen3-14B 5.17%→10.79%, authors (Shrivastava, Awadallah, Papailiopoulos), MSR AI Frontiers 2026 all verified |
+| docs/guides/EVAL_GUIDE.md | 21 | **1 STALE-CLAIM** (F183-2) — otherwise CONSISTENT: k/n 1..=128, `score >= 0.5` pass threshold, Jaccard 0.6 / line_coverage 0.7, `python3 -I -S`, 6 synthesis strategies, 18 HTTP routes, `request_log`, `paired_wilson_v1`, `holdout_n = min(20, rows/5)`, seed resolution, compare ≤8 adapters, `--adapter ""`, replay flags, `smoke.json` schema v2, `--dedupe` off, `kiln-eval` binary subcommands all verified |
+| docs/guides/GRPO_GUIDE.md | 21 | CONSISTENT — serving profiles, `kiln rollout-generate` flags, scorer I/O contract, `kiln train grpo` flags, `kiln.rollout-provenance.v1`, `adapter_revision_conflict`, `grpo_groups`→train split, held-out overlap rejection, Vulkan KL fallback, GPU writer scope, checkpoint naming, `/v1/train/jobs/{job_id}` + `/v1/adapters/{name}/receipt`, `KILN_MODEL_PATH`; defaults `auto_load=true`, `kl_coeff=0.1`, `clip_epsilon=0.2`, `dynamic_sampling=true`, `lora_rank=16`, `lora_alpha=32`, `detect_anomaly=false`, `shared_prefix_reference=true`, `kl_estimator=K1`, `KlReferencePolicy::BasePerStep`, `IsLevel::Token` all exact-match `crates/kiln-train/src/lib.rs` |
+| docs/guides/OPENENV_GUIDE.md | 30 | CONSISTENT — all 11 CLI subcommands + rollout/train flags + defaults (`--groups 8`, `--group-size 4`, `--seed-start 0`, `--max-steps 8`, `--concurrency 4`, `--max-action-tokens 256`, `--temperature 1.0`, `--protocol-error-reward -1.0`, `--max-recoverable-errors 3`, `--capacity-wait-seconds 300`, `--thinking true`, `--reset-options`/`--environment-reset-options` mutual exclusion, `-` empty slot, `--credential-env`, `--output-adapter`, `--lora-rank`, `--auto-load`); `POST /v1/openenv/runs` + GET + `POST /v1/openenv/training/preflight`; `kiln.openenv-training-contract.v1` (openenv_cli.rs:74), `kiln.openenv-rollout-summary.v5` (:2667), `kiln.openenv-run.v5` (api/openenv.rs:59); 512 MiB retained budget (openenv_cli.rs:63), 256 MiB artifact cap (openenv_replay.rs:30); 20-group gate (openenv_evaluation.rs:28); sign-test + `min_mean_return`/`min_mean_improvement`; eight text-first math families (OPENENV_REPLAY_REFERENCE.md:539-540); `/health`-first inspection order, `WS /ws`, reward `null=0/false=0/true=1`, reset reward excluded from return, Kiln overwrites caller seed, round-robin per group, groups ≥ environments, Ping/Pong + read-only `state` keep-alive, `CHAT_TIMEOUT=180s` |
+| docs/guides/SUBSTRATE_QUICKSTART.md | 25 | CONSISTENT — all 9 referenced files exist (tensor.rs, dtype.rs, element.rs, device_op.rs, ops/mod.rs, tests/docs_quickstart.rs, backend-capability-report.md, cargo-bounded.sh, run.py); doc code snippet exact-matches `tests/docs_quickstart.rs`; error strings "has 4 elements but slice has 3" (tensor.rs:201), "no implicit cast" (tensor.rs:1167); API `from_slice`, `from_vec_on` (:359), `zeros_on` (:290), `narrow` (:574), `transpose` (:601), `reshape` (:627), `contiguous` (:748), `to_device` (:1085/:1119), `ops::matmul` (ops/matmul.rs:359), `ops::cast` (ops/cast.rs:279), `profile::contiguous_copy_count()` (:173), `profile::device_op_host_fallback_counts()` (:126); `Device` enum Cpu/Cuda/Metal/Vulkan/Rocm (device.rs:27-40); DeviceOp1/2/3 + cpu_fwd + dispatch2/3; views share `Arc` storage + version, derived Clone preserves ID; dtype table f32/bf16/f16/u32/u8/i64 (element.rs:38-147); `contiguous()` counter increments only on materializing copy (tensor.rs:748-753) |
+| docs/guides/VIGNETTES.md | 20 | CONSISTENT (concrete claims) + SAMPLE-OUTPUT (narrative/payloads) — all 3 repo paths exist (grand-plan doc, `scripts/vllm_teacher.py`, `scripts/opd_phase0_pod_validation.sh`); all 10 HTTP routes live in OpenAPI (`/v1/teachers`, `/v1/recipes/run`, `/v1/agent/judge_distill`, `/v1/agent/self_improve`, `/v1/agent/judge_drift_check`, `/v1/distill/pump`, `/v1/adapters/distill_merge`, `/v1/agent/traces`, `/v1/library/publish/{name}`, `/v1/adapters/{name}/receipt`); all 5 CLI subcommands + flags live (`kiln serve`, `pi-setup --kiln-url`, `judge distill --teacher/--name`, `self-improve --agent/--judge`, `judge drift-check --judge/--teacher`, cli.rs:715/:734/:775-800); drift-check 80% threshold matches cli.rs:789-790; `teacher_top_k` K=16/K=32 matches pit_of_success.rs:537/:557; `run_distill_merge`, `build_multi_tenant_merge_teacher`, `LengthInflationGuardrail`, `frontier-pump` all live; roadmap/aspirational elements explicitly caveated by the doc itself |
+
+### Findings
+
+Class vocabulary (round 159): STALE-CLAIM, BROKEN-REF, OWNER-DECISION, RISK,
+UNRESOLVED (claim about an external source not pinned in this repository).
+Severity: MED = live misleading claim; LOW = FYI/external.
+
+| ID | Title | Doc cite (verified at HEAD) | Canonical side (verified at HEAD) | Class | Sev | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| F183-1 | ECHO: "the GRPO JSONL path drives this through `tokenize_grpo_group` in `grpo_jsonl.rs`" — the function is defined elsewhere and the live JSONL path calls the `_timed` variant | `docs/guides/ECHO_GUIDE.md:96-98` (verbatim) | `tokenize_grpo_group` is defined in `crates/kiln-train/src/trainer/grpo_step.rs:1741` (not `grpo_jsonl.rs`, which defines 0 such fns); the live JSONL path calls `tokenize_grpo_group_timed` (`grpo_step.rs:1796`) from `grpo_jsonl.rs:501/:1208/:2203` | STALE-CLAIM | LOW | no | Fix the cite to `grpo_step.rs` + `tokenize_grpo_group_timed` (or reword to "the `tokenize_grpo_group*` helpers in `grpo_step.rs`") |
+| F183-2 | EVAL: "Its 24 hand-authored examples" — the suite actually has 23 | `docs/guides/EVAL_GUIDE.md:651` (verbatim) | `qwen3_agentic_core()` (`crates/kiln-eval/src/builtin.rs:62-296`) contains exactly **23** `ex_*` constructors across 15 sections (`grep -cE "ex_[a-z_0-9]+\("` = 23). Note the code's own metadata also says 24 (`builtin.rs:3`, `:298`), so this is a shared doc + code-metadata off-by-one; ground truth (actual example count) = 23 | STALE-CLAIM | LOW | no | Either add a 24th example or correct the count to 23 in both `EVAL_GUIDE.md:651` and the two `builtin.rs` metadata strings |
+
+**Totals.** 6/6 files audited; 128 procedural claims: **126 CONSISTENT,
+2 STALE (F183-1 LOW, F183-2 LOW)**. 0 DRIFTED, 0 BROKEN-REF, 0
+OWNER-DECISION, 0 RISK, 0 UNRESOLVED. Every path-like reference across the
+6 files resolves (3/3 in VIGNETTES.md, all code/doc paths in the other
+five); all HTTP-route, CLI subcommand, and flag citations match the
+OpenAPI contract and `cli.rs`. Both findings are owner-queue additions;
+neither requires a gate/workflow edit.
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | none |
+| no gate edit | F183-1 (doc cite reword), F183-2 (doc + code-metadata count fix) |
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119906596 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this append; post-commit re-run confirms) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 183 reply
+(single-commit pattern, post-commit gate re-run).
