@@ -11155,3 +11155,35 @@ and `release version drift check passed`.
   commit message described a two-part fix that only half-landed, leaving
   CI red until the companion commit 07ae631e0. Verify `git show --stat`
   against intent before pushing.
+
+---
+
+### Round 168b (orchestrator-salvaged, 2026-08-29) — stale doc-comment README cite → canonical ECHO guide
+
+**Scope:** one-line-class stale reference found by the (free-form) R168
+sub-agent: `crates/kiln-train/src/trainer/grpo_step.rs:1737-1739` — the
+`#[allow(dead_code)] keep:` justification for `tokenize_grpo_group` cited
+"README.md documents `tokenize_grpo_group` as the ECHO mask builder".
+The README split (round 162) replaced that section with a stub pointing
+at `docs/guides/ECHO_GUIDE.md`; the cite now points at the destination:
+`docs/guides/ECHO_GUIDE.md (## Implementation notes)`.
+
+**Salvage record:** the sub-agent had produced exactly this 3-line fix
+in the working tree but sat ~80 minutes past its own finish (no ledger
+entry, no commit) — well beyond this session's 15–40 min norm.
+Orchestrator verified the fix (diff scope = 3 lines, nothing else),
+verified the destination cite is real (ECHO_GUIDE.md `## Implementation
+notes` at line 92; `tokenize_grpo_group` referenced at line 97 inside
+that section), terminated the session, and completed the round inline
+per the salvage protocol.
+
+**Verification:** `git diff` = 3 lines only; citation targets verified
+against the live tree (above); standing 14-gate CI list green on the
+committed tree; `git status --porcelain` clean after commit.
+
+**Lesson (process):** free-form "find the most valuable cleanup" prompts
+remain the highest silent-stall risk this session (R168: fix complete in
+the tree, 80 min, no commit); the orchestrator should treat 2× the
+session norm with no tree movement as the salvage trigger. The finding
+itself was exactly the split's last doc-comment residue — the split
+campaign's final known loose end.

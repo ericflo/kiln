@@ -1734,9 +1734,9 @@ pub(super) fn observe_lora_grad_module_norms(
 /// behaviour is bit-identical to the pre-ECHO path: `action_mask` is "true
 /// after the prompt" and `env_mask` is all-false.
 // keep: test-only callers (plain tests in tests/mod.rs) + live user docs —
-// README.md documents `tokenize_grpo_group` as the ECHO mask builder
-// (action_mask/env_mask separation). Thin wrapper over the live
-// `tokenize_grpo_group_timed`.
+// docs/guides/ECHO_GUIDE.md (## Implementation notes) documents
+// `tokenize_grpo_group` as the ECHO mask builder (action_mask/env_mask
+// separation). Thin wrapper over the live `tokenize_grpo_group_timed`.
 #[allow(dead_code)]
 pub(super) fn tokenize_grpo_group(
     group: &GrpoGroup,
