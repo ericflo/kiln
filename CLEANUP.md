@@ -15656,3 +15656,260 @@ their respective gate/workflow edits **only if the owner picks the
 gate-touching side** — none is forced by this round's report.
 `git status --porcelain` before/after commit: ` M CLEANUP.md` only,
 then clean.
+
+## Cleanup Agent (round 193 — CI feature-lane coverage audit) — 2026-08-29
+
+**Scope & method.** Read-only audit at HEAD `d15077c99` (round 192,
+clean tree) — no cargo builds/checks; the feature graph was **read** from
+`crates/*/Cargo.toml` + `#[cfg(feature)]` source scans (grep/sed/python3
+only). (1) Feature census of all 33 workspace manifests; (2) CI lane
+census of every cargo invocation carrying `--features` /
+`--all-features` / `--no-default-features` in `.github/workflows/*.yml`;
+(3) coverage matrix (DIRECT / TRANSITIVE / UNCOVERED) for all
+(feature, declaring-crate) pairs, traced through manifest feature
+forwards; (4) gap report ranked by gated code volume; (5) one-line fix
+per gap, queued as evidence. **desktop/ manifests are explicitly
+excluded**: `desktop/` is a separate workspace with no CI build of its
+features (not part of the root workspace member list, `Cargo.toml:3-36`).
+Only file modified: CLEANUP.md.
+
+**Headline finding (F193-1 material).** In `ci.yml`, **all four GPU
+feature lanes are manual-dispatch only**: `macos-metal` (ci.yml:57),
+`linux-vulkan` (:198), `linux-cuda` (:238), `linux-rocm` (:294) each
+carry `if: ${{ github.event_name == 'workflow_dispatch' &&
+inputs.backend_build == 'all' | '<backend>' }}`. The only lanes that run
+automatically (push/PR/weekly `cron: '41 12 * * 0'`, ci.yml:6) are
+`linux-default`'s no-feature `cargo build` (ci.yml:77) and `cargo test`
+(ci.yml:92). The keep-by-default dead-code policy for the four GPU
+families is therefore enforced **only while someone keeps dispatching
+the backend build**; `server-release.yml` (workflow_dispatch) and the
+A6000 leg of `perf-regression-nightly.yml` (manual + self-hosted +
+`KILN_A6000_ONLINE`) add further non-automatic coverage.
+
+### 1. Feature census (33 crates; 21 declare `[features]`; 54 non-default (feature, crate) pairs)
+
+`default` feature sets: `default = ["cuda"]` — kiln-conv1d-kernel
+(Cargo.toml:14), kiln-flash-attn (:16), kiln-gdn-kernel (:14),
+kiln-marlin-gemm (:14). Explicit `default = []` — kiln-blas (:29),
+kiln-core (:29), kiln-kt-bridge (:12), kiln-mps (:19), kiln-rocblas
+(:11), kiln-tensor (:94), kiln-vulkan-blas (:19). No `[features]`
+section — kiln-autograd, kiln-eval, kiln-flce-kernel, kiln-graph,
+kiln-graph-vulkan, kiln-memory, kiln-openenv, kiln-optim, kiln-param,
+kiln-resource, kiln-rmsnorm-kernel, kiln-scheduler, kiln-server,
+kiln-tensor-id, kiln-train, kiln-vulkan-kernel. (All paths below are
+`crates/<crate>/Cargo.toml`.)
+
+| # | crate / feature | line | enables |
+|---|---|---|---|
+| 1 | kiln-blas / probe | 32 | `dep:cudarc` |
+| 2 | kiln-blas / cublaslt | 37 | `dep:cudarc` |
+| 3 | kiln-conv1d-kernel / cuda | 17 | `kiln-tensor/cuda`, `kiln-kt-bridge/cuda` |
+| 4 | kiln-conv1d-kernel / rocm | 21 | `kiln-tensor/rocm`, `kiln-kt-bridge/rocm` |
+| 5 | kiln-core / vulkan | 30 | `dep:kiln-vulkan-kernel` |
+| 6 | kiln-core / cuda | 36 | `dep:kiln-tensor`, `kiln-tensor/cuda` |
+| 7 | kiln-core / metal | 41 | `dep:kiln-tensor`, `kiln-tensor/metal` |
+| 8 | kiln-core / rocm | 45 | `dep:kiln-tensor`, `kiln-tensor/rocm` |
+| 9 | kiln-flash-attn / cuda | 20 | `kiln-tensor/cuda`, `kiln-kt-bridge/cuda` |
+| 10 | kiln-flash-attn / rocm | 28 | `kiln-tensor/rocm`, `kiln-kt-bridge/rocm` |
+| 11 | kiln-flce-kernel / cuda | 36 | `kiln-tensor/cuda` |
+| 12 | kiln-flce-kernel / rocm | 46 | `kiln-tensor/rocm` |
+| 13 | kiln-gdn-kernel / cuda | 17 | `kiln-tensor/cuda`, `kiln-kt-bridge/cuda` |
+| 14 | kiln-gdn-kernel / rocm | 25 | `kiln-tensor/rocm`, `kiln-kt-bridge/rocm` |
+| 15 | kiln-graph-cuda / cuda | 26 | `[]` (reserved; zero gated code, zero dependents) |
+| 16 | kiln-graph-metal / metal | 24 | `kiln-tensor/metal` |
+| 17 | kiln-hip / hardware-qualification | 17 | `[]` |
+| 18 | kiln-kt-bridge / cuda | 18 | `kiln-tensor/cuda` |
+| 19 | kiln-kt-bridge / metal | 22 | `kiln-tensor/metal` |
+| 20 | kiln-kt-bridge / vulkan | 28 | `kiln-tensor/vulkan` |
+| 21 | kiln-kt-bridge / rocm | 33 | `kiln-tensor/rocm` |
+| 22 | kiln-marlin-gemm / cuda | 18 | `kiln-tensor/cuda`, `kiln-kt-bridge/cuda` |
+| 23 | kiln-marlin-gemm / rocm | 25 | `kiln-tensor/rocm`, `kiln-kt-bridge/rocm` |
+| 24 | kiln-model / hardware-qualification | 86 | `kiln-hip/hardware-qualification`, `kiln-tensor/hardware-qualification` |
+| 25 | kiln-model / cuda | 87 | `dep:cudarc`, conv1d/flash/gdn/marlin/rmsnorm `/cuda`, `kiln-kt-bridge/cuda`, `kiln-tensor/cuda`, +deps |
+| 26 | kiln-model / rocm | 92 | `dep:kiln-hip`, conv1d/flash/gdn/marlin/rmsnorm `/rocm`, `kiln-kt-bridge/rocm`, `kiln-tensor/rocm`, +deps |
+| 27 | kiln-model / metal | 101 | `kiln-kt-bridge/metal`, `kiln-tensor/metal`, `kiln-graph-metal/metal`, +deps |
+| 28 | kiln-model / nvtx | 105 | `kiln-nvtx/nvtx` |
+| 29 | kiln-model / vulkan | 110 | `dep:kiln-vulkan-kernel`, `kiln-core/vulkan`, `kiln-tensor/vulkan`, `kiln-kt-bridge/vulkan`, +deps |
+| 30 | kiln-mps / probe | 31 | `[]` (reserved; zero gated code, zero dependents) |
+| 31 | kiln-nvtx / nvtx | 14 | `[]` (FFI + runtime `cfg!`) |
+| 32 | kiln-opd-loss-kernel / cuda | 71 | `kiln-tensor/cuda`, `dep:kiln-kt-bridge`, `kiln-kt-bridge?/cuda` |
+| 33 | kiln-opd-loss-kernel / rocm | 81 | `kiln-tensor/rocm`, `dep:kiln-kt-bridge`, `kiln-kt-bridge?/rocm` |
+| 34 | kiln-opd-loss-kernel / metal | 95 | `kiln-tensor/metal` |
+| 35 | kiln-opd-loss-kernel / vulkan | 105 | `kiln-tensor/vulkan` |
+| 36 | kiln-rmsnorm-kernel / cuda | 41 | `kiln-tensor/cuda`, `kiln-kt-bridge/cuda` |
+| 37 | kiln-rmsnorm-kernel / rocm | 49 | `kiln-tensor/rocm`, `kiln-kt-bridge/rocm` |
+| 38 | kiln-rocblas / probe | 14 | `dep:kiln-hip` |
+| 39 | kiln-rocblas / hipblaslt | 17 | `dep:kiln-hip` |
+| 40 | kiln-server / cuda | 82 | `kiln-model/cuda`, `kiln-tensor/cuda`, `kiln-train/cuda` |
+| 41 | kiln-server / rocm | 85 | `kiln-model/rocm`, `kiln-tensor/rocm`, `kiln-train/rocm` |
+| 42 | kiln-server / metal | 86 | `kiln-model/metal`, `kiln-tensor/metal`, `kiln-train/metal` |
+| 43 | kiln-server / vulkan | 87 | `kiln-model/vulkan`, `kiln-tensor/vulkan`, `kiln-train/vulkan` |
+| 44 | kiln-server / nvtx | 90 | `kiln-model/nvtx` |
+| 45 | kiln-tensor / cuda | 103 | `dep:cudarc`, `dep:kiln-blas` (dep line kiln-tensor:80 carries `features=["cublaslt"]` → also enables kiln-blas/cublaslt) |
+| 46 | kiln-tensor / metal | 112 | `dep:objc2`, `dep:objc2-metal`, `dep:objc2-foundation` |
+| 47 | kiln-tensor / vulkan | 116 | `dep:kiln-vulkan-kernel` |
+| 48 | kiln-tensor / rocm | 121 | `dep:kiln-hip`, `dep:kiln-rocblas` (dep line kiln-tensor:91 carries `features=["hipblaslt"]` → also enables kiln-rocblas/hipblaslt) |
+| 49 | kiln-tensor / hardware-qualification | 122 | `kiln-hip/hardware-qualification` |
+| 50 | kiln-train / cuda | 81 | `kiln-model/cuda`, `kiln-flce-kernel/cuda`, `kiln-rmsnorm-kernel/cuda`, `kiln-opd-loss-kernel/cuda`, `kiln-kt-bridge/cuda` |
+| 51 | kiln-train / rocm | 83 | `kiln-model/rocm`, `kiln-flce-kernel/rocm`, `kiln-rmsnorm-kernel/rocm`, `kiln-opd-loss-kernel/rocm`, `kiln-kt-bridge/rocm` |
+| 52 | kiln-train / metal | 84 | `kiln-model/metal`, `kiln-kt-bridge/metal`, `kiln-opd-loss-kernel/metal` |
+| 53 | kiln-train / vulkan | 85 | `kiln-model/vulkan`, `dep:kiln-vulkan-kernel`, `kiln-opd-loss-kernel/vulkan`, `kiln-kt-bridge/vulkan` |
+| 54 | kiln-vulkan-blas / vulkan | 21 | `dep:kiln-vulkan-kernel` (no src references it; zero dependents) |
+
+Default-feature consistency note: the four `default = ["cuda"]` kernel
+crates are (a) **excluded from `default-members`** (root `Cargo.toml`
+default-members list; exclusion comment above it) and (b) optional
+dependencies of kiln-model declared with `default-features = false`
+(kiln-model/Cargo.toml:32-35) — so no CI lane can fire their `cuda`
+default accidentally; their `cuda`/`rocm` features are enabled only via
+explicit forwards (rows 25/26).
+
+### 2. CI lane census (every `--features` / `--all-features` / `--no-default-features` cargo invocation)
+
+| lane | file:line | job (trigger) | package scope | command | kind |
+|---|---|---|---|---|---|
+| CI-DEF-B | ci.yml:77 | linux-default (auto: push/PR/weekly) | workspace default-members | `cargo build --locked` | build, no features |
+| CI-DEF-T | ci.yml:92 | linux-default (auto) | workspace default-members | `cargo test --locked` | test, no features |
+| CI-M1 | ci.yml:83 | macos-metal (manual, gate ci.yml:57) | workspace default-members | `cargo build --locked --features metal` | build+link |
+| CI-M2 | ci.yml:98 | macos-metal (manual) | workspace default-members | `cargo test --locked --features metal -- --test-threads=1` | test (build+link+run) |
+| CI-DENY | ci.yml:142 | linux-default (auto) | workspace | cargo-deny `check --all-features` | **dependency policy — NOT build coverage** |
+| CI-TREE | ci.yml:175 | linux-default (auto) | `-p kiln-server` | `cargo tree --locked -p kiln-server --features cuda -e normal` | **dep-tree assertion — never compiles** |
+| CI-V1 | ci.yml:226 | linux-vulkan (manual, gate ci.yml:198) | `-p kiln-server` | `cargo check --locked -p kiln-server --features vulkan` | **CHECK-ONLY** (no link, no test) |
+| CI-C1 | ci.yml:290 | linux-cuda (manual, gate ci.yml:238) | `-p kiln-server`, `--bin kiln` | `cargo build --locked --bin kiln -p kiln-server --no-default-features --features cuda` | build+link |
+| CI-R1 | ci.yml:356 | linux-rocm (manual, gate ci.yml:294) | `-p kiln-server`, `--bin kiln` | `cargo build --locked --bin kiln -p kiln-server --no-default-features --features rocm` | build+link |
+| RL-M | server-release.yml:54 | macos-metal (manual) | `--bin kiln` → kiln-server | `cargo build --release --locked --features metal --bin kiln --target aarch64-apple-darwin` | build+link |
+| RL-C | server-release.yml:229 | linux-cuda (manual) | `--bin kiln` → kiln-server | `cargo build --release --locked --features cuda --bin kiln --target x86_64-unknown-linux-gnu` | build+link |
+| RL-V | server-release.yml:305 | linux-vulkan (manual) | `--bin kiln` → kiln-server | `cargo build --release --locked --features vulkan --bin kiln --target x86_64-unknown-linux-gnu` | build+link |
+| RL-R | server-release.yml:404 | linux-rocm (manual) | `-p kiln-server`, `--bin kiln` | `cargo build --release --locked --bin kiln -p kiln-server --no-default-features --features rocm --target x86_64-unknown-linux-gnu` | build+link |
+| RL-W | server-release.yml:522 | windows-cuda (manual) | `--bin kiln` → kiln-server | `cargo build --release --locked --features cuda --bin kiln --target x86_64-pc-windows-msvc` | build+link |
+| PN-C | perf-regression-nightly.yml:265 | cuda-bench (manual + self-hosted `cuda-a6000` + `KILN_A6000_ONLINE`) | `--bin kiln-bench` → kiln-server (bin, kiln-server/Cargo.toml:17-19) | `KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench` | build+link |
+
+No other workflow carries feature flags (docker-server-release.yml:41 is
+a comment; ui-smoke/openenv-interop/qualification-contract/pages/
+repository-hygiene/release-version-drift/runpod-image have none).
+Non-feature test lane in the vulkan job: ci.yml:231
+`cargo test --locked -p kiln-vulkan-kernel -- --nocapture` (that crate
+declares no features; it is the only CI leg executing Vulkan kernels).
+
+### 3. Coverage matrix — 54 pairs: 4 DIRECT, 36 TRANSITIVE, 14 UNCOVERED
+
+**DIRECT (4)** — a lane targets kiln-server with the feature enabled:
+
+| pair | lanes |
+|---|---|
+| kiln-server / cuda | CI-C1 (build), RL-C, RL-W, PN-C (builds) |
+| kiln-server / rocm | CI-R1 (build), RL-R |
+| kiln-server / metal | CI-M1 (build), CI-M2 (test), RL-M |
+| kiln-server / vulkan | CI-V1 (**check-only** in ci.yml), RL-V (build) |
+
+**TRANSITIVE (36)** — chain cited by manifest line (entry lane → forwarder →
+target):
+
+- *cuda (12)*, via CI-C1/RL-C/RL-W/PN-C: kiln-train/cuda (server:82);
+  kiln-model/cuda (server:82 or train:81); kiln-tensor/cuda (server:82 /
+  train:81 / model:87); kiln-kt-bridge/cuda (train:81 / model:87 / any
+  kernel forwarder); kiln-flce-kernel/cuda (train:81);
+  kiln-rmsnorm-kernel/cuda (train:81 / model:87); kiln-opd-loss-kernel/cuda
+  (train:81); kiln-conv1d-kernel/cuda (model:87); kiln-flash-attn/cuda
+  (model:87); kiln-gdn-kernel/cuda (model:87); kiln-marlin-gemm/cuda
+  (model:87); **kiln-blas/cublaslt** (tensor:103 `dep:kiln-blas` + dep
+  line kiln-tensor:80 `features=["cublaslt"]`).
+- *rocm (12)*, via CI-R1/RL-R: kiln-train/rocm (server:85);
+  kiln-model/rocm (server:85 or train:83); kiln-tensor/rocm (server:85 /
+  train:83 / model:92); kiln-kt-bridge/rocm (train:83 / model:92);
+  kiln-flce-kernel/rocm (train:83); kiln-rmsnorm-kernel/rocm (train:83 /
+  model:92); kiln-opd-loss-kernel/rocm (train:83); kiln-conv1d-kernel/rocm
+  (model:92); kiln-flash-attn/rocm (model:92); kiln-gdn-kernel/rocm
+  (model:92); kiln-marlin-gemm/rocm (model:92); **kiln-rocblas/hipblaslt**
+  (tensor:121 `dep:kiln-rocblas` + dep line kiln-tensor:91
+  `features=["hipblaslt"]`).
+- *metal (6)*, via CI-M1/CI-M2/RL-M: kiln-train/metal (server:86);
+  kiln-model/metal (server:86 or train:84); kiln-tensor/metal (server:86 /
+  model:101 / kt-bridge:22 / graph-metal:24); kiln-kt-bridge/metal
+  (model:101 / train:84); kiln-opd-loss-kernel/metal (train:84);
+  kiln-graph-metal/metal (model:101).
+- *vulkan (6)*, via CI-V1 (check) / RL-V (build): kiln-train/vulkan
+  (server:87); kiln-model/vulkan (server:87 or train:85); kiln-tensor/vulkan
+  (server:87 / model:110 / kt-bridge:28 / opd:105); kiln-kt-bridge/vulkan
+  (model:110 / train:85); kiln-opd-loss-kernel/vulkan (train:85);
+  kiln-core/vulkan (model:110).
+
+**UNCOVERED (14)** — no CI lane enables the pair in any build
+(§4 ranks them).
+
+### 4. Gap report — UNCOVERED pairs ranked by gated code volume
+
+Metric: non-comment `feature = "<feat>"` gate lines in the declaring
+crate's `src/` (plus example targets, noted). Samples are `file:line`.
+
+| rank | pair | manifest line | gate lines | gated-code samples | one-line fix (evidence) |
+|---|---|---|---|---|---|
+| 1 | kiln-model / hardware-qualification | kiln-model/Cargo.toml:86 | 11 | src/rocm_policy.rs:56, 159, 181, 202, 214… | a CI lane `cargo check -p kiln-model --features hardware-qualification` would close this (or retire the feature) |
+| 2 | kiln-core / metal | kiln-core/Cargo.toml:41 | 7 | src/device_buffer.rs:41, 65, 86, 121, 148… | a CI lane `cargo check -p kiln-core --features metal` would close this (or retire — orphan, see note) |
+| 3 | kiln-core / cuda | kiln-core/Cargo.toml:36 | 6 | src/device_buffer.rs:33, 60, 84, 110, 146… | a CI lane `cargo check -p kiln-core --features cuda` would close this (or retire — orphan) |
+| 3 | kiln-core / rocm | kiln-core/Cargo.toml:45 | 6 | src/device_buffer.rs:47, 70, 88, 132, 150… | a CI lane `cargo check -p kiln-core --features rocm` would close this (or retire — orphan) |
+| 3 | kiln-hip / hardware-qualification | kiln-hip/Cargo.toml:17 | 6 | src/lib.rs:539, 553, 633, 704, 816, 854 | the rank-1 lane transitively covers this (model:86 → hip:17); no separate lane needed |
+| 6 | nvtx chain: kiln-server/nvtx (:90), kiln-model/nvtx (:105), kiln-nvtx/nvtx (:14) | — | 5 (server 1 + nvtx 4; model 0, pure forward) | kiln-server/src/execution_provenance.rs:152 (`if cfg!(feature = "nvtx")`); kiln-nvtx/src/lib.rs:32 (ffi mod), 49 (push), 61 (pop) | a CI lane `cargo check -p kiln-server --features nvtx` would close all three (or retire the chain) |
+| 7 | kiln-tensor / hardware-qualification | kiln-tensor/Cargo.toml:122 | 3 | src/rocm_matmul.rs:200, 204, 320 | covered by the rank-1 lane (model:86 → tensor:122) |
+| 8 | kiln-blas / probe | kiln-blas/Cargo.toml:32 | 1 + example | src/lib.rs:47; `[[example]] cublaslt_mlp_probe`, required-features `["probe"]` (Cargo.toml:58-59) | a CI lane `cargo check -p kiln-blas --features probe` would close this (or retire) |
+| 8 | kiln-rocblas / probe | kiln-rocblas/Cargo.toml:14 | 1 + example | src/lib.rs:21; `[[example]] hipblaslt_mlp_probe`, required-features `["probe"]` (Cargo.toml:35-36) | a CI lane `cargo check -p kiln-rocblas --features probe` would close this (or retire) |
+| 10 | kiln-mps / probe | kiln-mps/Cargo.toml:31 | 0 (doc refs only) | reserved for the future `mps_mlp_probe` binary (Cargo.toml:16-30); zero dependents | inert feature — owner: retire it or ship the probe binary |
+| 10 | kiln-graph-cuda / cuda | kiln-graph-cuda/Cargo.toml:26 | 0 | reserved scaffold (Cargo.toml:23-26); zero gated code, zero dependents | inert feature — owner: retire it or ship the capture pipeline |
+| 10 | kiln-vulkan-blas / vulkan | kiln-vulkan-blas/Cargo.toml:21 | 0 | enables `dep:kiln-vulkan-kernel` (Cargo.toml:29) but no `src/` code references it; zero dependents | inert feature — owner: retire it or wire the matmul wrapper |
+
+**Orphan-feature note (evidence for the retire side of F193-2).**
+Cross-manifest forward scan: **no manifest in the repository forwards to
+`kiln-core/cuda`, `kiln-core/metal`, or `kiln-core/rocm`** (the only
+`kiln-core/*` forward anywhere is `kiln-model/vulkan → kiln-core/vulkan`,
+kiln-model:110). Likewise zero dependents exist for kiln-graph-cuda,
+kiln-vulkan-blas, and kiln-mps (they appear only in the root workspace
+member list). These seven pairs are unreachable from the production
+feature graph — `cargo check -p <crate> --features <f>` is the *only*
+way they compile today.
+
+**Verified non-issue.** `kiln-tensor/src/cuda_stream_priority.rs:46-49`
+(doc comment) mentions `feature = "dynamic-loading"` — it describes
+**cudarc's** own feature (the workspace pins cudarc with
+`features = ["dynamic-linking"]`); kiln-tensor declares no such feature
+and has no cfg gate on it. Full 33-crate scan: **no `src/` file gates on
+a feature its own manifest does not declare** — the feature graph is
+self-consistent.
+
+### 5. Owner-queue delta: +2 (F193-1 MED, F193-2 MED). Cumulative: 74 + 2 = 76.
+
+| id | class | finding |
+|---|---|---|
+| **F193-1** | MED | ci.yml's four GPU feature lanes are all `workflow_dispatch`-gated (ci.yml:57/:198/:238/:294) — the GPU dead-code guard only runs on manual dispatch; push/PR/weekly exercise no-feature lanes only. Owner: keep (CI budget), add an automatic GPU lane (e.g. extend the existing weekly `schedule` cron, ci.yml:6), or accept the drift risk. |
+| **F193-2** | MED | 14 UNCOVERED (feature, crate) pairs — 3 orphan kiln-core/{cuda,metal,rocm} (19 gate lines), hardware-qualification chain across kiln-model/kiln-tensor/kiln-hip (20 gate lines, one `cargo check -p kiln-model --features hardware-qualification` lane closes all), nvtx chain across kiln-server/kiln-model/kiln-nvtx (5 gate lines, one `cargo check -p kiln-server --features nvtx` lane closes all), kiln-blas/probe + kiln-rocblas/probe (2 + 2 examples), and 3 inert reservations (kiln-mps/probe, kiln-graph-cuda/cuda, kiln-vulkan-blas/vulkan, 0 gate lines). Owner: per pair, add a CI lane (CI budget) or retire the feature (prefer retire for the 3 inert + 3 orphan pairs). |
+
+Per BK-1 (R192): if the owner adopts the 79-ID base instead of the 74
+running total, this round's queue is 81.
+
+### 6. Standing gates (CI order) — 17/17 PASS at HEAD `d15077c99` + this entry
+
+| # | Command | Verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "4564 tracked paths, 120101130 bytes; CSV ≤ 1048576, each file ≤ 10485760" (byte delta vs R192 = this ledger entry) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "448 reads, 19 process mutations; 0 runtime migration reads" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "0 tests, 0 reads, 0 text assertions" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "117 canonical fields, 3 dynamic templates, 112 canonical environment overrides" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS (full contract list) |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "111 paths, 125 operations … 172 observability definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "127.0.0.1:8420; 21 server CLI URL fields" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — 11/11 tests |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (exit 0) |
+
+### 7. Gate-edit flag summary
+
+`CLEANUP.md` — append-only ledger entry; no gate flag set. No manifest,
+CI, contract, schema, config, env-var, version, URL, docs-site, test, or
+lockfile touch. F193-1/F193-2 are gate-conditional only **if** the
+owner picks the add-a-lane side — none is forced by this round.
