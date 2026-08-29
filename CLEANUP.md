@@ -13031,3 +13031,38 @@ write (this ledger append); re-run after commit and re-verified)
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 177 reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 177c — orchestrator correction) — 2026-08-29
+
+**Correction to round 177, finding F1 — RETRACTED.** F1 classified
+`docs/site/assets/server-ui-dashboard.png` (2,552,232 B) as an orphan /
+dead weight ("unreferenced by any HTML/CSS/JS/gate"). That classification
+is WRONG; the file is a live, gate-pinned asset of the root README and
+QUICKSTART:
+
+- `README.md:295` — `![Kiln embedded server dashboard …](docs/site/assets/server-ui-dashboard.png)`
+- `QUICKSTART.md:306` — `![Kiln dashboard …](docs/site/assets/server-ui-dashboard.png)`
+- `scripts/check_docs_site_smoke.mjs:1705–1717` (`validateReadmeMedia`) — FAILs unless README.md cites the image AND it exists
+- `scripts/check_docs_site_smoke.mjs:1990` (cold-reader required-terms) — requires the path in README
+- `scripts/check_docs_site_smoke.mjs:2025–2035` — FAILs unless QUICKSTART.md cites the image AND it exists
+- `scripts/capture-screenshots.mjs:48` — the capture tooling's output target
+
+Deletion would break two gate checks and remove the embedded dashboard
+screenshot from both public documents. The file's storage location under
+`docs/site/assets/` merely explains why a site-scoped orphan census saw
+no in-site referrer. The payload observation (~2.55 MB served by GitHub
+Pages) remains factually true, but the finding class changes from
+"orphan/deletion-candidate" to "live README/QUICKSTART media asset
+co-located with site assets — retention is mandatory under current
+gates". F1 is withdrawn from the owner queue; F2, F3, F4, and F5 stand
+as written.
+
+**Method lesson (recorded per R177 scope's method-limits clause):** a
+site-rooted reachability census must re-test unreachable files against
+repo-wide consumers (README/QUICKSTART/other docs) AND the full gate
+suite, not only the site's own gates; the round-177 re-test missed the
+smoke gate's media-pinning block at L1705–2035 (it is outside the
+L2578–2624 asset-pin region that was inspected).
+
+**Owner-queue delta correction:** round 177's delta was 4 (F1–F4); the
+corrected delta is 3 (F2, F3, F4) + F5 minor note.
