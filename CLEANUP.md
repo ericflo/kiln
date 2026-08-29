@@ -14656,3 +14656,163 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 186 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 187 — contributor-facing root docs claims audit) — 2026-08-29
+
+READ-ONLY audit (report-only; only write is this ledger append + commit).
+In scope: the three contributor-facing owner-managed root docs. README /
+QUICKSTART / BENCHMARKS / CHANGELOG are out of scope (audited R165–R171/R176)
+and used only as canonical sides.
+
+### Claim census — CONTRIBUTING.md (277 lines)
+
+38 claims checked: 5 root-doc refs (ARCHITECTURE.md, BENCHMARKS.md,
+LICENSE, `contracts/kiln-http-api-v1.openapi.json`, `CHANGELOG.md`
+absent — n/a), 7 docs/** refs, 8 script refs, 6 CI/toolchain refs,
+6 env-var claims, 2 feature-flag claims, 1 test-name claim, 1
+eval-scorer architecture claim, 1 license claim, 1 GitHub-identity claim,
+1 CI-behavior claim block.
+
+Verdicts (all CONSISTENT except F187-1, cited):
+- root refs — `ARCHITECTURE.md`, `BENCHMARKS.md`, `LICENSE` (MIT at
+  LICENSE:1), `contracts/kiln-http-api-v1.openapi.json`, `rust-toolchain.toml`
+  (channel 1.96.1, pins real), `deny.toml` (sections licenses/bans/sources/
+  advisories at deny.toml:12/34/46/64, matching "checks licenses, bans,
+  sources, advisories"), `scripts/cargo-bounded.sh` (header :1-14 confirms
+  "one build job", swap-disabled cgroup ceiling, compiler+linker tree kept
+  together — matches "serializes compilation, applies a no-swap memory
+  boundary, keeps the compiler and linker process tree together").
+- docs/** refs — `docs/archive/profiling/PROFILING.md`,
+  `docs/policies/qualification.md`, `docs/plans/public-site-audit-and-
+  copyediting-plan.md`, `docs/policies/VERIFICATION_TEST_INVENTORY.md`
+  (:10 "exact zero-debt gate" matches "the page explains the zero-debt
+  gate"), `docs/policies/ci-policy.md`, `docs/guides/EVAL_GUIDE.md` — all
+  exist (post-reorg theme dirs checked). `docs/public/CONFIGURATION.md`
+  exists but see F187-1.
+- feature/env claims — `cuda/rocm/metal/vulkan` features exist
+  (crates/kiln-server/Cargo.toml:82-87); kiln-server defines no
+  `default` feature, so `--no-default-features --features rocm` is
+  valid (redundant flag, not wrong); `KILN_CUDA_ARCHS` optional with
+  default "80;86;89;90" (crates/kiln-tensor/build.rs:88),
+  `KILN_ROCM_ARCHS` optional with default "native"
+  (crates/kiln-rocblas/build.rs:49).
+- test claim — `test_health_with_real_backend` is `#[ignore]`d
+  (crates/kiln-server/tests/real_model_integration.rs:3365-3366, reason
+  "constructs a full real-backend AppState (model prewarm)"), matching
+  "ignored because it requires a real model and backend"; the
+  Apple-Silicon `--test-threads=1` Metal guidance matches the same
+  `MetalDevice::new` race note in ci.yml:92-96.
+- eval-scorer claim — `Scorer` is `#[serde(tag = "kind", rename_all =
+  "snake_case")] pub enum` (crates/kiln-eval/src/scorers/mod.rs:40-41),
+  `kind_label()` at :181, `score_completion` at :249,
+  `auto_detect_scorer` at synthesis.rs:248, per-scorer files in
+  `crates/kiln-eval/src/scorers/` (11 `<name>.rs`), and the crate's own
+  mod.rs:10 doc comment gives the same "add a file + dispatch in
+  `score_completion`" recipe. All CONSISTENT.
+- CI block (:249-252) — formatting `cargo fmt --all --check`
+  (ci.yml:127), policy check via cargo-deny-action `check --all-features`
+  (ci.yml:138-142, v2.0.17 pin), linux-default job on push/PR with
+  path filters (ci.yml:9-28), docs checks on push/PR with path filters
+  (pages.yml:1-56), all four backend compile jobs
+  (macos-metal/linux-vulkan/linux-cuda/linux-rocm) gated `if:
+  workflow_dispatch` (ci.yml:57,198,238,294) = "deliberate manual
+  checks"; ci.yml:244-251 "Compile-only gate" + qualification receipts
+  = "real backend behavior comes from local, source-bound
+  qualification". CONSISTENT.
+- tooling/proc claims — `npm ci`/`npm test --prefix scripts/docs-site`
+  (package.json:10 `"test": "node --test test/*.test.mjs"`),
+  `node scripts/docs-site/build.mjs --out <dir>` (build.mjs usage),
+  `KILN_DOCS_SITE_ROOT`/`KILN_DOCS_REQUIRE_GENERATED` (both read at
+  scripts/check_docs_site_smoke.mjs:12-14), `scripts/qualification/
+  workload.py` + `qualification/workloads/*.json` (workloads dir has 10
+  workloads), `scripts/qualification/receipt.py` +
+  `qualification/receipts/{cuda,metal,rocm,vulkan}` — all exist and
+  match. `python3 scripts/check_{runtime_env_contract,
+  source_parsing_tests,repository_artifacts}.py` all exist.
+- identity claims — `github.com/ericflo/kiln` matches the repo's own
+  origin remote `git@github.com:ericflo/kiln.git` (pinned in-repo);
+  "single-process Rust … Qwen3.5-4B … CUDA/ROCm/Vulkan/Metal" matches
+  README.md:99 ("single binary, single process. No Python. No sidecar.")
+  + README.md:35 (one model, not a general framework).
+- "There is no project Discord or Slack" — self-contained, no
+  contradiction found.
+
+### Claim census — SECURITY.md (94 lines)
+
+Verdicts: all CONSISTENT except F187-2 (email) and one external
+(gh-CLI version):
+- "Kiln is pre-1.0" — Cargo.toml:87 `version = "0.5.2"` ✓; "Only the
+  latest tagged release is supported; no backports" — consistent with
+  the tag-dispatched release flow (server-release.yml:4, 22-23;
+  per-tag artifacts at :127/:240/:316/:415).
+- `/v1/train/sft` "documented behavior" — path present in
+  `contracts/kiln-http-api-v1.openapi.json:4609` ✓.
+- "Every `kiln-v*` release ships with build provenance attestations" —
+  `actions/attest-build-provenance@v4` on every artifact line
+  (server-release.yml:135, 251, 327, 426, 604) + docker image
+  (docker-server-release.yml:110) ✓.
+- `gh attestation verify kiln-<version>-<target>.tar.gz` — artifact
+  naming matches `kiln-${VERSION}-<target>.tar.gz`
+  (server-release.yml:127 e.g. `kiln-${VERSION}-aarch64-apple-darwin-
+  metal.tar.gz`) ✓; `oci://ghcr.io/ericflo/kiln-server:<tag>` matches
+  REGISTRY=ghcr.io + IMAGE_NAME=ericflo/kiln-server
+  (docker-server-release.yml:22-23) ✓.
+- "gh 2.49 or newer" + private-vulnerability-reporting feature —
+  external GitHub/CLI surfaces (UNRESOLVED, low risk; the repo
+  identity side is pinned by the origin remote).
+- loopback/diagnostics scope claims — consistent with runtime defaults
+  (127.0.0.1:8420; check_runtime_defaults.mjs PASS).
+- `CHANGELOG.md` ref — exists ✓. Timing/disclosure/safe-harbor prose —
+  owner policy, self-contained, no in-repo contradiction.
+
+### Claim census — CODE_OF_CONDUCT.md (49 lines)
+
+- "Released under the same MIT license as the rest of the project" —
+  LICENSE:1 "MIT License" ✓ CONSISTENT.
+- 7-day acknowledgment / 30-day decision — matches the SECURITY.md
+  7-day/30-day acknowledgment pattern (SECURITY.md:46-48) ✓
+  CONSISTENT (cross-doc consistency).
+- "the security inbox" scope — matches SECURITY.md channels ✓.
+- Behavioral norms / enforcement prose — self-contained policy,
+  nothing to contradict.
+- `floguy@gmail.com` (line 32) — see F187-2.
+
+### Findings
+
+| ID | title | doc cite (verified at HEAD) | canonical side (verified at HEAD) | class | sev | one-line owner action |
+|---|---|---|---|---|---|---|
+| F187-1 | "Start here" configuration link points at the curated guide, not the canonical complete reference | CONTRIBUTING.md:16 (`[configuration](docs/public/CONFIGURATION.md)`) | Canonical complete reference is `docs/contracts/CONFIGURATION.md` (:3 "This document is the canonical operator reference"; 164 KB vs the guide's 3.5 KB). Both are live published pages: docs/site/docs-manifest.json publishes `docs/public/CONFIGURATION.md` as slug `configuration` ("Configuration reference") and `docs/contracts/CONFIGURATION.md` as slug `configuration-complete` ("Complete configuration reference"); the guide's own "Exact references" section cross-links the complete reference. Not a broken ref and not a stale copy — a pointer-level drift in a contributor-facing "read first" row | DRIFTED-candidate | LOW | Point the row (or its link label) at `docs/contracts/CONFIGURATION.md` for "Public API or configuration", or relabel the link "configuration guide" so contributors reach the canonical reference first |
+| F187-2 | Security/conduct email `floguy@gmail.com` has no canonical in-repo pin | SECURITY.md:10 (fallback channel), CODE_OF_CONDUCT.md:32 (sole channel) | `grep -rn floguy` across README.md, QUICKSTART.md, about.toml, and all three docs: the address appears ONLY in these two lines — no README contact block, no about.toml field, no other pin. Cannot verify from any in-repo source that the address is current/monitored; the two docs agree with each other (no contradiction), but there is exactly one unverifiable external value shared by both | UNRESOLVED | LOW | Pin the maintainer contact once in a canonical place (e.g. SECURITY.md) with an "also used for conduct reports" note, and have CODE_OF_CONDUCT.md reference it, so a single edit keeps both docs current |
+
+**Owner-queue delta: +2 (F187-1 LOW, F187-2 LOW).** Cumulative owner-
+queue items: 65 (after round 186) + 2 = **67 cumulative owner-queue
+items**.
+
+### Standing gates (17/17 pass — literal CI commands, run before the
+ledger append and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119972049 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this ledger append; post-commit re-run confirms PASS) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — node:test run, 11 pass / 0 fail (exit 0) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 187 reply
+(single-commit pattern, post-commit gate re-run).
