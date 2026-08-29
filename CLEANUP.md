@@ -12638,3 +12638,167 @@ write — this ledger append — and re-run after commit)
 | 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
 | 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (802.5 ms) |
 | 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
+
+## Cleanup Agent (round 176) — 2026-08-29
+
+### Scope
+
+READ-ONLY reference-consistency audit of `CHANGELOG.md` (owner-managed
+release narrative; report-only surface — **not edited this round**). Tasks:
+(1) full read of the release history (2037 lines; 35 `## ` entries,
+`kiln-v0.5.2 — 2026-08-01` at line 3 down to `kiln-v0.1.0 — 2026-04-18`
+at line 2035, with five Unreleased draft entries at lines 818, 857, 908,
+937, 1107); (2) path/link census — every inline-code path or prose
+reference at a repo location verified with `test -e` / `find` / `git log
+--all` and classified OK / STALE-REF (old cite + post-reorg location) /
+DANGLING-REF (never tracked or deliberately removed); (3) version census —
+every `v0.x.y` / `kiln-v*` / `desktop-v*` token checked against
+`git tag -l` (48 tags) and `python3 scripts/check_release_versions.py`
+(rc=0); (4) cross-check for round-159+ owner-queue ids (A-*/D-*/F-*).
+Only writes: this ledger append + commit. No push.
+
+### Path census — STALE-REF (15 rows; exists only at post-reorg location)
+
+| # | line | cite | post-reorg location | proof command |
+|---|---|---|---|---|
+| P1 | 835 | `crates/kiln-core/src/vram.rs` | `crates/kiln-memory/src/vram.rs` | `test -e crates/kiln-core/src/vram.rs` → MISSING; `test -e crates/kiln-memory/src/vram.rs` → EXISTS; `git log --all --diff-filter=D -- crates/kiln-core/src/vram.rs` → `1d5728228 kiln-memory: dedicated crate for cross-engine memory governance (move vram in)` |
+| P2 | 1117 | `docs/plans/echo-integration-plan.md` | `docs/archive/echo/echo-integration-plan.md` | `find . -name echo-integration-plan.md` (excl. .git/target) → single hit, in `docs/archive/echo/` |
+| P3 | 1171 | `pi-terminal-bench-lite/calibration/dynamics_holdout.py` (agentic-grpo era) | `capabilities/caps/pi-terminal-bench-lite/calibration/dynamics_holdout.py` | `test -e` on post-reorg path → EXISTS |
+| P4 | 1172 | `capabilities/agentic-grpo/lib/pi_trajectory.py` | `capabilities/lib/pi_trajectory.py` | `find . -name pi_trajectory.py` (excl. .git/target/_site/.qualification) → single hit |
+| P5 | 1175 | `pi-doctest/rollout.py` | `capabilities/caps/pi-doctest/rollout.py` | `test -e` on post-reorg path → EXISTS |
+| P6 | 1177 | `capabilities/agentic-grpo/pi-terminal-bench-lite/` | `capabilities/caps/pi-terminal-bench-lite/` | `ls capabilities/caps/pi-terminal-bench-lite/` → full cap dir (rollout.py, calibration/, …) |
+| P7 | 1180 | `capabilities/agentic-grpo/pi-script-fixup/` | `capabilities/caps/pi-script-fixup/` | `ls capabilities/caps/pi-script-fixup/` → full cap dir |
+| P8 | 1183 | `docs/ECHO_GUIDE.md` | `docs/guides/ECHO_GUIDE.md` | `test -e docs/ECHO_GUIDE.md` → MISSING; `test -e docs/guides/ECHO_GUIDE.md` → EXISTS |
+| P9 | 1185 | `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md` | `docs/archive/echo/grand-plan-for-extraordinarily-great-echo-for-everyone.md` | `find . -name 'grand-plan*'` → the echo plan exists only under `docs/archive/echo/` (the `docs/plans/` grand-plan is the OPD plan, a different doc) |
+| P10 | 1187 | `kiln-polish-prerequisites.md` (root) | `capabilities/caps/pi-doctest/archive/kiln-polish-prerequisites.md` | `find . -name kiln-polish-prerequisites.md` → single hit |
+| P11 | 1257 | `docs/EVAL_GUIDE.md` | `docs/guides/EVAL_GUIDE.md` | `test -e docs/EVAL_GUIDE.md` → MISSING; `test -e docs/guides/EVAL_GUIDE.md` → EXISTS |
+| P12 | 1551 | `kiln-rmsnorm-kernel/csrc/fused_lora_add.cu` (crate at repo root) | `crates/kiln-rmsnorm-kernel/csrc/fused_lora_add.cu` | `test -e` on post-reorg path → EXISTS |
+| P13 | 1696 | `SCRIPT.md` (v0.2.9 demo entry) | `docs/site/demo/SCRIPT.md` | `find docs -name SCRIPT.md` → `docs/site/demo/SCRIPT.md` |
+| P14 | 1709, 2027 | `PROFILING.md`, `PROFILING-MTP-*.md` (root) | `docs/archive/profiling/PROFILING.md`, `docs/archive/profiling/PROFILING-MTP-*.md` | `find . -name 'PROFILING*.md'` → 9 hits, all under `docs/archive/profiling/` |
+| P15 | 1818, 1837 | `docs/GRPO_GUIDE.md` | `docs/guides/GRPO_GUIDE.md` | `test -e docs/GRPO_GUIDE.md` → MISSING; `test -e docs/guides/GRPO_GUIDE.md` → EXISTS |
+
+### Path census — DANGLING-REF (6 rows; never tracked or deliberately removed)
+
+| # | line | cite | evidence |
+|---|---|---|---|
+| D1 | 854 | `docs/skills/kiln/SKILL.md` | `test -e` → MISSING; `git log --all -- 'docs/skills/**'` → **no tracked history at that path, ever**; the only SKILL.md in the tree is `.agents/skills/capability-creator/SKILL.md` (a different skill); the per-PR-vs-nightly perf-regression split it claims to document now lives in `bench-results/regression/README.md` |
+| D2 | 1712 | `docs/flce_phase_a_streaming_impl_raw_2026-04-29.log` | deliberately removed per `docs/audits/removed-raw-artifacts-2026-07-13-v1.json` (reason: "forbidden artifact suffix .log"); record provides `restoration_command` from source commit `58138515f` |
+| D3 | 1715 | `docs/flce_phase_b_t16384_oom_probe_a40_raw_2026-04-29.log` | same removal record |
+| D4 | 1715 | `docs/flce_phase_b_t16384_oom_probe_a40_fused_raw_2026-04-29.log` | same removal record |
+| D5 | 1717 | `docs/flce_phase_a_streaming_raw_2026-04-29.log` | same removal record |
+| D6 | 1720 | `crates/kiln-server/examples/flce_phase_a_validation_bench.rs` | added `32a3828f3`, deleted `a193db663` (2026-07-13, "Bind SFT loss routing through execution"); surviving FLCE example: `crates/kiln-server/examples/flce_preflight_bench.rs` (EXISTS) |
+
+### Path census — OK (exists at the cited location)
+
+| lines | reference | proof |
+|---|---|---|
+| 803 | `scripts/check_unification_gates.sh` | `test -e` → EXISTS |
+| 827, 837 | `crates/kiln-train/src/trainer.rs` | `test -e` → EXISTS |
+| 830, 839 | `.github/workflows/perf-regression-nightly.yml` | `test -e` → EXISTS |
+| 830 | `bench-results/regression/sft_<trainer>_a6000_baseline.json` (pattern) | both concrete baselines exist: `ls bench-results/regression/sft_{native,generic}_a6000_baseline.json` |
+| 841, 849 | `bench-results/check_sft_train_regression.py` | `test -e` → EXISTS |
+| 842 | `check_opd_regression.py` (i.e. `bench-results/…`) | `test -e bench-results/check_opd_regression.py` → EXISTS |
+| 843 | `bench-results/regression/{sft_native,sft_generic}_a6000_baseline.json` | both exist (see above) |
+| 846 | `bench-results/regression/README.md` | `test -e` → EXISTS |
+| 1116 | `docs/papers/echo/` | `ls docs/papers/echo/` → dir with 7 echo docs |
+| 1246 | `crates/kiln-server/src/eval/` | `ls crates/kiln-server/src/eval/` → dir |
+| 1249 | `crates/kiln-server/src/bin/kiln_eval_cli.rs` | `test -e` → EXISTS |
+| 1258 | `docs/site/evals.html` | `test -e` → EXISTS |
+| 1258–1260 | README "The Eval Loop" section; QUICKSTART §10; ARCHITECTURE "Evaluation pipeline" deep dive | `grep -n '## The Eval Loop' README.md` → 177; `grep -n '## 10' QUICKSTART.md` → 838 "## 10. Evaluate your adapter"; `grep -n '## Evaluation pipeline' ARCHITECTURE.md` → 727 |
+| 1464 | `docs/audits/` | `ls docs/audits/` → dir (30 entries) |
+| 1466 | `kiln.example.toml` | `test -e` → EXISTS |
+| 1708 | `docs/audits/PHASE9_V0_1_0_READINESS.md`, `docs/audits/security-audit-v0.1.md` | both `test -e` → EXISTS |
+| 1709 | `docs/audits/PHASE10_CLOSURE.md` | `test -e` → EXISTS |
+| 1712 | `docs/audits/PHASE10_GDN_TRAINING_STREAMING_IMPL.md` | `test -e` → EXISTS |
+| 1715 | `docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md` | `test -e` → EXISTS |
+| 1717 | `docs/audits/PHASE10_GDN_TRAINING_STREAMING.md` | `test -e` → EXISTS |
+| 1720 | `docs/audits/PHASE10_FLCE_PREFLIGHT.md` | `test -e` → EXISTS |
+| 1726 | `SECURITY.md#supply-chain-provenance` | `grep -n 'Supply-chain provenance' SECURITY.md` → heading at line 68 → anchor valid |
+| 1729 | `server-release.yml`, `docker-server-release.yml` | `ls .github/workflows/{server-release,docker-server-release}.yml` → both exist |
+| 1757 | `docs/site/` (landing page, v0.2.8) | `ls docs/site/index.html` → EXISTS |
+| 1776 | `deploy/Dockerfile` | `test -e` → EXISTS |
+| 1777 | `deny.toml` | `test -e` → EXISTS |
+| 1781 | `THIRD_PARTY_LICENSES.md` | `test -e` → EXISTS |
+| 1783, 1829, 1898 | `QUICKSTART.md`; `README`; `ARCHITECTURE`; `BENCHMARKS.md` | all `test -e` → EXISTS at repo root |
+| 1925–1926 | `docs/archive/phase-c/`, `docs/archive/` | `ls` → both exist |
+| 563 | commit `002af558` | `git cat-file -e 002af558` → exists |
+
+N/A rows (not repo locations): `~/.cache/kiln/autotune` (runtime),
+`agent_traces.json` / `<adapter_dir>/agent_runs/runs.json` / `run.json`
+(runtime state), `~/.pi` (runtime), `https://ericflo.github.io/kiln/`
+(external URL; local source validated by gates 15–17),
+`ghcr.io/ericflo/kiln-server` (registry).
+
+### Version census
+
+Every `kiln-v*` / `desktop-v*` / bare `v0.x.y` token (unique values) was
+checked against `git tag -l` (48 tags) and
+`python3 scripts/check_release_versions.py` (rc=0, "server examples avoid
+pinned 0.5.2; desktop pins match desktop-v0.2.16").
+
+| token(s) | lines | tag exists? | verdict |
+|---|---|---|---|
+| `kiln-v0.1.0`…`kiln-v0.2.16` (26 distinct; incl. 2× `kiln-v0.2.16` headers at 1220/1269) | 3, 1220, 1269, 1534–2035 headers + inline cites | all 26 present in `git tag -l` | OK |
+| `kiln-v0.3.0`…`kiln-v0.5.2` (11 distinct) | 3–817 headers + inline cites | all 11 present | OK |
+| `desktop-v0.2.0`, `desktop-v0.2.2` | 1848–1852, 1927 | both present in `git tag -l` | OK |
+| bare `v0.1.0`, `v0.2.0`, `v0.2.1`, `v0.2.3`, `v0.2.4`, `v0.2.7`, `v0.2.8`, `v0.2.10`, `v0.2.13`, `v0.2.14`, `v0.2.15` (relative-era cites) | 109, 1271, 1536–1945 | all present as `kiln-v*` tags | OK |
+| bare `v0.2.19`, `v0.2.35` (×2) | 1930, 1945 | **N/A — not Kiln tags**: "Bump Jimver/cuda-toolkit from v0.2.19 to v0.2.35" (external GitHub action versions); `git tag -l` has no `v0.2.19`/`v0.2.35`, and `kiln-v0.2.19` exists but is a different token | N/A (external) |
+| `kiln-v0.2.17` | — (absent from changelog) | no tag | consistent — no entry, no tag (intentional gap) |
+
+Stale "latest/current" claim check:
+
+| # | line | claim | actual | verdict |
+|---|---|---|---|---|
+| V1 | 1708 | "the production line is now at kiln-v0.2.8" (v0.2.9 entry) | latest tag `kiln-v0.5.2` (2026-08-01); `check_release_versions.py` source of truth = server 0.5.2 | **STALE-PRESENT-TENSE** (historical entry; owner decides annotate-or-leave) |
+
+Version-census anomalies (informational):
+
+| # | anomaly | evidence |
+|---|---|---|
+| V2 | duplicate `kiln-v0.2.16` headers (L1220 "Phase 11 evals…" and L1269 "Phase 2 Vulkan training hardening"), same date 2026-05-15, single tag | `grep -nE '^## kiln-v0\.2\.16' CHANGELOG.md` → 2 hits; `git log -1 --date=short kiln-v0.2.16` → 2026-05-15 (one tag) |
+| V3 | tags `kiln-v0.2.18` (2026-05-19) and `kiln-v0.2.19` (2026-05-23) exist but have **no** changelog entry — history jumps v0.2.16 → v0.2.15 | `git tag -l kiln-v0.2.1[89]` → both exist; `grep -cE '^## kiln-v0\.2\.1[89]' CHANGELOG.md` → 0 |
+
+N/A per audit rules: the five Unreleased draft entries (L818 #1077, L857
+#1076, L908 #1075, L937 #1063, L1107 ECHO) are RELEASE-DRAFT claims about
+unreleased work — no "latest/current" verification applies.
+
+### Owner-queue cross-check (round-159+ A-*/D-*/F-* ids)
+
+`grep -nE '\b[ADF]-[0-9]+\b' CHANGELOG.md` → **0 hits** → no changelog
+entry references a round-159+ owner-queue item. Negative evidence; no
+linkage to record.
+
+### Findings → owner-queue additions (delta: 3)
+
+1. **`CHANGELOG.md` stale path references (21 rows: P1–P15 STALE-REF +
+   D1–D6 DANGLING-REF)** — all resolve to post-reorg locations or
+   documented removals (tables above). Report-only evidence; owner decides
+   whether to rewrite cites or leave the narrative historical.
+2. **`CHANGELOG.md:1708` stale "latest" claim** — "the production line is
+   now at kiln-v0.2.8" predates tags through `kiln-v0.5.2`.
+3. **`CHANGELOG.md` version-census anomalies** — duplicate `kiln-v0.2.16`
+   header (L1220/L1269, one tag) and tags `kiln-v0.2.18`/`kiln-v0.2.19`
+   with no changelog entry.
+
+### Standing gates (17/17 pass, literal CI commands, run before the only
+write — this ledger append — and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119782501 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (809.7 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
