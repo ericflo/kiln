@@ -11095,3 +11095,63 @@ RESOLVED.
 
 `dde275519` (CLEANUP.md only; no push); this hash line lands in the small
 follow-up commit per the round-154/166 precedent.
+
+---
+
+### Round 168a (owner-directed, 2026-08-29) — CI breakage from the README split: found, fixed, CI green
+
+**Owner report:** "ci is broken, please fix and then resume" — confirmed
+against GitHub: `Repository checks` failed on every push of rounds 162–167
+(six consecutive red runs); Pages stayed green.
+
+**Root cause (proven from CI logs, run 33226510720):**
+`scripts/check_runtime_defaults.mjs` pins two README strings — the
+`| server.port | KILN_SERVER_PORT | 8420 |` table row and the
+`(contracts/runtime-defaults-v1.json)` link — which the owner-approved
+README split (round 162, plan step 1.1) deliberately replaced with a stub
+pointing at `docs/contracts/CONFIGURATION.md`. Every local gate suite since
+162 reported green because that gate was one of **six CI gates absent from
+the local standing list**: `check_runtime_defaults.mjs`, the four
+`generate_*_schema.py --check` gates, and `check_release_versions.py`
+(verified locally in CI order: only `check_runtime_defaults.mjs` was
+failing; the other five pass).
+
+**Fix (three layers, three commits):**
+1. `1fb266f7f` — `docs/contracts/CONFIGURATION.md`: the canonical
+   reference now names the runtime-defaults contract pin
+   (`../../contracts/runtime-defaults-v1.json`, the file's existing link
+   convention) and its enforcing gate, in the intro next to the schema
+   contract link.
+2. `07ae631e0` — `scripts/check_runtime_defaults.mjs`: the two README
+   assertions now verify the split chain — README keeps a pointer to
+   `docs/contracts/CONFIGURATION.md`; the server.port default row and the
+   runtime-defaults link are pinned in that canonical home. QUICKSTART,
+   site quickstart, desktop, and example-config assertions unchanged.
+   (Companion to 1fb266f7f; that commit landed the doc side only — see
+   lesson.)
+3. `78aec5a55` — protocol: the standing gate list in this file's Protocol
+   section is now the **full** `repository-hygiene.yml` "Fast repository
+   contracts" job (14 gates, CI order) plus the docs-site trio for
+   doc-affecting rounds; the workflow is declared the source of truth for
+   the list.
+
+**Verification:** all 14 gates pass locally in CI order (committed tree);
+docs-site build validate 59 docs; build tests 11/11; static smoke rc=0;
+CI run 33227891819: `Repository checks` **success**, log shows
+`runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)`
+and `release version drift check passed`.
+
+**Lessons:**
+- A gate that pins *where* a fact is documented breaks the moment that
+  fact moves — moves require sweeping not just doc cross-references but
+  **gate text assertions** (`scripts/check_*.mjs|py` `requireText`-style
+  pins) for the moved content. Add to the move checklist: full-path
+  strings, split constants, workflow regexes, **and gate-asserted
+  strings**.
+- The local standing gate list had drifted below the CI job for this
+  session's duration; the protocol now declares CI the source of truth.
+- **Commit staging trap:** a `git add` of a mistyped path (stderr
+  suppressed) silently narrowed a multi-file commit to one file; the
+  commit message described a two-part fix that only half-landed, leaving
+  CI red until the companion commit 07ae631e0. Verify `git show --stat`
+  against intent before pushing.
