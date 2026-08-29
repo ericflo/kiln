@@ -12802,3 +12802,232 @@ write — this ledger append — and re-run after commit)
 | 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
 | 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (809.7 ms) |
 | 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
+
+---
+
+## Cleanup Agent (round 177) — 2026-08-29
+
+### Scope
+
+READ-ONLY **asset-layer integrity audit** of `docs/site/` (owner-managed published
+site; report-only — **not edited this round**). Rounds 66–176 validated document
+content; this round validates the asset layer: (1) reference census — every
+`href`/`src`/`srcset` attribute, CSS `url(…)`/`@import`, JS `fetch(…)`/`import … from`/
+`new URL(…)`, and the docs-manifest `product_guides` hrefs across all 67 files
+under `docs/site/` (absolute `http(s)://`, `data:`, `#fragment` excluded), resolved
+against the referencing file's directory and classified EXISTING (working tree or
+git-tracked) / GENERATED-PAGE / DYNAMIC; (2) orphan census — 2-level
+reachability from the `index.html` entry points (`docs/site/index.html`,
+`docs/site/demo/index.html`): direct refs + refs from directly-referenced files,
+**plus the build-generated page mechanism** (the 59 manifest documents + hub page
+are not in the source tree; their asset refs are modeled from
+`scripts/docs-site/lib.mjs:925,958–960,979,998` — site-root `assets/favicon.svg`,
+`assets/logo.png`, `css/docs.css`, `js/docs.js` via `rootPrefix`, and
+`css/docs.css:1` `@import url("fonts.css")` → `fonts/*.woff2`); (3) favicon
+set cross-check between hand-written pages and generated pages. D-7 (byte-identical
+font binaries, ledger L10163/L11826) is referenced below for context only, not
+re-litigated. Only writes: this ledger append + commit. No push.
+
+Method limits (stated per scope): static scan only — runtime DOM construction is
+not a load (`js/site.js:266` defensively labels a `.asciinema-frame` if present
+but loads nothing); template-literal fetches are classified DYNAMIC (their target
+is a build artifact, `docs/search-index.json`, written by `lib.mjs:1519–1524`);
+absolute-URL refs (og:image, 404 favicon, canonicals) are outside the relative
+census and were cross-checked separately against the tree; 2-level reachability
+counts files referenced only by other orphan docs (e.g. `SCRIPTS.md` via
+`demo/README.md`) as orphans even though a referrer exists in the tree; generated
+pages were modeled from `lib.mjs`, not parsed from built HTML.
+
+### Reference census — summary
+
+67 files under `docs/site/`; **491 unique relative references**:
+**386 EXISTING**, **104 GENERATED-PAGE** (all valid), **1 DYNAMIC** (generated
+target), **0 MISSING file refs**.
+
+#### Table 1 — EXISTING asset references (386 rows; collapsed by target, all resolved paths verified present in the working tree)
+
+| target (docs/site/…) | refs | kind | referrers (file:line examples) |
+|---|---|---|---|
+| `assets/favicon.svg` | 10 | `<link rel="icon">` + topbar `<img>` | `api.html:11`, `architecture.html:11`, `cli.html:11`, `evals.html:11`, `grpo.html:11`, `index.html:12`, `quickstart.html:11`, `troubleshooting.html:11`, `demo/index.html:11` |
+| `assets/logo.png` | 18 | `<link rel="alternate icon">` + `<link rel="apple-touch-icon">` | the 9 pages above, 2 refs each (`…:12–13`) |
+| `assets/server-ui-dashboard.webp` / `-720.webp` / `-1440.webp` | 6 / 3 / 3 | `<img src>` + `srcset` (720w/1440w/2880w) | `index.html:269–270`, `quickstart.html:759–760`, `demo/index.html:579–580` |
+| `assets/server-ui-{playground,training,adapters}.webp` + `-720/-1440` variants | 2/1/1 each ×3 | `<img src>` + `srcset` | `demo/index.html:606–607, 633–634, 660–661` |
+| `css/fonts.css` | 10 | `<link rel="stylesheet">` (9 pages) + `css/docs.css:1` `@import url("fonts.css")` (generated pages) | `api.html:38` … `troubleshooting.html:38`, `demo/index.html:35` |
+| `css/kiln.css` | 8 | `<link rel="stylesheet">` | `api.html:39` … `troubleshooting.html:39` (8 pages; `index.html` and `demo/index.html` do not load it) |
+| `css/utilities.css` | 7 | `<link rel="stylesheet">` | `api.html:37` … `troubleshooting.html:37` (7 pages; `index.html`, `demo/index.html` do not load it) |
+| `fonts/Inter-{400,600,700}.woff2` | 10 / 9 / 10 | `<link rel="preload" as="font">` (hand-written pages) + `@font-face src` (`css/fonts.css:31,40,49`) | `api.html:33–35` … `troubleshooting.html:33–35`, `demo/index.html:33,34` (400/700 only), `index.html:33–35` |
+| `fonts/JetBrainsMono-{400,600}.woff2` | 2 / 8 | `@font-face src` (`css/fonts.css:58,67`) + `<link rel="preload">` | `api.html:36` … `troubleshooting.html:36` |
+| `js/site.js` | 9 | `<script src defer>` | one per hand-written page (`api.html:1471` … `troubleshooting.html:1219`, `demo/index.html:758`) |
+| `demo/{first-token,kiln-60s,hot-swap,openai,grpo,bench}.cast` | 1 each | `<a href>` download links | `demo/index.html:719–724` |
+| 7 other hand-written pages (`.html`) | 34 / 25 / 25 / 33 / 33 / 33 / 28 | nav/footer cross-links (`index.html` and `demo/index.html` are entry points, not link targets) | e.g. `api.html:270–278,1389–1399` |
+| `./`, `demo/`, `../` directory index links | 44 | `<a href>` to directory roots (server by the platform / resolve to the page above) | `index.html:243` pattern (`../` from demo), `demo/index.html:526,742` |
+
+Absolute-URL refs cross-checked (outside relative census): 18×
+`https://ericflo.github.io/kiln/assets/og-image-v3.png` (9 hand-written pages ×
+`og:image`+`twitter:image` — `api.html:21,29` pattern — plus 9 generated pages via
+`lib.mjs:946`) all map to EXISTING `docs/site/assets/og-image-v3.png`; 1×
+`https://ericflo.github.io/kiln/assets/favicon.svg` (`404.html:11`) maps to
+EXISTING `assets/favicon.svg` (see favicon cross-check, F5).
+
+#### Table 2 — GENERATED-PAGE links (104 rows = 85 slug links + 18 hub links + 1 manifest guide link; resolve to build output `<out>/docs/<slug>/`, absent from the source tree by design — all 26 distinct slugs verified present in the 59-document `docs-manifest.json`; unresolved: **none**)
+
+| slug (generated `<out>/docs/<slug>/`) | refs | from (hand-written pages) |
+|---|---|---|
+| `benchmarks` | 16 | `api.html:1400`, `architecture.html:747,774`, `cli.html:1019`, `evals.html:732`, `grpo.html:656`, `index.html:432,462,507`, `quickstart.html:965`, `troubleshooting.html:566,1117,1148`, `demo/index.html:552,560,750` |
+| `openenv` | 7 (+1 manifest guide) | `api.html:1194`, `architecture.html:453,723`, `cli.html:675`, `index.html:243`, `troubleshooting.html:1032,1097`, `docs-manifest.json` `[OpenEnv Training]` |
+| `http-api` | 7 | `api.html:294,309,360,598,1196,1282,1349` |
+| `training-checkpoints` | 4 | `api.html:1063,1109`, `grpo.html:523`, `index.html:246` |
+| `serving-profiles` | 5 | `architecture.html:631`, `grpo.html:345`, `index.html:298`, `quickstart.html:802`, `demo/index.html:684` |
+| `architecture-deep-dive` | 4 | `architecture.html:280,562,604,715` |
+| `configuration` | 4 | `api.html:382`, `architecture.html:505,561`, `troubleshooting.html:1113` |
+| `evals` | 4 | `api.html:1247`, `evals.html:346,666,705` |
+| `native-sft-profile` | 4 | `api.html:1006`, `architecture.html:660`, `quickstart.html:807,846` |
+| `base-weight-provenance` | 2 | `api.html:396`, `quickstart.html:855` |
+| `dataset-splits` | 3 | `evals.html:430,572`, `quickstart.html:861` |
+| `inference-schema` | 3 | `api.html:295,594,1310` |
+| `observability-schema` | 3 | `api.html:296,357,385` |
+| `configuration-complete` | 3 | `api.html:383,993,1063` |
+| `sft-tokenization` | 2 | `api.html:1003`, `quickstart.html:843` |
+| `thinking-budgets` | 2 | `api.html:799`, `quickstart.html:755` |
+| `openenv-replay` | 2 | `architecture.html:454`, `troubleshooting.html:1033` |
+| `hardware-qualification` | 2 | `api.html:912`, `troubleshooting.html:760` |
+| `hf-trl-interoperability` | 1 | `api.html:1006` |
+| `control-plane-api-schema` | 1 | `evals.html:572` |
+| `execution-provenance` | 1 | `api.html:399` |
+| `latency-observability` | 1 | `troubleshooting.html:758` |
+| `request-lineage-integrity` | 1 | `cli.html:806` |
+| `security` | 1 | `api.html:1296` |
+| `serving-benchmark-protocol` | 1 | `troubleshooting.html:759` |
+| `sft-ingestion` | 1 | `api.html:1054` |
+| `docs/` (generated hub, `lib.mjs:1499` + `renderHubPage` (L1036)) | 18 | `api.html:271,1392`, `architecture.html:254,766`, `cli.html:243,1011`, `evals.html:261,724`, `grpo.html:261,648`, `index.html:90,494`, `quickstart.html:397,957`, `troubleshooting.html:258,1140`, `demo/index.html:526,742` |
+
+#### Table 3 — DYNAMIC (1 row)
+
+| file:line | ref | target | status |
+|---|---|---|---|
+| `js/docs.js:119` | `fetch(`${docsRoot}/search-index.json`)` | `<out>/docs/search-index.json` | GENERATED — written by `lib.mjs:1519–1524` at build time; not in source tree by design; EXISTING in built output |
+
+**Census verdict: zero missing file references.** Every relative asset ref in
+the source tree resolves to an existing file; every `docs/<slug>/` link resolves
+to a manifest document slug; the single dynamic fetch targets a build artifact.
+
+### Orphan census
+
+Method: 2-level reachability from the two `index.html` entry points (direct refs
++ refs from directly-referenced files), with the build-generated page mechanism
+added as referrer of `assets/favicon.svg`, `assets/logo.png`, `css/docs.css`,
+`js/docs.js` (and via `css/docs.css` → `css/fonts.css` → five `fonts/*.woff2`).
+40 of 67 files reachable from the site graph; the 27 not reachable were each
+re-tested against build tooling, gates, and platform conventions:
+
+| # | file (bytes) | referrer status | classification |
+|---|---|---|---|
+| 1 | `assets/server-ui-dashboard.png` (2,552,232) | none — not in any HTML/CSS/JS/gate; the 2880×3512 PNG master behind the referenced `.webp` trio (the webp is served at the 2880w `srcset` slot) | **ORPHAN** (F1) |
+| 2 | `fonts/Inter-500.woff2` (48,256) | none live — `css/fonts.css` ships only Inter 400/600/700 (L31/40/49); `social-preview.html` (the "deterministic social-preview renderer" cited in the fonts.css L21–23 comment) uses only Inter-400/600/700 + **JetBrainsMono-500**; only referrers are stale `.qualification/` snapshots | **ORPHAN** (F2; D-7 context) |
+| 3 | `demo/vendor/asciinema-player/NOTICE.md` (576) | none at all — not even the smoke gate reads it | **ORPHAN** (F3) |
+| 4 | `demo/vendor/asciinema-player/asciinema-player.css` (41,677) | **gate-pinned only** — `scripts/check_docs_site_smoke.mjs:2580–2581` (SHA-256 `a2b6c49a…`); no page loads it (current `demo/index.html` is a screenshot tour; no CDN or vendor script) | orphan-from-site, gate-protected (F3) |
+| 5 | `demo/vendor/asciinema-player/asciinema-player.min.js` (174,624) | **gate-pinned only** — `check_docs_site_smoke.mjs:2584–2585` (SHA-256 `704f17a2…`); no page loads it | orphan-from-site, gate-protected (F3) |
+| 6 | `demo/vendor/asciinema-player/LICENSE` (11,347) | **gate-read only** — `check_docs_site_smoke.mjs:2619–2624` (asserts "Apache License"/"Version 2.0"); no page loads it | orphan-from-site, gate-protected (F3) |
+| 7 | `launch/README.md` | none, but self-declared: "Publicity Draft Sentinel — intentionally does not contain … drafts" | intentional sentinel — NOT queue-worthy |
+| 8 | `demo/README.md` | referenced only by itself (directory index for the demo set) | site-graph orphan; docs artifact (F4 stale-claim carrier) |
+| 9–11 | `demo/SCRIPT.md`, `demo/SCRIPTS.md` | referenced only from `demo/README.md` (outside 2-level reachability) | site-graph orphans; recording-workflow docs |
+| 12–18 | `demo/demo.sh`, `demo-bench.sh`, `demo-first-token.sh`, `demo-grpo.sh`, `demo-hot-swap.sh`, `demo-openai.sh`, `prep-hot-swap.sh` | referenced only from `demo/README.md:11–18` (driver↔cast matrix) / `:22–27` (supporting files) | site-graph orphans; the cast-recording drivers — all six recorded `.cast` outputs ARE referenced (`demo/index.html:719–724`) |
+| 19–21 | `demo/demo-openai.py`, `demo-stream-parser.py`, `demo-sft.json`, `demo-sft-formal.json`, `demo-grpo.json` | referenced only from `demo/README.md:22–27` | site-graph orphans; fixture data/clients for the published casts |
+| 22 | `docs-manifest.json` | **build input** — `build.mjs:29` default manifest path; `lib.mjs` `loadAndValidateManifest` | NOT an orphan |
+| 23 | `assets/og-image-v3.png` | 27 absolute-URL referrers (9 hand-written × og:image + twitter:image; 9 generated via `lib.mjs:946`) | NOT an orphan (social-card asset) |
+| 24 | `fonts/JetBrainsMono-500.woff2` (31,432) | **tooling referrer** — `scripts/docs-site/social-preview.html:24` (`build:social`, `render-social-preview.mjs`) | NOT an orphan |
+| 25 | `404.html` | none in-tree; served by the GitHub Pages platform on 404 | convention — NOT an orphan |
+| 26 | `robots.txt` | none in-tree; crawler protocol | convention — NOT an orphan |
+
+**Orphan tally:** true orphans (zero referrer anywhere) = 3 files (#1, #2, #3);
+orphan-from-published-site but gate-protected = 3 files (#4–#6, ~223 KiB, F3);
+site-graph orphans that are documented recording source material for the six
+published casts = 15 files (#8–#21); intentional sentinel = 1 (#7). 4 files
+(#22–#26 minus… precisely #22, #23, #24, #25, #26) are not orphans at all.
+Orphans are owner-queue evidence per scope — **no deletion** (this round is
+report-only; `docs/site/**` is owner-managed).
+
+### Favicon cross-check (hand-written pages vs generated pages)
+
+| page group | `rel="icon"` | `rel="alternate icon"` | `rel="apple-touch-icon"` | topbar `<img>` | source |
+|---|---|---|---|---|---|
+| 9 hand-written pages — `api/architecture/cli/evals/grpo/quickstart/troubleshooting.html:11–13`, `index.html:12–14`, `demo/index.html:11–13` | `assets/favicon.svg` (relative) | `assets/logo.png` | `assets/logo.png` | `assets/favicon.svg` (`demo/index.html:523`) | hand-written `<head>` |
+| 59 generated document pages + hub | `assets/favicon.svg` via `rootPrefix` (`../..` / `..`) | `assets/logo.png` | `assets/logo.png` | `assets/favicon.svg` | `lib.mjs:958,959,960` (head) + `lib.mjs:925` (topbar) |
+| `404.html` | `https://ericflo.github.io/kiln/assets/favicon.svg` (**hardcoded absolute URL**) | — absent — | — absent — | — | `404.html:11` |
+
+**Verdict: generated pages DO get the full favicon set**, with targets
+byte-identical to the hand-written pages' (both resolve to EXISTING
+`assets/favicon.svg` and `assets/logo.png`). Single deviation: `404.html` uses
+a hardcoded absolute URL for its sole icon link and omits the
+alternate-icon/apple-touch-icon pair (F5).
+
+### Findings → owner-queue additions (delta: 4)
+
+1. **F1 — `docs/site/assets/server-ui-dashboard.png` (2,552,232 B) is dead
+   weight in the published site.** Unreferenced by any HTML/CSS/JS/gate; the
+   site ships only the `.webp` trio (`-720`, `-1440`, base @ 2880w `srcset`
+   slot). Candidate for deletion, or deliberate retention as the re-encode
+   master — owner decides (today it is served by GitHub Pages, adding ~2.55 MB
+   of published payload).
+2. **F2 — `docs/site/fonts/Inter-500.woff2` (48,256 B) has no live referrer.**
+   `css/fonts.css` ships only Inter 400/600/700 (L21–23 comment: 500-weight UI
+   text maps to neighboring faces; "Source 500 files stay available for the
+   deterministic social-preview renderer") — but that renderer
+   (`social-preview.html:9–24`) consumes Inter-400/600/700 and
+   **JetBrainsMono-500** only. Inter-500's only referrers are stale
+   `.qualification/` snapshots. Context: D-7 already covers the byte-identity
+   of the Inter set (4 × 48,256 B, md5 `260c81a4…`); this finding adds
+   reachability evidence, not a new duplicate-bytes claim. Deletion interacts
+   with D-7 options (a/b/c) — one owner decision.
+3. **F3 — the vendored asciinema-player set is orphan from the published site
+   yet gate-pinned (~223 KiB).** No page loads `demo/vendor/asciinema-player/`:
+   current `demo/index.html` is a screenshot tour whose six casts are plain
+   download links, and `js/site.js:266` only defensively labels a
+   `.asciinema-frame` if present. Meanwhile `scripts/check_docs_site_smoke.mjs:2578–2624`
+   pins css + min.js by SHA-256 (`a2b6c49a…` / `704f17a2…`) and asserts the
+   LICENSE text, so deletion is gate-locked. Either the vendor set (and its
+   gate block) is dead weight, or the demo page regressed and lost its player.
+   Owner decision; gate edit required — out of scope for a report-only round.
+4. **F4 — `docs/site/demo/README.md` carries a stale player claim.** L5: "The
+   multi-cast player in index.html lets readers choose any of the six
+   checked-in casts"; L35: "Standalone docs-site player for all six casts, using
+   asciinema-player"; L37–39: the player "loaded from the jsDelivr CDN" — the
+   current `demo/index.html` contains neither a player
+   nor any CDN/vendor script (full census: its only script is `../js/site.js`,
+   its only stylesheet `../css/fonts.css`). Prose fix or player restoration is
+   owner-gated (docs/site prose is owner-managed).
+
+Minor note (not separately queue-worthy): **F5 — `docs/site/404.html:11`** is
+the one page whose favicon is a hardcoded absolute URL and which lacks the
+alternate-icon/apple-touch-icon pair all 9 other hand-written pages and all
+generated pages (`lib.mjs:958–960`) carry; on any non-`ericflo.github.io`
+origin that favicon 404s.
+
+### Standing gates (17/17 pass, literal CI commands — run before the only
+write (this ledger append); re-run after commit and re-verified)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119797818 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (795.6 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 177 reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
