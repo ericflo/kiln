@@ -10934,4 +10934,5 @@ F-1..F-4 (gated); both R165 queue items; D-1 remains RESOLVED.
 
 ### Commit
 
-The commit this entry lands in (CLEANUP.md only; no push).
+`c7fd55eec` (CLEANUP.md only; no push); this hash line lands in the small
+follow-up commit per the round-154 precedent.
