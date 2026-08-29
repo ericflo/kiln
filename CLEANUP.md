@@ -12060,3 +12060,354 @@ contracts/guides/code.
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 173 reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 174a) — 2026-08-29
+
+**Scope.** Owner-directed: `crates/*/tests/` path + token integrity audit — three
+censuses (file inventory; path references; `KILN_…` env names + CLI flags).
+Strictly read-only on the tree: grep/sed/awk/python3 only — no cargo builds, no
+test execution. The only write is this ledger append.
+
+### Census 1 — Inventory of `crates/*/tests/` (168 files, 19 crates)
+
+Per-row proof command (applies to every row): `wc -l <file>` + `head -1 <file>`,
+both re-run at HEAD this round. Line counts = physical lines; first line = the
+file's own purpose doc-line (or, for fixtures/support, the stated role).
+
+| crate | file | lines | first line / purpose |
+|---|---|---:|---|
+| autograd | `crates/kiln-autograd/tests/end_to_end.rs` | 260 | //! kiln-autograd end-to-end backward integration test. |
+| autograd | `crates/kiln-autograd/tests/ffn_block_training.rs` | 256 | //! Realistic transformer FFN block, trained on the substrate. |
+| autograd | `crates/kiln-autograd/tests/new_ops_compose.rs` | 290 | //! Integration test for the Phase 1.62-1.66 new ops. |
+| autograd | `crates/kiln-autograd/tests/tape_with_real_backwards.rs` | 333 | //! End-to-end tape integration with **real** BackwardOp impls |
+| autograd | `crates/kiln-autograd/tests/training_loop_descent.rs` | 273 | //! Tiny-net training loop demo on the substrate. |
+| blas | `crates/kiln-blas/tests/cublaslt_handle_smoke.rs` | 320 | //! End-to-end smoke + parity tests for `CublasLtMatmulHandle`. |
+| conv1d-kernel | `crates/kiln-conv1d-kernel/tests/kt_v2_smoke.rs` | 164 | //! Candle-free smoke tests for the kt-API conv1d kernel entries. |
+| conv1d-kernel | `crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs` | 240 | //! Phase R.7 — CPU-vs-ROCm parity for the vendored `causal_conv1d_update` / |
+| eval | `crates/kiln-eval/tests/anthropic_to_suite.rs` | 154 | //! End-to-end: Anthropic API trajectory → SftConversation → synthesized |
+| eval | `crates/kiln-eval/tests/real_trajectory_shapes.rs` | 276 | //! Integration test against real production trajectory shapes. |
+| flash-attn | `crates/kiln-flash-attn/tests/kt_v2_smoke.rs` | 136 | //! Candle-free smoke tests for the kt-API flash-attn paged-KV-write entries. |
+| flash-attn | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` | 1333 | //! Phase R.8 — ROCm composite SDPA parity vs a CPU reference, on a real AMD GPU. |
+| flce-kernel | `crates/kiln-flce-kernel/tests/rocm_flce_parity.rs` | 355 | //! Phase R.7 — ROCm parity for the Fused Linear Cross-Entropy (FLCE) kernel. |
+| gdn-kernel | `crates/kiln-gdn-kernel/tests/gated_rms_norm_parity.rs` | 538 | //! Parity test for the fused GDN gated RMSNorm CUDA kernel. |
+| gdn-kernel | `crates/kiln-gdn-kernel/tests/gates_parity.rs` | 189 | //! Parity test for the fused GDN gates CUDA kernel. |
+| gdn-kernel | `crates/kiln-gdn-kernel/tests/kt_v2_smoke.rs` | 67 | //! Candle-free smoke test for the kt-API gdn-kernel `gdn_gates_bf16_kt` |
+| gdn-kernel | `crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs` | 573 | //! ROCm parity tests for the GDN kernels (Phase R.7). |
+| graph | `crates/kiln-graph/tests/capture_lifetime.rs` | 182 | //! Capture-lifetime integration test (Phase 5 + Phase 1.27/1.28). |
+| kt-bridge | `crates/kiln-kt-bridge/tests/host_to_cuda_copy.rs` | 75 | #![cfg(feature = "cuda")] |
+| marlin-gemm | `crates/kiln-marlin-gemm/tests/kt_v2_smoke.rs` | 81 | //! Candle-free smoke test for the kt-API Marlin W4A16 GEMM entry. |
+| marlin-gemm | `crates/kiln-marlin-gemm/tests/rocm_marlin_parity.rs` | 176 | //! Phase R.8 — CPU-vs-ROCm parity for the W4A16 Marlin GEMM composite. |
+| model | `crates/kiln-model/tests/adamw_pytorch_oracle.rs` | 412 | //! Compare each production optimizer kernel with the pinned PyTorch AdamW |
+| model | `crates/kiln-model/tests/backend_capability_contract.rs` | 2293 | use std::fs; |
+| model | `crates/kiln-model/tests/cross_entropy_from_logits_grad.rs` | 271 | //! CPU numeric-parity test for the fused "cross-entropy from full logits" |
+| model | `crates/kiln-model/tests/cuda_kv_physical_resize.rs` | 133 | //! #26 — CUDA twin of `rocm_kv_physical_resize`: proves |
+| model | `crates/kiln-model/tests/cuda_sft_step_proof.rs` | 239 | //! Bounded single SFT-style training step on `Device::Cuda` through the kt-tape |
+| model | `crates/kiln-model/tests/marlin_qproj_parity.rs` | 263 | //! Parity test for the Marlin W4A16 q_proj wiring in [`kiln_model::forward::q_proj_forward`]. |
+| model | `crates/kiln-model/tests/metal_sft_step_proof.rs` | 242 | //! Bounded single SFT-style training step on `Device::Metal` through the kt-tape |
+| model | `crates/kiln-model/tests/mtp_byte_eq.rs` | 348 | //! Phase B2 byte-equality test for native MTP weights. |
+| model | `crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs` | 229 | //! #37 — ACCURATE gradcheck of the ROCm flash-attn tape backward. |
+| model | `crates/kiln-model/tests/rocm_kv_physical_resize.rs` | 188 | //! #26 — On-box proof that `PagedKvCacheKt::physical_resize_to` is a REAL |
+| model | `crates/kiln-model/tests/rocm_sft_step_proof.rs` | 316 | //! R.9/E2E — bounded single SFT-style training step on `Device::Rocm` through the |
+| model | `crates/kiln-model/tests/rocm_shrink_nonincreasing.rs` | 75 | //! On-box proof that a committed physical KV shrink reduces live ROCm-pool use. |
+| model | `crates/kiln-model/tests/tape_forward_parity.rs` | 3391 | //! Parity tests for the production tape-forward path. |
+| model | `crates/kiln-model/tests/vk_bwd_adapter_parity.rs` | 726 | //! PR4b — gradient validation of [`kiln_model::vk_bwd_adapter::VkBwdAdapter`] |
+| model | `crates/kiln-model/tests/vk_resident_decode_parity.rs` | 405 | //! Gate (d) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: end-to-end… |
+| model | `crates/kiln-model/tests/vk_sft_step_proof.rs` | 378 | //! PR5f — bounded single SFT-style training step on `Device::Vulkan` through the |
+| model | `crates/kiln-model/tests/vk_tape_record_proof.rs` | 452 | //! PR5b — record-and-backprop proof on the real Vulkan GPU (#1082). |
+| opd-loss-kernel | `crates/kiln-opd-loss-kernel/tests/rocm_opd_loss_parity.rs` | 262 | //! Phase R.7 — wave-size correctness + parity test for the fused OPD |
+| openenv | `crates/kiln-openenv/tests/authenticated_openenv.rs` | 304 | use std::sync::{ |
+| openenv | `crates/kiln-openenv/tests/miniopenenv_interop.rs` | 385 | use kiln_openenv::{ |
+| openenv | `crates/kiln-openenv/tests/session_lifecycle.rs` | 300 | use std::{future::Future, time::Duration}; |
+| optim | `crates/kiln-optim/tests/adamw_pytorch_oracle.rs` | 176 | //! Compare Kiln's portable F32 AdamW reference with a source-pinned PyTorch |
+| optim | `crates/kiln-optim/tests/end_to_end_training.rs` | 241 | //! End-to-end Parameter-based training demo. |
+| optim | `crates/kiln-optim/tests/epoch_bump.rs` | 70 | //! #1082 Phase 2.7 — **every** optimizer bumps the `Parameter` epoch |
+| optim | `crates/kiln-optim/tests/fixtures/adamw_pytorch_oracle_v1.json` | 1879 | fixture: pinned AdamW PyTorch-oracle values for the `adamw_pytorch_oracle` tests (v1) |
+| optim | `crates/kiln-optim/tests/full_training_step.rs` | 182 | //! Full training step end-to-end demo. |
+| optim | `crates/kiln-optim/tests/integration.rs` | 180 | //! kiln-optim integration tests. |
+| optim | `crates/kiln-optim/tests/microbatch_accumulation.rs` | 195 | //! End-to-end training demo: gradient accumulation across micro-batches |
+| optim | `crates/kiln-optim/tests/tied_weights.rs` | 195 | //! Tied-weight integration test — anti-pattern 17 enforcement. |
+| rmsnorm-kernel | `crates/kiln-rmsnorm-kernel/tests/kt_v2_smoke.rs` | 59 | //! Candle-free smoke test for the kt-API rmsnorm-kernel `fused_rmsnorm_kt` |
+| rmsnorm-kernel | `crates/kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs` | 354 | //! Numerical parity for the fused CUDA/ROCm Muon optimizer kernel |
+| rmsnorm-kernel | `crates/kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs` | 305 | //! ROCm parity sweep for the fused RMSNorm kernels (Phase R.7). |
+| server | `crates/kiln-server/tests/adapter_compose.rs` | 816 | //! Integration test: per-request adapter composition (`adapters: [...]` field |
+| server | `crates/kiln-server/tests/adapter_download.rs` | 197 | //! Integration test: GET /v1/adapters/{name}/download streams the adapter |
+| server | `crates/kiln-server/tests/adapter_merge_concat.rs` | 307 | //! Integration test: POST /v1/adapters/merge accepts `mode == "concat"` and |
+| server | `crates/kiln-server/tests/adapter_merge_ties.rs` | 243 | //! Integration test: POST /v1/adapters/merge accepts `mode == "ties"` and |
+| server | `crates/kiln-server/tests/adapter_path_traversal.rs` | 364 | //! Integration tests for path-traversal protections in the adapter |
+| server | `crates/kiln-server/tests/adapter_registry_state.rs` | 229 | //! Integration tests for expanded `GET /v1/adapters` registry state. |
+| server | `crates/kiln-server/tests/adapter_upload.rs` | 587 | //! Integration test: POST /v1/adapters/upload accepts a multipart tar.gz |
+| server | `crates/kiln-server/tests/adapter_verify.rs` | 183 | //! Integration tests for `kiln adapter verify` offline receipt validation. |
+| server | `crates/kiln-server/tests/agent_teacher_validation.rs` | 653 | //! Integration tests: §10.6 agent endpoints fail fast on unresolvable |
+| server | `crates/kiln-server/tests/agent_traces_bridge.rs` | 243 | //! Integration tests: the §10 pi-session→training bridge. |
+| server | `crates/kiln-server/tests/corrections_completion_marking.rs` | 212 | //! Integration test: a FAILED training job leaves the corrections basket |
+| server | `crates/kiln-server/tests/corrections_store.rs` | 219 | //! Integration tests: the durable corrections store endpoints. |
+| server | `crates/kiln-server/tests/eval_dataset_pipeline.rs` | 382 | //! End-to-end test for the dataset → synthesis → judgment flywheel, |
+| server | `crates/kiln-server/tests/eval_mock_worker_pipeline.rs` | 228 | //! Mock eval worker-pipeline test: construct tracked state, run one inline |
+| server | `crates/kiln-server/tests/http_api_contract.rs` | 159 | //! Executable binding between the published OpenAPI path/method inventory and |
+| server | `crates/kiln-server/tests/openenv_training_interop.rs` | 379 | use std::sync::atomic::{AtomicUsize, Ordering}; |
+| server | `crates/kiln-server/tests/qwen3_agentic_mock_executor.rs` | 430 | //! Mock-executor tests for the built-in qwen3.5-agentic-core suite. |
+| server | `crates/kiln-server/tests/qwen3_chat_template_e2e.rs` | 152 | //! Chat-template rendering end-to-end against the built-in agentic suite. |
+| server | `crates/kiln-server/tests/real_model_integration.rs` | 6090 | //! Integration test: wire a tiny random-weight ModelRunner into the HTTP server |
+| server | `crates/kiln-server/tests/remote_teacher_identity.rs` | 505 | use std::collections::HashMap; |
+| server | `crates/kiln-server/tests/request_log_capture.rs` | 262 | //! Integration test: durable request/response log capture. |
+| server | `crates/kiln-server/tests/timeout_cancel_drain.rs` | 165 | //! Regression test for issue #664 — `tokio::time::timeout` cancels the |
+| server | `crates/kiln-server/tests/training_failed_job_error.rs` | 295 | //! Integration tests: failed training jobs carry their failure detail |
+| server | `crates/kiln-server/tests/training_lora_scale_preflight.rs` | 433 | //! Integration test: LoRA alpha/rank scaling is validated AT SUBMIT. |
+| server | `crates/kiln-server/tests/training_output_name_validation.rs` | 460 | //! Integration test: training-submission adapter names are validated. |
+| server | `crates/kiln-server/tests/training_queue_cap.rs` | 206 | //! Integration test: training queue cap (audit MEDIUM §4 part 1). |
+| server | `crates/kiln-server/tests/training_tracked_cap.rs` | 345 | //! Integration test: training tracked-jobs cap and TTL GC (audit MEDIUM §4 part 2). |
+| server | `crates/kiln-server/tests/ui_distill_tab.rs` | 214 | //! Smoke test for the §3 + §10.6 Distill tab in the embedded dashboard. |
+| server | `crates/kiln-server/tests/ui_eval_corrections.rs` | 167 | //! Contract test for the eval-drill → corrections capture surface. |
+| tensor | `crates/kiln-tensor/tests/attention_block.rs` | 160 | //! Causal attention block integration test. |
+| tensor | `crates/kiln-tensor/tests/compare_select_chain.rs` | 109 | //! Integration test for the compare → bool-reduce → where_select chain. |
+| tensor | `crates/kiln-tensor/tests/cuda_latency_bench.rs` | 116 | //! CUDA latency microbenchmark for the backend hardware fixture manifest. |
+| tensor | `crates/kiln-tensor/tests/cuda_matmul_parity.rs` | 130 | //! Deterministic CUDA dense-matmul parity against a scalar CPU oracle. |
+| tensor | `crates/kiln-tensor/tests/cuda_reclaim_smoke.rs` | 135 | //! #28 — On-box proof that the CUDA governor-reclaim primitives run on real |
+| tensor | `crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs` | 121 | //! #26 — CUDA verification of the exact device primitives the paged-KV physical |
+| tensor | `crates/kiln-tensor/tests/docs_quickstart.rs` | 32 | use kiln_tensor::{DType, Device, Result, Tensor, ops}; |
+| tensor | `crates/kiln-tensor/tests/full_sampler_chain.rs` | 255 | //! End-to-end Phase 4 sampler chain integration test. |
+| tensor | `crates/kiln-tensor/tests/log_softmax_backend_stability.rs` | 256 | //! Extreme-range log-softmax coverage for CUDA and ROCm. |
+| tensor | `crates/kiln-tensor/tests/metal_concurrent_determinism.rs` | 158 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/metal_gemm_sweep.rs` | 148 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/metal_matmul_bench.rs` | 115 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/metal_ops_parity.rs` | 1211 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/metal_reclaim_smoke.rs` | 49 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/metal_sdpa_bench.rs` | 143 | #![cfg(feature = "metal")] |
+| tensor | `crates/kiln-tensor/tests/mini_block.rs` | 183 | //! Mini transformer block integration test. |
+| tensor | `crates/kiln-tensor/tests/new_ops_parity.rs` | 289 | //! Integration parity test covering the new ops shipped in PRs |
+| tensor | `crates/kiln-tensor/tests/rocm_activation_parity.rs` | 86 | //! Phase R.5 — CPU-vs-ROCm parity for the elementwise unary activation kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_argmax_last_axis_parity.rs` | 115 | //! Phase R.5 — wave-size correctness test for `rocm_argmax_last_axis`. |
+| tensor | `crates/kiln-tensor/tests/rocm_bf16_matmul_fallback.rs` | 115 | #![cfg(feature = "rocm")] |
+| tensor | `crates/kiln-tensor/tests/rocm_binary_minmax_parity.rs` | 143 | //! Phase R.5 — element-wise binary minimum / maximum parity test. |
+| tensor | `crates/kiln-tensor/tests/rocm_broadcast_parity.rs` | 86 | #![cfg(feature = "rocm")] |
+| tensor | `crates/kiln-tensor/tests/rocm_capture_arena.rs` | 218 | //! Phase R.9-2 — ROCm capture arena (freeze-pointers) invariants. |
+| tensor | `crates/kiln-tensor/tests/rocm_cast_parity.rs` | 152 | //! Phase R.5 — CPU-vs-ROCm parity for the elementwise dtype `cast` kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_clamp_pow_parity.rs` | 116 | //! Phase R.5 — CPU-vs-ROCm parity for the clamp/pow scalar-unary kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_compare_parity.rs` | 134 | //! Phase R.5 — element-wise compare parity test. |
+| tensor | `crates/kiln-tensor/tests/rocm_concat_parity.rs` | 167 | #![cfg(feature = "rocm")] |
+| tensor | `crates/kiln-tensor/tests/rocm_cross_entropy_parity.rs` | 133 | //! Phase R.5 — wave-size correctness test for the cross_entropy kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_diag_parity.rs` | 146 | //! Phase R.5 — CPU-vs-ROCm parity for the `diag` kernels. |
+| tensor | `crates/kiln-tensor/tests/rocm_dropout_parity.rs` | 150 | //! Phase R.5b — dropout CPU-vs-ROCm parity (distribution / scale / mask). |
+| tensor | `crates/kiln-tensor/tests/rocm_fp8_parity.rs` | 122 | //! R.5b — ROCm FP8 (E4M3FN) quantize/dequantize correctness. |
+| tensor | `crates/kiln-tensor/tests/rocm_index_select_parity.rs` | 262 | //! Phase R.5 — CPU-vs-ROCm parity for the `index_select` gather kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_is_finite_reduce_parity.rs` | 107 | //! Phase R.5 parity test for the `is_finite_reduce` kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_latency_bench.rs` | 116 | //! ROCm latency microbenchmark for the backend hardware fixture manifest. |
+| tensor | `crates/kiln-tensor/tests/rocm_layernorm_parity.rs` | 115 | //! Phase R.5 — the load-bearing wave-size correctness test for LayerNorm. |
+| tensor | `crates/kiln-tensor/tests/rocm_lerp_parity.rs` | 125 | //! Phase R.5 — element-wise lerp parity test. |
+| tensor | `crates/kiln-tensor/tests/rocm_masked_fill_parity.rs` | 122 | //! Phase R.5 — CPU-vs-ROCm parity for the masked_fill kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_matmul_parity.rs` | 563 | //! Phase R.6 — hipBLASLt dense GEMM parity vs a CPU reference, on a real AMD |
+| tensor | `crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs` | 183 | //! ROCm paged decode attention parity for Qwen3.5-4B's split GQA4 D=256 path. |
+| tensor | `crates/kiln-tensor/tests/rocm_pool_reuse.rs` | 89 | //! Decisive, PROCESS-ISOLATED measurement for the dynamic training/inference |
+| tensor | `crates/kiln-tensor/tests/rocm_prompt_logprobs.rs` | 213 | //! Real-device parity and validation coverage for compact prompt-logprobs. |
+| tensor | `crates/kiln-tensor/tests/rocm_reduce_arbitrary_axis_parity.rs` | 311 | //! Phase R.5 — wave-size correctness for the arbitrary-axis reductions |
+| tensor | `crates/kiln-tensor/tests/rocm_reduce_last_axis_parity.rs` | 197 | //! Phase R.5 — wave-size correctness parity for the reduce_last_axis kernels. |
+| tensor | `crates/kiln-tensor/tests/rocm_rmsnorm_parity.rs` | 90 | //! Phase R.5 — wave-size correctness test for `rocm_rmsnorm_last_axis`. |
+| tensor | `crates/kiln-tensor/tests/rocm_rope_parity.rs` | 365 | #![cfg(feature = "rocm")] |
+| tensor | `crates/kiln-tensor/tests/rocm_scalar_op_parity.rs` | 108 | //! Phase R.5 — CPU-vs-ROCm parity for the tensor-scalar elementwise kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_scan_axis_parity.rs` | 137 | //! Phase R.5b — cumsum / cumprod (scan over the last axis) CPU-vs-ROCm parity. |
+| tensor | `crates/kiln-tensor/tests/rocm_scatter_add_parity.rs` | 171 | //! Phase R.5b — scatter_add (dim0 atomic scatter) CPU-vs-ROCm parity. |
+| tensor | `crates/kiln-tensor/tests/rocm_softmax_parity.rs` | 138 | //! Phase R.5 — the load-bearing wave-size correctness test. |
+| tensor | `crates/kiln-tensor/tests/rocm_storage_smoke.rs` | 378 | //! Phase R.3 smoke tests — Tensor <-> ROCm device round-trips on a real AMD |
+| tensor | `crates/kiln-tensor/tests/rocm_topk_last_axis_parity.rs` | 96 | //! R.5b — CPU-vs-ROCm parity for the on-device sampling top-k kernel. |
+| tensor | `crates/kiln-tensor/tests/rocm_trim_pool.rs` | 86 | //! On-hardware smoke for `rocm_trim_pool` — proves kiln can RETURN pooled VRAM |
+| tensor | `crates/kiln-tensor/tests/rocm_w8_sample_batch.rs` | 473 | //! ROCm batched W8 LM-head sampling contract. |
+| tensor | `crates/kiln-tensor/tests/rocm_where_select_parity.rs` | 75 | #![cfg(feature = "rocm")] |
+| tensor | `crates/kiln-tensor/tests/rocm_write_in_place.rs` | 112 | //! Phase R.9-1 — `rocm_write_host_in_place` round-trip + device-pointer |
+| tensor | `crates/kiln-tensor/tests/sampler_chain.rs` | 212 | //! Full sampler chain integration test. |
+| tensor | `crates/kiln-tensor/tests/training_full_block.rs` | 169 | //! Full transformer block trained end-to-end through the substrate. |
+| tensor | `crates/kiln-tensor/tests/transformer_block_e2e.rs` | 119 | //! End-to-end transformer block integration test. |
+| tensor | `crates/kiln-tensor/tests/utilities_compose.rs` | 169 | //! Integration tests for the Phase 1.81+ utility ops. |
+| tensor | `crates/kiln-tensor/tests/vk_shaders_smoke.rs` | 70 | //! Smoke test for the kiln-tensor Vulkan shader build pipeline (#1082). |
+| train | `crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` | 422 | fixture: GRPO TRL-oracle cases (v1) |
+| train | `crates/kiln-train/tests/fixtures/qwen35_sft_oracle_v1.json` | 1098 | fixture: Qwen3.5 SFT-oracle cases (v1; `"model_id": "Qwen/Qwen3.5-4B"` @ L1082) |
+| train | `crates/kiln-train/tests/qwen35_sft_oracle.rs` | 123 | use std::path::PathBuf; |
+| train | `crates/kiln-train/tests/vk_cuda_opd_parity.rs` | 254 | //! Cross-engine numerical parity: CUDA OPD vs Vulkan OPD on identical |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/gdn_in_proj_rows.rs` | 404 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/gdn_parity.rs` | 2471 | use anyhow::{Context, Result}; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/gdn_qk_norm_recurrent.rs` | 189 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/gdn_state_rows.rs` | 191 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs` | 93 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs` | 478 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/rope_tables.rs` | 77 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/support/mod.rs` | 36 | shared test support: Vulkan device probe + `KILN_QUALIFICATION` hard-gate helper |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs` | 356 | //! Phase C.5 parity test: vk_sdpa_prefill forward + backward vs CPU reference. |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_flce_parity.rs` | 832 | //! FLCE forward + backward parity vs naive CPU cross-entropy. |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_full_attn_qkv_gate_split_parity.rs` | 211 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs` | 915 | //! Backward-kernel parity tests for Phase 4 backward shaders. |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_gdn_chunkwise_parity.rs` | 497 | //! Parity test for `vk_gdn_chunkwise_forward_no_grad` vs a CPU |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs` | 363 | //! Forward-only parity tests for the GDN foundation wrappers added in |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_l2_norm_qk_parity.rs` | 126 | use anyhow::Result; |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs` | 558 | //! Phase B parity tests: vk_matmul forward + backward vs an analytical |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_muon_parity.rs` | 391 | //! Numerical parity for the fused Vulkan Muon optimizer kernel |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_opd_parity.rs` | 478 | //! Vulkan OPD top-K reverse-KL parity tests. |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_rmsnorm_parity.rs` | 134 | //! Phase B.2: vk_rmsnorm forward + backward parity vs analytic |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_sdpa_prefill_kernel_parity.rs` | 163 | //! Parity test for the production `sdpa_prefill_f32.comp` kernel |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_softmax_parity.rs` | 119 | //! Phase C.1: vk_softmax forward + backward parity vs an analytical |
+| vulkan-kernel | `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | 430 | //! Parity tests for vk-native training Phase A: VkTensor + autograd |
+
+Per-crate totals: tensor 60, server 29, vulkan-kernel 22 (incl.
+`tests/support/mod.rs`), model 17, optim 8 (incl. 1 fixture JSON), autograd 5,
+train 4 (incl. 2 fixture JSONs), gdn-kernel 4, openenv 3, rmsnorm-kernel 3,
+eval 2, flash-attn 2, conv1d-kernel 2, marlin-gemm 2, blas 1, flce-kernel 1,
+graph 1, kt-bridge 1, opd-loss-kernel 1. Non-`.rs` files: 3 oracle fixture
+JSONs + 1 shared `support/mod.rs`.
+
+### Census 2 — Path-reference census (repo paths cited by test files)
+
+Pattern swept: `docs/…`, `scripts/…`, `bench-results/…`, `capabilities/…`,
+`contracts/…`, `benchmarks/…`, `demo/…`, `deploy/…`, `assets/…`, `QUICKSTART`,
+`README`, `CHANGELOG`, `BENCHMARKS`, `kiln.example.toml`, `Qwen3.5-4B`
+(`grep -rnE` over `crates/*/tests/*.rs`, HEAD this round).
+
+| # | cite (file:line, all sites) | cited target | load mode | target NOW | verdict |
+|---|---|---|---|---|---|
+| P1 | kiln-model/tests/backend_capability_contract.rs:37,:82,:259,:1217,:1259,:1324,:1484,:1503,:1625,:1669,:1738,:1806,:1858,:1941,:2196 (15 sites) | `docs/contracts/backend-capability-report.json` | runtime-loaded (`workspace_root().join(…)` + `fs::read_to_string`; `workspace_root()` = repo root per :13-18) | **EXISTS, git-tracked** (`git ls-files --error-unmatch …` OK; `docs/contracts/` = the post-reorg location the docs reorg moved contracts into) | VALID — cited location IS the post-reorg location |
+| P2 | backend_capability_contract.rs:2195 | `docs/contracts/backend-capability-report.md` | runtime-loaded (`fs::read_to_string` ×2, byte-stability assert) | **EXISTS, git-tracked** | VALID |
+| P3 | backend_capability_contract.rs:2180 (executes `python3 … --self-test/--check`), :2247 (string assert vs report evidence) | `scripts/generate_backend_capability_report.py` | runtime-executed + string-only assert | **EXISTS** at `scripts/` top-level (not under `scripts/investigations/` — correct: live gate, not an investigation) | VALID |
+| P4 | backend_capability_contract.rs:2251 | `scripts/check_unification_gates.sh` | string-only (assert vs report `evidence_present`) | **EXISTS** at `scripts/` top-level | VALID |
+| P5 | kiln-model/tests/vk_resident_decode_parity.rs:1 | `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md` | comment-only (doc header) | **EXISTS, git-tracked** | VALID |
+| P6 | kiln-model/tests/vk_tape_record_proof.rs:326 | `docs/archive/vk-harmonization/STATUS-AND-SOAK-HANDOFF.md` | comment-only (explicitly marked "archived") | **EXISTS, git-tracked** | VALID |
+| P7 | kiln-openenv/tests/miniopenenv_interop.rs:9 | `scripts/check_miniopenenv_interop.sh` | comment-only | **EXISTS** at `scripts/` top-level | VALID |
+| P8 | kiln-server/tests/http_api_contract.rs:21 | `contracts/kiln-http-api-v1.openapi.json` | **compile-time** `include_str!("../../../contracts/…")` (resolves to repo-root `contracts/`) | **EXISTS, git-tracked**; freshness enforced by `check_http_api_contract.py --self-test` (gate 7) | VALID |
+| P9 | kiln-train/tests/qwen35_sft_oracle.rs:54 | `../../Qwen3.5-4B` (= repo-root `Qwen3.5-4B/` local checkout) | runtime-loaded (default `model_path()`; test is `#[ignore]`d, L60) | **EXISTS in working tree** but **gitignored** (`.gitignore:10`) — host-local checkout, not part of committed tree; `#[ignore]`d test + `KILN_QUALIFICATION_MODEL_PATH` override keep it CI-safe | VALID (host-local by design; not a repo path) |
+| P10 | 88 occurrences in 43 test files (e.g. kiln-server/tests/adapter_compose.rs:127 `"Qwen/Qwen3.5-4B"`; kiln-tensor/tests/sampler_chain.rs:4) | HF model id `Qwen/Qwen3.5-4B` (string data / comment, not a repo path) | string literals / comments | HF model live — round 173 re-verified `https://huggingface.co/Qwen/Qwen3.5-4B` → HTTP 200; local checkout present per P9 | VALID |
+| P11 | kiln-model/tests/mtp_byte_eq.rs:40 | `/path/to/Qwen3.5-4B` | eprintln skip-hint (placeholder text) | placeholder, not a repo path | N/A (documentation string) |
+| P12 | kiln-eval/tests/anthropic_to_suite.rs:57,:131; real_trajectory_shapes.rs:55 | `/data/apps/trajectory-trainer/scripts/run_experiment.py` | trajectory-fixture JSON field (external sandbox path) | out-of-repo by construction (Anthropic-trajectory fixture data) | N/A (not a repo path) |
+
+**Sweep negatives (zero hits, verified):** `capabilities/`, `benchmarks/`,
+`demo/`, `deploy/`, `assets/`, `bench-results/` (incl. the reorg'd
+`bench-results/{findings,baselines}/`), `README`/`QUICKSTART`/`CHANGELOG`/
+`BENCHMARKS` (README-split targets), `kiln.example.toml`. No test file cites a
+pre-reorg location. **STALE-REF count: 0.**
+### Census 3 — Retired-token census (`KILN_…` env names + CLI flags)
+
+Basis: `contracts/runtime-env-direct-reads-v1.json` (live-runtime env contract;
+39 `KILN_…` names among 448 reads; enforced by gate 3),
+`docs/contracts/CONFIGURATION.md` (config surface), clap surfaces in
+`crates/kiln-server` + `crates/kiln-train`. 31 unique `KILN_…` tokens in test
+files; every `--…` flag string inventoried below. RETIRED definition applied:
+absent from the contract AND zero live-code references.
+
+**A. Contract members (19 tokens) — LIVE:**
+
+| token | sites (file:line) | evidence (proof command + one line) |
+|---|---|---|
+| KILN_QUALIFICATION | 54 sites / 21 test files (e.g. kiln-model/tests/adamw_pytorch_oracle.rs:74, kiln-tensor/tests/rocm_matmul_parity.rs:17, kiln-vulkan-kernel/tests/vk_tensor_parity.rs:11) | `python3 -c "import json;d=json.load(open('contracts/runtime-env-direct-reads-v1.json'));print(any(r['env']=='KILN_QUALIFICATION' for r in d['reads']))"` → `True`; live src read: `sed -n '8439p' crates/kiln-model/src/rocm_graph.rs` = `std::env::var("KILN_QUALIFICATION").ok().as_deref(),` |
+| KILN_TENSOR_VULKAN_TEST | 18 sites (e.g. kiln-model/tests/vk_bwd_adapter_parity.rs:41, kiln-model/tests/vk_sft_step_proof.rs:24, backend_capability_contract.rs:1978) | same contract grep → `True` (reads[55],[56],[62],[63],[65],[73],[77]); 14 src refs |
+| KILN_ROCM_WAVE64 | 7 sites / 6 files (e.g. kiln-flash-attn/tests/rocm_flash_attn_parity.rs:10, kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs:10) | same contract grep → `True` (reads[15],[25],[44]) |
+| KILN_ROCM_FLASH_BENCH_SEQ | kiln-flash-attn/tests/rocm_flash_attn_parity.rs:793,:794,:800 | same contract grep → `True` (reads[36]) |
+| KILN_ROCM_FLASH_BENCH_HEADS | …rocm_flash_attn_parity.rs:806 | → `True` (reads[33]) |
+| KILN_ROCM_FLASH_BENCH_KV_HEADS | …rocm_flash_attn_parity.rs:810 | → `True` (reads[35]) |
+| KILN_ROCM_FLASH_BENCH_HEAD_DIM | …rocm_flash_attn_parity.rs:814 | → `True` (reads[34]) |
+| KILN_ROCM_FLASH_BENCH_FWD_ONLY | …rocm_flash_attn_parity.rs:840 | → `True` (reads[32]) |
+| KILN_ROCM_FLASH_BENCH_COLLAPSED_BWD | …rocm_flash_attn_parity.rs:853 | → `True` (reads[31]) |
+| KILN_OPENENV_INTEROP_COUNTER_URL | kiln-openenv/tests/miniopenenv_interop.rs:14,:15 | → `True` (reads[]) |
+| KILN_OPENENV_INTEROP_EXACT_TEXT_URLS | …miniopenenv_interop.rs:153,:154 | → `True` (reads[]) |
+| KILN_OPENENV_INTEROP_BANDIT_URL | …miniopenenv_interop.rs:269,:270,:364,:365; kiln-server/tests/openenv_training_interop.rs:24,:25 (6 sites) | → `True` (reads[]); live src read: `sed -n '799p' crates/kiln-server/src/openenv_evaluation.rs` = `let environment_url = std::env::var("KILN_OPENENV_INTEROP_BANDIT_URL")` |
+| KILN_OPENENV_INTEROP_CONNECT4_URL | …miniopenenv_interop.rs:297,:298 | → `True` (reads[]) |
+| KILN_OPENENV_INTEROP_MAZE_URL | …miniopenenv_interop.rs:319,:320 | → `True` (reads[]) |
+| KILN_OPENENV_INTEROP_WORDLE_URL | …miniopenenv_interop.rs:338,:339 | → `True` (reads[]) |
+| KILN_OPENENV_INTEROP_ARCADE_URLS | …miniopenenv_interop.rs:74,:75 | → `True` (reads[]) |
+| KILN_QUALIFICATION_MODEL_PATH | kiln-model/tests/vk_resident_decode_parity.rs:10,:36; kiln-train/tests/qwen35_sft_oracle.rs:53,:72 (4 sites) | → `True` (reads[76]) |
+| KILN_QUALIFICATION_HF_LOGITS_PATH | kiln-model/tests/vk_resident_decode_parity.rs:37 | → `True` (reads[75]) |
+| KILN_MTP_BYTE_EQ_MODEL | kiln-model/tests/mtp_byte_eq.rs:17,:35 | → `True` (reads[71]) |
+| KILN_RUN_LONG_ROCM_RMSNORM | kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs:135,:136 | → `True` (reads[]) |
+
+**B. Non-contract tokens (12 tokens) — all verified LIVE by a non-contract live role (none RETIRED, none UNRESOLVED):**
+
+| token | sites (file:line) | classification | evidence (proof command + one line) |
+|---|---|---|---|
+| KILN_LATENCY_METRIC | kiln-tensor/tests/cuda_latency_bench.rs:110, rocm_latency_bench.rs:110, metal_matmul_bench.rs:109, metal_sdpa_bench.rs:140 (4 sites) | LIVE — stdout metrics-marker (not an env var) | `sed -n '23p' scripts/write_backend_latency_result_artifact.py` = `METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+([a-z0-9_]+)\s+…")` — consumed by the latency-artifact writers; also emitted by live `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs:557` |
+| KILN_QWEN35_HF_TOKENIZER_ORACLE_PASS | kiln-train/tests/qwen35_sft_oracle.rs:120 (eprintln pass marker) | LIVE — qualification pass-marker | `sed -n '231p' qualification/workloads/vulkan-inference-oracles-v1.json` = `"pattern": "KILN_QWEN35_HF_TOKENIZER_ORACLE_PASS cases=[1-9][0-9]*"` — required by the Vulkan qualification workload |
+| KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS | kiln-model/tests/vk_resident_decode_parity.rs:213 (eprintln pass marker) | LIVE — qualification pass-marker | `sed -n '284p' qualification/workloads/vulkan-inference-oracles-v1.json` = `"pattern": "KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS …"` — required |
+| KILN_VULKAN_HF_FULL_LOGIT_PASS | kiln-model/tests/vk_resident_decode_parity.rs:331 (eprintln pass marker) | LIVE — qualification pass-marker | `sed -n '47p' scripts/qualification/vulkan_hf_model_oracle.py` = `r"KILN_VULKAN_HF_FULL_LOGIT_PASS "` — required |
+| KILN_VULKAN_MODEL_ROUTES_PASS | kiln-server/tests/real_model_integration.rs:6087 (eprintln pass marker) | LIVE — qualification pass-marker | `sed -n '85p' qualification/workloads/vulkan-model-routes-v1.json` = `"pattern": "KILN_VULKAN_MODEL_ROUTES_PASS …"` — required |
+| KILN_VULKAN_SAMPLING_CPU_ORACLE_PASS | kiln-vulkan-kernel/tests/linear_decode_sample.rs:474 (eprintln pass marker) | LIVE — qualification pass-marker | `sed -n '123p' qualification/workloads/vulkan-inference-oracles-v1.json` = `"pattern": "KILN_VULKAN_SAMPLING_CPU_ORACLE_PASS"` — required |
+| KILN_MUON_PARALLEL_THRESHOLD | kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs:290 (comment only) | LIVE — compile-time C constant (not an env var) | `sed -n '184p' crates/kiln-rmsnorm-kernel/csrc/optimizer_step.cu` = `#define KILN_MUON_PARALLEL_THRESHOLD 4096` (used at :716,:778); comment claim checks out: n = rows×cols = 32,768 ≥ 4096 for the cited (8,4096)/(4096,8) cases |
+| KILN_TEST_ORIGIN_SCOPED_SECRET_MUST_NOT_LEAK | kiln-server/tests/remote_teacher_identity.rs:293 (sentinel name, deliberately unset) | LIVE — fixture name for a live DYNAMIC read; never a real env var | flows as `api_key_env` config data into `sed -n '24p' crates/kiln-train/src/credential_provider.rs` = `std::env::var(name)` — dynamic reads are outside the literal-read contract by design |
+| KILN_TEST_REMOTE_SECRET_INTENTIONALLY_MISSING_8CC28B | …remote_teacher_identity.rs:326 (sentinel, deliberately missing) | LIVE — same mechanism | same proof as above; test asserts fail-closed on absence |
+| KILN_TEST_REMOTE_TEACHER_HANDLE_SECRET_716D3C | …remote_teacher_identity.rs:362 (set by test via `ScopedTestEnvironment::set`) | LIVE — same mechanism | `sed -n '364p' crates/kiln-server/tests/remote_teacher_identity.rs` = `let _environment = ScopedTestEnvironment::set(ENV, SECRET);` |
+| KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET | kiln-server/tests/agent_teacher_validation.rs:459 (sentinel, deliberately unset) | LIVE — same mechanism | `sed -n '459p'` = `let attacker_env = "KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET";` |
+
+**C. `--…` CLI flag strings (all sites inventoried):**
+
+| flag(s) | sites (file:line) | classification | evidence (proof command + one line) |
+|---|---|---|---|
+| `--self-test` | backend_capability_contract.rs:2184 (arg), :2238 (assert) | LIVE — generator-script flag | `sed -n '3753p' scripts/generate_backend_capability_report.py` = `if "--self-test" in sys.argv:` |
+| `--check` | backend_capability_contract.rs:2204 (arg), :2239 (assert) | LIVE — generator-script flag | `sed -n '3759p' scripts/generate_backend_capability_report.py` = `if "--check" in sys.argv:` |
+
+**D. Cargo / cargo-test flags (standard cargo surface; comment + gate-command sites only):**
+
+| flag(s) | sites (file:line) | classification | evidence |
+|---|---|---|---|
+| `--features cuda\|metal\|rocm\|vulkan\|cuda,vulkan\|cublaslt` (11 distinct) | backend_capability_contract.rs:938,:943,:1003,:1008,:1013,:1018,:1028,:1033,:1068,:1074,:1076,:1619,:1688,:1692,:1693,:1876,:1880 (embedded `cargo test` gate-command strings) | LIVE — cargo feature flags | every name present in the cited crate's `Cargo.toml` (`grep -n '"cublaslt"\|"vulkan"\|"cuda"\|"metal"\|"rocm"' crates/kiln-*/Cargo.toml` — all found; verified programmatically, zero misses) |
+| `--test <name>` (13 distinct: adamw_pytorch_oracle, marlin_qproj_parity, mtp_byte_eq, qkv_gate, rocm_flash_attn_bwd_gradcheck, rocm_kv_physical_resize, rocm_shrink_nonincreasing, rocm_sft_step_proof, tape_forward_parity, vk_bwd_adapter_parity, vk_sft_step_proof, vk_tape_record_proof, vk_residual_add) | same file (gate-command strings) + doc headers (cuda_sft_step_proof.rs:14, metal_sft_step_proof.rs:16, rocm_flash_attn_bwd_gradcheck.rs:18, rocm_kv_physical_resize.rs:16, rocm_sft_step_proof.rs:17, rocm_shrink_nonincreasing.rs:12, vk_bwd_adapter_parity.rs:46, vk_sft_step_proof.rs:31, vk_tape_record_proof.rs:51) | LIVE — cargo test-target flags | every target exists: `ls crates/<crate>/tests/<name>.rs` (verified programmatically, zero misses) |
+| `--tests` | backend_capability_contract.rs:1693,:1695 | LIVE — cargo target selector | standard cargo flag; cited `tests/` dirs non-empty (verified) |
+| `--no-default-features` | backend_capability_contract.rs:1619,:1688,:1692 | LIVE — cargo flag | standard cargo flag |
+| `--test-threads=1` | rocm_conv1d_parity.rs:23; cuda_kv_physical_resize.rs:9; cuda_sft_step_proof.rs:14; metal_sft_step_proof.rs:16; rocm_*.rs (6 files); vk_sft_step_proof.rs:31; vk_tape_record_proof.rs:51 | LIVE — cargo-test runner flag (comment-only run hints) | standard `cargo test` runner flag in doc comments |
+| `--nocapture` | same 8 sites (comment-only run hints) | LIVE — cargo-test runner flag | standard `cargo test` runner flag in doc comments |
+| `--ignored` | kiln-tensor/tests/cuda_latency_bench.rs:11 (doc comment) | LIVE — cargo-test runner flag | standard `cargo test` runner flag in doc comment |
+| `--exact` | kiln-model/tests/vk_bwd_adapter_parity.rs:46 (doc comment) | LIVE — cargo-test runner flag | standard `cargo test` runner flag in doc comment |
+| `--workspace` | kiln-model/tests/cuda_kv_physical_resize.rs:13 (doc comment) | LIVE — cargo flag | standard cargo flag in doc comment |
+
+**Census 3 negatives / verdicts:**
+- **RETIRED: 0.** No `KILN_…` token is both absent from the live contract and
+  reference-dead: the 12 non-contract tokens each have a verified live role
+  (qualification pass-markers consumed by `qualification/workloads/*.json` +
+  `scripts/qualification/`; stdout metrics protocol consumed by
+  `scripts/write_backend_latency_result_artifact.py`; a C `#define` constant;
+  sentinel names feeding the live dynamic read at
+  `crates/kiln-train/src/credential_provider.rs:24`).
+- **UNRESOLVED: 0.**
+- Zero kiln-server CLI flags and zero kiln-train CLI flags appear anywhere in
+  `crates/*/tests/*.rs` (grep for `--` flag strings found only the cargo /
+  script flags inventoried above; the single `----test-boundary-XXX` at
+  kiln-server/tests/adapter_upload.rs:76 is an HTTP multipart boundary string,
+  not a flag).
+### Findings + owner-queue additions
+
+**Findings: 1 (Class B, comment precision), 0 stale refs, 0 retired tokens.**
+
+1. **R174a-1** — `crates/kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs:290`:
+   the comment reads `KILN_MUON_PARALLEL_THRESHOLD` as if it were an env var,
+   but it is a compile-time C preprocessor constant —
+   `crates/kiln-rmsnorm-kernel/csrc/optimizer_step.cu:184`
+   (`#define KILN_MUON_PARALLEL_THRESHOLD 4096`), read at :716/:778. The
+   threshold semantics in the comment are correct (n = rows×cols = 32,768 ≥
+   4096 for the cited (8,4096)/(4096,8) cases); only the "env-var-looking
+   name" framing is imprecise. Suggested owner fix:
+   "the compile-time `#define KILN_MUON_PARALLEL_THRESHOLD` (optimizer_step.cu:184)".
+   Class B (test comment only, zero code impact).
+
+   *Owner-queue delta: +1 item (R174a-1).* No STALE-REF or RETIRED items to
+   queue. The `KILN_TEST_*` sentinels are recorded in Census 3B as deliberate
+   fixtures of a live dynamic read — no owner decision needed.
+
+### Standing gates (17/17 pass, literal CI commands, run after the only write —
+this ledger append — and again after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119717579 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (851.8 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 174a reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
