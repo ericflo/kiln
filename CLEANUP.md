@@ -11940,3 +11940,123 @@ against the live tree (not from prior-round summaries).
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 172 reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Round 173 — read-only public-surface truth audit (Audit A live surface + Audit B docs/site claim sweep) [2026-08-29]
+
+Owner-directed round: verify what the public surface claims against (A) live
+GitHub/GHCR/Hugging Face evidence and (B) canonical contracts, guides, and
+code. Strictly read-only for owner prose: findings are routed to the owner
+queue, nothing in `docs/site` or the guides is edited. Only this ledger
+append is committed.
+
+### Audit A — live public surface (all evidence re-fetched this round, read-only)
+
+| Claim (public-surface source) | Verdict | Evidence |
+|---|---|---|
+| Prebuilt release artifacts exist for the latest release (README/QUICKSTART install path) | **ACCURATE** | `gh release view kiln-v0.5.2 --repo ericflo/kiln` (read-only): latest release `kiln-v0.5.2` (published 2026-08-01) ships all 5 platform archives, each with a `.sha256` sidecar: `aarch64-apple-darwin-metal.tar.gz`, `x86_64-pc-windows-msvc-cuda124.zip`, `x86_64-unknown-linux-gnu-cuda124.tar.gz`, `x86_64-unknown-linux-gnu-rocm724.tar.gz`, `x86_64-unknown-linux-gnu-vulkan.tar.gz` (+ `THIRD_PARTY_LICENSES.md`) |
+| GHCR image `ghcr.io/ericflo/kiln-server` exists | **ACCURATE** | Registry token + `tags/list` (52 tags; newest versioned tag `0.5.1`). `latest` manifest resolves (HTTP 200) and is byte-identical to `0.5.1` (config digest `sha256:c52b286d…` and all layer digests equal). **Nuance, not drift:** no `0.5.2` tag on GHCR — the image lags the GitHub release by one; no public-surface claim asserts parity |
+| Hugging Face model `Qwen/Qwen3.5-4B` is downloadable | **ACCURATE** | `https://huggingface.co/Qwen/Qwen3.5-4B` → HTTP 200 (re-verified this round); local checkout `Qwen3.5-4B/config.json` present in repo |
+
+Audit A verdict: **0 STALE, 0 OVER-CLAIM.**
+
+### Audit B — docs/site hand-written pages (11 pages; 10–30 claims sampled per page, line-cited)
+
+| Page | Claims sampled | Verdict |
+|---|---:|---|
+| `index.html` | 12 | **1 DRIFTED** (L295–297); rest ACCURATE |
+| `quickstart.html` | 10 | all ACCURATE |
+| `api.html` | 30 (76/76 endpoint paths + 15 non-endpoint claims) | all ACCURATE |
+| `architecture.html` | 15 | all ACCURATE |
+| `cli.html` | 18 | all ACCURATE |
+| `evals.html` | 16 | all ACCURATE |
+| `grpo.html` | 14 | all ACCURATE |
+| `troubleshooting.html` | 22 | **1 DRIFTED** (L503–504); rest ACCURATE |
+| `404.html` | 0 (trivial error page, no product claims) | n/a |
+| `demo/index.html` | player page; claims covered via `SCRIPT.md` | n/a |
+| `demo/SCRIPT.md` | 9 | all ACCURATE |
+
+Spot-check evidence for the ACCURATE verdicts (representative, full set in
+round-173 reply): `api.html` 76/76 endpoints present in
+`contracts/kiln-http-api-v1.openapi.json` (programmatic diff); `--v1/train/agentic`
+→ same `training::submit_grpo` handler (alias confirmed); 4096-token cap
+(`teacher_identity.rs:32 MAX_COMPLETION_PROMPT_TOKENS`); 1M-file/16 GiB cache
+(`logit_cache.rs:41,44`); `LoadAdapterRequest` fields (`api/adapters.rs:106-114`);
+`cli.html` 127.0.0.1:8420 + `cuda_graph_cache_entries=8 (1..=64)`
+(CONFIGURATION.md:1074) + `KILN_BATCHING_*` derivation (CONFIGURATION.md:902-904);
+`evals.html` scorer kinds/auto_detect ordering (EVAL_GUIDE.md:298-303, 372-375),
+`.eval/{suites,datasets,judgments}` layout (config.rs:2880, eval/datasets.rs:4,
+eval/judgments.rs:6), `distill_refresh` fields (training_queue.rs:4604-4605,
+api/training.rs:1532-1533); `grpo.html` Muon LR 2e-3
+(NATIVE_SFT_PROFILE.md:324-329), `effective_seed` = `DecimalU64` string pattern
+(contracts/kiln-control-plane-v1.schema.json), inline + streamed-JSONL routes
+(GRPO_GUIDE.md:310,314); `architecture.html` 32 layers = 8 full / 24 linear
+(local `Qwen3.5-4B/config.json`), crate inventory (kiln-scheduler, kiln-core,
+kiln-model, kiln-flash-attn, kiln-vulkan-kernel, kiln-train, kiln-openenv,
+kiln-eval all exist), SFT loss-route table exact match (NATIVE_SFT_PROFILE.md:93-96),
+OpenEnv schema IDs `kiln.openenv-{discovery,training-contract,run-failure}.v1`
+(openenv_cli.rs:74, failure.rs:10, kiln-openenv/src/client.rs:551);
+`demo/SCRIPT.md` `SftRequest {examples, config}` ($defs.SftRequest),
+`/v1/train/status` → `Vec_TrainingStatus` array, `ChatCompletionRequest.adapter`
+(completions/schema.rs:155), `AdaptersResponse.available`
+(kiln-artifacts-v1.schema.json), `--features cuda|metal` (kiln-server/Cargo.toml:81-87).
+
+### Drift findings → owner queue (read-only, no prose edited this round)
+
+1. **`docs/site/index.html:295-297` — DRIFTED (inverted profile guidance).**
+   Site: "the default stable profile serves traffic but rejects training and
+   live adapter changes. Use experimental for the interactive learning loop."
+   Canonical `docs/serving/SERVING_PROFILES.md:42-51` policy table: stable =
+   inference yes / training GPU ownership yes / adapter weight transitions yes;
+   and :75-77: experimental "has the same inference/training/adapter… ownership
+   contract as stable; its only purpose is admitting a route that remains under
+   an explicit correctness quarantine… Ordinary users should not select it."
+   Also contradicted by five sibling site pages that state it correctly
+   (api.html:1245, cli.html:687, evals.html:285/338/545, grpo.html:579,
+   architecture.html:628-629). Suggested owner fix: reword to "stable supports
+   inference, training, and live adapter transitions; experimental is only for
+   quarantined backend routes".
+2. **`docs/site/troubleshooting.html:503-504` — DRIFTED (route count).**
+   Site: "`native_default` preserves the twenty-five established model/backend
+   routes… `portable_fallback` declines all twenty-five." Canonical
+   `docs/contracts/CONFIGURATION.md:218`: native_default enables **twenty-four**
+   of the twenty-five routes and declines `gdn_full_chunk_forward_multiblock`;
+   the 25-row policy table (CONFIGURATION.md:235-262) shows native_default
+   24-on/1-off, portable_fallback 0-on. (L512's "one of the twenty-five
+   documented model/backend routes" matches the canonical "twenty-five …
+   decisions" wording and is not itself drifted.) Suggested owner fix: "twenty-four
+   of the twenty-five (the GDN full-chunk multiblock route stays off even in
+   native_default)".
+
+Owner-queue delta: **+2 items (both Class B prose corrections, no code impact)**;
+all other sampled claims on all 11 pages verified accurate against canonical
+contracts/guides/code.
+
+### Standing gates (post-change, all literal CI commands)
+
+| Gate (CI order) | Result |
+|---|---|
+| python3 scripts/check_repository_artifacts.py | pass (rc=0) |
+| python3 scripts/check_production_file_budget.py | pass (rc=0) |
+| python3 scripts/check_runtime_env_contract.py --check | pass (rc=0) |
+| python3 scripts/check_source_parsing_tests.py | pass (rc=0) |
+| python3 scripts/check_config_schema.py --self-test | pass (rc=0) |
+| python3 scripts/check_openenv_contract.py --self-test | pass (rc=0) |
+| python3 scripts/check_http_api_contract.py --self-test | pass (rc=0) |
+| python3 scripts/generate_observability_schema.py --check | pass (rc=0) |
+| python3 scripts/generate_artifact_schema.py --check | pass (rc=0) |
+| python3 scripts/generate_eval_schema.py --check | pass (rc=0) |
+| python3 scripts/generate_control_plane_schema.py --check | pass (rc=0) |
+| node scripts/check_thinking_budget_contract.mjs | pass (rc=0) |
+| node scripts/check_runtime_defaults.mjs | pass (rc=0) |
+| python3 scripts/check_release_versions.py | pass (rc=0) |
+| node scripts/docs-site/build.mjs --validate-only | **59 documents, 0 copied assets**, rc=0 |
+| node scripts/docs-site/test/build.test.mjs | **11 pass / 0 fail**, rc=0 |
+| KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs | **rc=0** |
+
+**17/17 gates green.**
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 173 reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
