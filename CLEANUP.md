@@ -11802,3 +11802,141 @@ chosen, the gate's `stripCodeFences` inline-code handling
 
 - Trim + ledger commit: `167923f62` (hash line lands in the small follow-up
   commit per the round-154/166/167/170 precedent; no push.)
+
+## Cleanup Agent (round 172) — 2026-08-28
+
+**Scope.** Re-anchor + re-proof the consolidated owner-decision queue
+(CLEANUP.md:10134, round 159: D-2..D-16, A-1..A-11, F-1..F-4) plus the
+R165/R166/R167/R169/R170 additions (R165-1/R165-2, R166-1/R166-2, R167, R170)
+— 37 items — against HEAD `f039a199c` (round 171 hash pin, clean tree).
+Append-only round: no existing ledger text edited; only file modified is
+CLEANUP.md. Light work per brief: grep/sed/awk/python3 only; no cargo/test
+suites beyond the standing gates below. Every row re-verified in this session
+against the live tree (not from prior-round summaries).
+
+### Full re-anchor table (37 queue items)
+
+| ID | Queue cite (verbatim) | Current cite (this round) | Status | Proof (this round) |
+|---|---|---|---|---|
+| D-2 | full_attention.rs:2165/:2224/:2661/:2666 | unchanged | OPEN | `sed -n '2165p;2224p;2661p;2666p' crates/kiln-model/src/forward/full_attention.rs` → all 4 lines are `max_seqlen_k` / `kernel_max_seqlen_k` |
+| D-3 | tokenizer.rs:449/:602/:785; cuda_graph.rs:1477; forward/tests/mod.rs:3159/:3192/:3885/:8530/:8547; grpo_step.rs:1003; forward_backward.rs:335-336; opd_tape_shim.rs:508; grpo_tape_shim.rs:1197; real_model_integration.rs:1463/:1999/:2029/:2059; cuda_storage.rs:2338 | unchanged | OPEN | sed at every cited line reproduces the cited statement: 2 `) -> Result(` type_complexity anchors + `fn render_jinja_template_with(` (:785); `fn replay_state_for_capture(` (:1477); 5 `unnecessary_mut_passed` anchors; `let mut comp_echo_env_ce` (:1003); 2 `let mut ..._for_tail` (:335-336); `pub fn try_tape_opd_echo_env_compose_kt(` (:508); `pub(crate) struct EchoEnvSpec` (:1197); `async fn qualify_public_repeatability_...` (:1463) + 3× `let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap()` (:1999/:2029/:2059); `mod tests {` (:2338) |
+| D-4 | cuda_opd_remote.rs:289-304; requirement remote_teacher.rs:149-153 | unchanged (requirement fn in `crates/kiln-train/src/remote_teacher.rs`) | OPEN | `sed -n '289p' crates/kiln-train/examples/cuda_opd_remote.rs` → `let teacher_cfg = RemoteTeacherConfig {` with zero `expected_identity` in 289-304; `grep -n expected_identity crates/kiln-train/src/remote_teacher.rs` → field :111, required at :150 (queue's 149-153 range holds) |
+| D-5 | backend_matmul.rs pair (12,115 B) + workspace_pool.rs pair (3,819 B) | unchanged | OPEN | `md5sum` → both pairs byte-identical (b9c778… / 507087…); `wc -c` → 12,115 + 3,819 B exact |
+| D-6 | kiln-mps, kiln-graph-cuda, kiln-vulkan-blas zero-dependent | unchanged | OPEN | manifest scan: 0 dependent manifests for each of the 3 crates (doc-comment mentions only) |
+| D-7 | Inter ×4 (48,256 B) + JetBrainsMono ×3 (31,432 B) byte-identical | unchanged | OPEN | `md5sum docs/site/fonts/*.woff2` → 4× `260c81a4…` + 3× `b636a65d…`; `wc -c` → 48,256 / 31,432 B exact |
+| D-8 | kiln-blas/README.md:65/:71 ARCHITECTURE.md probe story | unchanged | OPEN | `sed -n '65p;71p' crates/kiln-blas/README.md` → both lines cite ARCHITECTURE.md's probe narrative; ARCHITECTURE.md has zero cublasLt/probe mentions (R147 finding holds) |
+| D-9 | 22 unused imports across audit-customop.py, audit-dtype-usage.py, bench-concurrent-batch.py:31, bench-trajectory-turns.py, c11–c14, h15c×2, h17×3, h17b, h18×3, mtp_c1_summarize.py, mtp_h_main_reference_dump.py×2, mtp_reference_dump.py, phase-c40b/analyze_c40b.py ("most now under scripts/investigations/ after R154") | all 20 files present (19 under scripts/investigations/); `tempfile` still at bench-concurrent-batch.py:31 | OPEN (count drifted up) | AST recount (this round): **29** unused top-level imports (queue: 22); 12 additional `from __future__ import annotations` lines excluded as non-removable; `tempfile`@:31 confirmed unused (only token = the import itself) |
+| D-10 | 7 duplicate-utility pairs: check_production_file_budget.py:42/:75 ≡ check_repository_artifacts.py:62/:95; expected_metric_names (check_backend_latency_fixtures.py:298 ↔ lock_backend_latency_thresholds.py:123); _canonical_json (hf_trl_roundtrip.py:54 ↔ vulkan_hf_model_oracle.py:68); _parse_worker_marker (rocm_hf_layer_attribution.py:295 ↔ rocm_hf_path_attribution.py:224); load_oracle_packages (grpo_trl_oracle.py:118 ↔ qwen35_sft_oracle.py:216); package_version_base (grpo_trl_oracle.py:114 ↔ adamw_pytorch_oracle.py:91) | unchanged | OPEN | sed at all 14 cited lines reproduces identical signatures; pair-7 nuance: names differ by a leading underscore (`package_version_base` vs `_package_version_base`), same body |
+| D-11 | server-release.yml Install-Rust-stable ×5 / Package ×5; free-disk-space in ci.yml + runpod-image.yml | unchanged | OPEN | `grep -c "Install Rust stable" .github/workflows/server-release.yml` → 5; `jlumbroso/free-disk-space@main` at ci.yml (3 named steps :144/:250/:306), docker-server-release.yml:45, runpod-image.yml:25, server-release.yml:184 |
+| D-12 | cuda_qwen_sft_smoke.sh:89-92 dead `KILN_CUDA_NATIVE_TRAINING` setter (now under scripts/investigations/) | unchanged | OPEN | `sed -n '88,93p' scripts/investigations/cuda_qwen_sft_smoke.sh` → setter at :92; 0 `KILN_CUDA_NATIVE_TRAINING` refs in crates/**.{rs,toml} (retired var confirmed) |
+| D-13 | teacher_identity.rs:502 `pub(crate) fn is_lower_sha256` + kiln-server copy | unchanged | OPEN | `sed -n '502p' crates/kiln-train/src/teacher_identity.rs` → exact; kiln-server keeps own `is_lower_sha256_identity` (imported at hf_train_cli.rs:36, openenv_cli.rs:44) |
+| D-14 | desktop-build.yml `workflow_dispatch` only | unchanged | OPEN | `grep -A3 '^on:' .github/workflows/desktop-build.yml` → `workflow_dispatch:` sole trigger |
+| D-15 | desktop/README.md:136-141 stale Apple-secret list | unchanged | OPEN | README L139-141 lists `APPLE_ID`/`APPLE_TEAM_ID`/`APPLE_PASSWORD` (0 workflow references to the 3); desktop-build.yml consumes API-key set (`APPLE_API_KEY_BASE64` :83 etc.), matching signing.md §3 (R161 finding holds) |
+| D-16 | docs/desktop/about.png + (stale) README.md:1673-1681 | asset + generator unchanged; README cell **moot** (README is 479 lines) | OPEN (re-anchored) | 77,591 B file; `capture-desktop-screenshots.mjs:43` → `out: "docs/desktop/about.png"`; zero live embeds in README.md / desktop/README.md / docs/site; check_docs_site_smoke.mjs:1819 lists `desktop-about.png` as a *retired* asset (gate asserts absence — opposite of an expectation) |
+| A-1 | README.md:1295/:1300-1303/:1365-1382/:1259-1277; QUICKSTART.md:1055/:1060-1063/:1088/:1096/:1110-1117; BENCHMARKS.md:190-200/:217-220/:224-235/:707/:747-758 | README cells **MOOT** (README 479 lines; crate count already 14→33 at README:402, R164 phase 3); QUICKSTART cells unchanged; BENCHMARKS cells drifted **+27** (R164 `76f6e7a70`): 217-226 (`[batching]`), 237 (`effective_enabled`), 245-258 (A/B paragraph), 733 (`KILN_KV_CACHE_FP8`), 423/:547-548/:606/:650-651/:775 (`KILN_W4A16`/`KILN_CUDA_GRAPHS`) | OPEN (re-anchored) | `wc -l README.md` → 479; sed at each current BENCHMARKS cell reproduces the retired claim (`[batching]` :217, `mode = "enabled"` :218, `effective_enabled` :237, `KILN_KV_CACHE_FP8` :733, `KILN_W4A16=1 KILN_CUDA_GRAPHS=true` :775); QUICKSTART cells verified exact; workspace = 33 crates (`Cargo.toml` members) |
+| A-2 | BENCHMARKS.md:441-442 llama.cpp table rows; :680-681 raw-JSON notes | **467-468** and **705-707** (drift +26/+25) | OPEN (re-anchored) | `sed -n '467,468p'` → llama.cpp `9d34231` rows citing `bench-results/llama-bench-a6000-post536.json`; `sed -n '705,707p'` → raw-JSON notes citing `llama-bench.json` + `llama-bench-a6000-post536.json`; `find bench-results -name '*llama*'` → **0 files** (phantom confirmed) |
+| A-3 | bench-results/README.md:50/:54 | unchanged | OPEN | `sed -n '50p;54p'` → `## Pre-migration baselines` + the 2026-05-17 Llama-3.1-8B row (150 tok/s / 58.4 / 44) exact |
+| A-4 | kiln-model/**src**/tape_forward_parity.rs; vram.rs:1717/:1732; dtype.rs:49/:55; flce kt_api.rs:67; opd-loss kt_api.rs:109 | **path fix**: `crates/kiln-model/tests/tape_forward_parity.rs` (src/ file does not exist); other 4 files unchanged | OPEN (re-anchored) | 76 `candle` refs in tests/tape_forward_parity.rs; vram.rs:1717 "ask candle" / :1732 "LoRA Vars"; dtype.rs:49 "candle CPU path" / :55 "candle-Mac path"; both kt_api.rs error strings at cited lines exact |
+| A-5 | tape_forward.rs:811/:826; forward.rs:710/:723/:741/:748; tests/tape_forward_parity.rs:74-80 | unchanged; fn body actually at `src/forward/training_primitives.rs:147` (re-export module) | OPEN (precision note) | `sed -n '811p;826p' src/tape_forward.rs` → doc refs incl. "(a misnomer —" at :826; `candle_cache` param at forward.rs:710/:741 + usages :723/:748; `kt_in`/`candle_out` helpers at tests/tape_forward_parity.rs:74-80 exact |
+| A-6 | docs/site/ zero OFL/SIL; THIRD_PARTY_LICENSES.md:6733 foldhash 0.2.0 only; Cargo.lock also 0.1.5 | unchanged | OPEN | 0 OFL/SIL mentions in docs/site/; `grep -n foldhash THIRD_PARTY_LICENSES.md` → :6733 `foldhash 0.2.0` only; Cargo.lock carries both `0.1.5` + `0.2.0` package blocks |
+| A-7 | desktop/README.md:186 `com.kiln.desktop` ×3; :164 "On `desktop-v*` tag push it builds …" | unchanged | OPEN | 3 occurrences all at L186; L164 verbatim tag-push claim; desktop-build.yml is dispatch-only (D-14 cross-ref) |
+| A-8 | bench-concurrent-batch.py:5830-5833/:5938-5942; evidence at bench-results/concurrent-batched-decode-2026-05-26.md:28-29 | flags unchanged; evidence file moved to **bench-results/findings/**/concurrent-batched-decode-2026-05-26.md:28-29 | OPEN (path drift) | sed reproduces `--warmup` alias (:5830-5833) + `--mode` (:5938-5942); 0 consumers of `args.warmup`/`args.mode` (exact-match grep); findings/ file :28 `--mode concurrent`, :29 `--warmup` |
+| A-9 | BENCHMARKS.md:607 pointer; model_dispatch.rs:3212; c29:53 PR #XXX | BENCHMARKS.md **:633** (drift +26); others unchanged | OPEN (re-anchored) | `sed -n '633p' BENCHMARKS.md` → "see TODO note in `cuda_graph.rs`"; `grep -c TODO crates/kiln-model/src/cuda_graph.rs` → 0 (orphan pointer); `sed -n '3212p' model_dispatch.rs` → `TODO(phase2`; `sed -n '53p' scripts/investigations/c29_logits_compare_v2.py` → `PR #XXX (H15b)` |
+| A-10 | kiln.example.toml [openenv] L366-373 no credentials example; teachers.credentials L309-311 | unchanged | OPEN | awk: L366 `[openenv]` (section body 367-373, no credentials example); L309-311 `# [teachers.credentials.primary-vllm]` / `origin` / `api_key_env` exact |
+| A-11 | kiln.example.toml:411-414 `[agent]` commented-out header | `# [agent]` at **:414** (L411-413 now the R166 §10.6 comment) | OPEN (range holds) | awk: L414 = `# [agent]`; only commented-out section header in the file (teachers.credentials block is a table comment, not a header) |
+| F-1 | mtp-training-plan.md:98 "Follow-ups after PR-B"; echo_blog_post.md (zero in-repo refs) | unchanged | OPEN | `sed -n '98p' docs/archive/mtp-training/mtp-training-plan.md` → `## Follow-ups after PR-B`; echo_blog_post.md 27,663 B, 0 live md links |
+| F-2 | RADV/driver SIGSEGV (7 kiln-vulkan-kernel binaries) | host environment — not reproducible in a light-work round | OPEN (as reported) | No repo cite to re-anchor; re-reported verbatim per queue (suite-run excluded by round brief) |
+| F-3 | docs/archive/candle-removal/ 21 links + phase-c ×2 + vk-harmonization ×1 | **21 exact** (11× `../../CONFIGURATION.md` + 10× `../../NATIVE_SFT_PROFILE.md`); the queue's phase-c/vk-harmonization cites now **0 matches** | OPEN (re-anchored) | per-file `grep -c` over docs/archive/candle-removal/*.md → 11 + 10; targets now docs/contracts/CONFIGURATION.md + docs/training/NATIVE_SFT_PROFILE.md; no phase-c/vk-harmonization md links remain in the archive dirs |
+| F-4 | 24 op TODOs in kiln-tensor ("real pending work … metal_paged_decode.rs, vulkan_paged_decode.rs") | **filename fix**: the 24 TODOs sit in `crates/kiln-tensor/src/ops/*.rs` (13 files: flip ×2, concat ×2, log_variants ×2, argmax ×1, repeat ×2, cross_entropy ×1, rope ×2, broadcast ×2, scatter_add ×2, layernorm ×1, trig ×1, hyperbolic ×2, chunk_split ×4); metal/vulkan_paged_decode.rs absent from tree | OPEN (re-anchored) | `grep -rn "phase 4" crates/kiln-tensor/src/ | grep -i todo | wc -l` → 24; `find crates/kiln-tensor -name '*paged_decode*'` → only rocm_ops/paged_decode_meta.rs + csrc/paged_decode_meta.cu |
+| F-5 (R169) | meta-item: "a future round re-executing A-1 or D-16 should re-anchor or drop the README cells before acting" | **this entry performs exactly that** (A-1 README cells → MOOT; D-16 README cell → moot, claim re-proven via asset + generator + zero live refs) | **RESOLVED-BY-R172** | A-1 and D-16 rows above; underlying content remains open under A-1/D-16 (no double count) |
+| R165-1 | kiln.example.toml:431 §8.7 promotion line | unchanged | OPEN | `sed -n '431p'` → `# # Add post_eval to gate every scheduled round behind §8.7 promotion:` exact |
+| R165-2 | docs/public/BENCHMARKS.md:25 "v0.5.1 is the latest published release" (stale) | unchanged | OPEN | `sed -n '25p'` → "As of July 30, 2026, v0.5.1 is the latest published release."; `git tag` → `kiln-v0.5.2` exists (stale claim live) |
+| R166-1 | kiln.example.toml:411 §10.6 self-improvement flywheel | unchanged | OPEN | awk: L411 = `# §10.6 self-improvement flywheel scheduler. Omit the section (or the` exact |
+| R166-2 | crates/kiln-server/src/ui/index.html L1471-1481/:1741/:1940/:1956/:2052 — 14 §N.M dev comments | same **12 lines** exact; count now **19** §N.M refs (queue: 14) | OPEN (count drifted up) | `grep -nE '§[0-9]+\.[0-9]+' index.html` → 12 lines at 1471-1481/1741/1940/1956/2052; `grep -oE | wc -l` → 19 refs |
+| R167 | docs/site/demo/SCRIPT.md:233 claims README embed sets `data-theme="solarized-dark"` | unchanged | OPEN | `sed -n '233p'` → the claim verbatim; `grep -c data-theme README.md` → **0** (claim contradicted) |
+| R170 | QUICKSTART.md:96 heading; sluggers check_docs_site_smoke.mjs:3176 + docs-site/lib.mjs:91; README.md:204 single-hyphen anchor | unchanged | OPEN | `sed -n '96p' QUICKSTART.md` → `## 1. Optional Source / CLI Branch: Build Kiln`; both sluggers `.replace(/\s+/g, '-')`; `sed -n '204p' README.md` → `#1-optional-source-cli-branch-build-kiln` (gate-vs-GitHub divergence live) |
+
+### Corrected open-item count
+
+- Header counts (unmodified, per append-only rule): R166 = 34, R167 = 35,
+  R169 = 36, R170 = R171 = **37 open**.
+- This round: **36 open** — F-5 (R169) is satisfied by this entry's re-anchor
+  (its verbatim ask — re-anchor or drop the A-1/D-16 README cells before
+  acting — is executed above), so it drops out of the open set. No other item
+  resolves. D-9/D-10 remain open with refreshed evidence (counts drifted up,
+  sites re-verified).
+- New owner-decision items opened: **0**. Every finding below is a re-anchor,
+  mis-cite correction, or count drift on an existing item.
+
+### New findings / re-anchors recorded this round
+
+1. **A-1 README cells MOOT** — README.md is 479 lines; queue cites
+   :1259-1303/:1365-1382 no longer exist. The 4 README cells resolved via the
+   R162-164 D-1 phases: crate count already 14→33 (README:402 points at
+   ARCHITECTURE.md#workspace-layout; workspace = 33 crates verified),
+   Configuration narrative now a stub (README:404+). Surviving A-1 content =
+   QUICKSTART cells (6, exact) + BENCHMARKS cells (6, re-anchored +27).
+2. **BENCHMARKS.md +27 drift (A-1/A-2/A-9)** — caused by R164 phase 3
+   (`76f6e7a70`): 190-200→217-226, 217-220→237, 224-235→245-258, 707→733,
+   747-758→423/:547-548/:606/:650-651/:775; 441-442→467-468, 680-681→705-707;
+   607→633.
+3. **A-4 path fix** — the reword cluster is
+   `crates/kiln-model/tests/tape_forward_parity.rs` (76 candle refs), not
+   `src/` (no such file there).
+4. **A-5 precision** — the `pub fn cross_entropy_from_logits_grad_candle` body
+   is `crates/kiln-model/src/forward/training_primitives.rs:147` (tape_forward.rs
+   :811/:826 are the doc refs the queue cites); helpers at
+   tests/tape_forward_parity.rs:74-80 exact.
+5. **A-8 path drift** — canonical evidence file now at
+   `bench-results/findings/concurrent-batched-decode-2026-05-26.md` (both flags
+   recorded at :28-29).
+6. **D-9 count drift** — 22 → 29 unused top-level imports (AST count,
+   excluding 12 non-removable `from __future__` lines); all 20 cited files
+   present post-R154 move.
+7. **D-11 site list refreshed** — free-disk-space duplicates now at ci.yml
+   :144/:250/:306 (named steps), docker-server-release.yml:45,
+   runpod-image.yml:25, server-release.yml:184.
+8. **D-16 cite stale** — queue's `README.md:1673-1681` no longer exists (README
+   479 lines); the about.png claim is proven via the asset (77,591 B) +
+   generator (capture-desktop-screenshots.mjs:43) + zero live embeds.
+9. **F-3 count** — 21 stale links exact (11 CONFIGURATION.md + 10
+   NATIVE_SFT_PROFILE.md); queue's additional phase-c ×2 / vk-harmonization ×1
+   cites now 0 matches (no md links remain in those archive dirs).
+10. **F-4 filename fix** — the 24 phase-4 op TODOs live in
+    `crates/kiln-tensor/src/ops/*.rs` (13 files); queue-named
+    metal_paged_decode.rs / vulkan_paged_decode.rs do not exist in the tree.
+11. **R166-2 count drift** — 19 §N.M refs (queue: 14) across the same 12 lines
+    in crates/kiln-server/src/ui/index.html.
+12. **D-10 pair-7 nuance** — `package_version_base` (grpo_trl_oracle.py:114)
+    vs `_package_version_base` (adamw_pytorch_oracle.py:91): identical body,
+    name differs by a leading underscore.
+
+### Standing gates (post-change, all literal CI commands)
+
+| Gate (CI order) | Result |
+|---|---|
+| python3 scripts/check_repository_artifacts.py | pass — 4564 tracked paths, 119,690,070 B |
+| python3 scripts/check_production_file_budget.py | pass — 646 files, 5000-line default, 14 reviewed exceptions |
+| python3 scripts/check_runtime_env_contract.py --check | pass — 448 reads, 19 mutations, 0 runtime migration reads |
+| python3 scripts/check_source_parsing_tests.py | pass — 0 tests, 0 reads, 0 text assertions |
+| python3 scripts/check_config_schema.py --self-test | pass — 117 canonical fields, 112 env overrides, 0 executable retired refs |
+| python3 scripts/check_openenv_contract.py --self-test | pass — full OpenEnv contract set |
+| python3 scripts/check_http_api_contract.py --self-test | pass — 111 paths, 125 operations, 144 payload components |
+| python3 scripts/generate_observability_schema.py --check | pass — 172 closed definitions |
+| python3 scripts/generate_artifact_schema.py --check | pass — 84 reachable, 22 entrypoints |
+| python3 scripts/generate_eval_schema.py --check | pass — 90 reachable, 33 entrypoints |
+| python3 scripts/generate_control_plane_schema.py --check | pass — 164 reachable, 61 entrypoints |
+| node scripts/check_thinking_budget_contract.mjs | pass — schema + doc contract |
+| node scripts/check_runtime_defaults.mjs | pass — 127.0.0.1:8420; 21 server CLI URL fields |
+| python3 scripts/check_release_versions.py | pass — examples/docs links resolve |
+| node scripts/docs-site/build.mjs --validate-only | **59 documents, 0 copied assets**, rc=0 |
+| node scripts/docs-site/test/build.test.mjs | **11 pass / 0 fail**, rc=0 |
+| KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs | **rc=0** |
+
+**17/17 gates green.**
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 172 reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
