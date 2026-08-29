@@ -10691,3 +10691,116 @@ are separate short pages and were not touched).
   `contracts/production-file-budget-v1.json` remains accurate (479 ≤ 1770) —
   no contract edit needed.
 - Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
+
+## Cleanup Agent (round 165) — 2026-08-28
+
+**EXECUTED — post–README-split surface audit: two stale cross-references in
+QUICKSTART.md fixed** (steering items 1–4: destination-section coherence,
+root-vs-public BENCHMARKS comparison, QUICKSTART rescan, fresh eyes).
+Work commit is the commit this entry lands in (QUICKSTART.md + this ledger
+entry; no push). D-1 (rounds 162–164) remains RESOLVED; nothing it did was
+touched or reverted.
+
+### Scan results (all four steering items)
+
+**1. Moved-destination coherence + cross-references — all clean.**
+- `BENCHMARKS.md#memory-budget-24gb-gpu` (heading line 68): reads
+  coherently as a standalone section; its "8 of 32 layers need KV caches"
+  claim is consistent with the README's retained "reduces KV cache by 4×"
+  feature line; no dangling back-references to the old README location.
+- `ARCHITECTURE.md#workspace-layout` (heading line 78): coherent; internal
+  `#package-boundaries` link resolves (heading present).
+- `docs/guides/ECHO_GUIDE.md` new `## Provenance and paper evidence` /
+  `## Implementation notes` sections: coherent; citation and
+  TerminalBench-2.0 headline match the README's retained ECHO line.
+- `docs/site/api.html#embedded-agent-runs` (line 967): coherent; its
+  `docs/configuration-complete/#agent` cross-link resolves (manifest maps
+  `configuration-complete` → `docs/contracts/CONFIGURATION.md`; `## [agent]`
+  heading present, slug `agent` valid).
+- Link/anchor proof (code-fence-aware): all 51 unique README relative links
+  resolve; all 7 README→QUICKSTART anchors resolve against actual heading
+  slugs; all 12 QUICKSTART in-page anchors resolve; all 58 unique
+  QUICKSTART relative links resolve to existing files; README back-links
+  `README.md#desktop-app` and `README.md#security-model` from QUICKSTART
+  still resolve to retained headings.
+
+**2. Root `BENCHMARKS.md` vs `docs/public/BENCHMARKS.md` — different content
+families; pointer note not warranted; one owner-queue item.** The root file
+(837 lines) is the vLLM-parity / serving-envelope / KV-budget technical
+ledger; the public page (142 lines) is the owner-narrated Vulkan decode
+regression + recovery story, and it already links the root file as raw
+evidence. Not the same content family → no pointer note added, no content
+copied (per steering). **Owner-queue finding:** the public page says
+"As of July 30, 2026, v0.5.1 is the latest published release," but
+`git tag` contains `kiln-v0.5.2` and `CHANGELOG.md` heads
+`## kiln-v0.5.2 — 2026-08-01`. This line predates the approved README split,
+so per the owner-narrative rule it is reported, not edited by this agent.
+
+**3. QUICKSTART.md rescan — two stale cross-references found and fixed**
+(the candidate for this round):
+- **Line 215 — stale version-scoped security claim.** "…put Kiln behind a
+  trusted reverse proxy (auth is out of scope for v0.1)." The README's
+  canonical security model is version-neutral and present-tense: "Kiln has
+  no built-in auth" (README.md:421), and the current release is v0.5.2
+  (CHANGELOG 2026-08-01; tag `kiln-v0.5.2`). The v0.1-scoped parenthetical
+  contradicts the same file's own next paragraph ("See the README's
+  [Security model](README.md#security-model) section for the full picture").
+  Fixed to "(Kiln has no built-in auth)", matching README wording verbatim.
+- **Line 957 — dangling section cross-reference.** "Run the §10.6 weekly
+  loop once: …" (CLI reference, `kiln self-improve`). No §10.6 exists in
+  QUICKSTART.md: §10 ("Evaluate your adapter") has no numbered subsections,
+  and a repo-wide grep finds "10.6" headings only in the unlinked
+  `docs/plans/grand-plan-for-…-opd-for-everyone.md` (§10.6 "The
+  self-distillation engine", §10.6.2 "Local-Judge GRPO — the perpetual
+  loop") — not linkable from a user-facing quickstart. A reader seeing §10
+  in this file would reasonably assume §10.6 is a subsection of it. Fixed to
+  "Run the self-improve weekly loop once: …" — self-contained; the
+  following paragraph already points to the canonical `[agent]` section in
+  `kiln.example.toml`.
+
+**4. Fresh eyes — same defect class found in one more file (owner-queue,
+not edited).** `kiln.example.toml:431` says "Add post_eval to gate every
+scheduled round behind §8.7 promotion" — §8.7 resolves only to the unlinked
+grand-plan doc's "### 8.7. The auto-rollback contract". Config-comment
+territory outside this round's steering scope; reported for the owner to
+decide (inline the contract name, or drop the section number).
+
+### Exact diff (QUICKSTART.md, 2 lines)
+
+```diff
+-Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_SERVER_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (auth is out of scope for v0.1).
++Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_SERVER_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (Kiln has no built-in auth).
+-kiln self-improve
+-    Run the §10.6 weekly loop once: index this week's pi sessions, re-roll them
++kiln self-improve
++    Run the self-improve weekly loop once: index this week's pi sessions, re-roll them
+```
+
+Net file size: 66420 → 66422 bytes.
+
+### Gate verdicts (pre = committed round-164 tree / post = new tree)
+
+| Gate | Pre | Post |
+|---|---|---|
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths) | PASS (4564 tracked paths) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 exceptions) | PASS (646 files, 5000-line default, 14 exceptions) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) | PASS (59 documents) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) | PASS (rc=0) |
+
+Proof greps (post): `grep -rn "auth is out of scope" --include='*.md' .`
+(only live docs) → no matches; the §10.6 string no longer appears anywhere
+in live docs (only in `.qualification/` historical site snapshots, which are
+frozen evidence artifacts, not live docs); README.md, BENCHMARKS.md,
+ARCHITECTURE.md, ECHO_GUIDE.md, api.html, and `docs-manifest.json` are all
+unchanged (only QUICKSTART.md and this ledger entry are in the diff).
+
+### Risks / notes
+
+- Both fixes are text-only wording alignments to existing canonical
+  statements (README security model; the CLI line's own surrounding
+  paragraph). No new claims, no new links, no code, no API behavior change.
+- No stale-fact fixes were made in `docs/public/` (owner-managed narrative,
+  pre-split): the v0.5.1 line above is queued for the owner with cited
+  evidence (tag `kiln-v0.5.2`, CHANGELOG 2026-08-01 entry).
+- Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
