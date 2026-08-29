@@ -12411,3 +12411,143 @@ this ledger append — and again after commit)
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 174a reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 174b) — 2026-08-29
+
+**Scope.** Owner-directed: `crates/*/tests/` fixture census (deferred by 174a) —
+two censuses (runtime-fixture census; orphan-fixture census) plus verdict
+table. Strictly read-only on the tree: grep/sed/find only — no cargo builds,
+no test execution. The only write is this ledger append.
+
+Corpus: 168 files / 19 crates (165 `.rs` + 3 `.json`), identical to the 174a
+inventory. Proof: `find crates/*/tests -type f | wc -l` → 168;
+`find crates/*/tests -type f ! -name '*.rs'` → exactly the 3 JSON fixtures
+below.
+
+### Census 1 — Runtime-fixture census (every file the corpus loads)
+
+Method: grep across all 165 `.rs` corpus files for `include_bytes!`,
+`include_str!`, `fs::read*`, `File::open`, `tokio::fs`, `dunce`,
+`include_dir`, `OpenOptions`, `CARGO_MANIFEST_DIR`, `workspace_root()`,
+`Path::new`/`PathBuf::from`, `Command::new`; plus a negative scan of `"..`
+string literals (remaining hits are path-traversal *test data* — adapter
+names — not loads).
+
+**1A. Compile-time embeds (`include_str!`)** — 6 sites, 5 distinct targets:
+
+| file:line | exact expression | resolved absolute target | status |
+|---|---|---|---|
+| `crates/kiln-optim/tests/adamw_pytorch_oracle.rs:9` | `include_str!("fixtures/adamw_pytorch_oracle_v1.json")` | `crates/kiln-optim/tests/fixtures/adamw_pytorch_oracle_v1.json` | EXISTS (51,695 B, git-tracked) |
+| `crates/kiln-model/tests/adamw_pytorch_oracle.rs:17` | `include_str!("../../kiln-optim/tests/fixtures/adamw_pytorch_oracle_v1.json")` | same target as above | EXISTS |
+| `crates/kiln-server/tests/http_api_contract.rs:21` | `include_str!("../../../contracts/kiln-http-api-v1.openapi.json")` | `contracts/kiln-http-api-v1.openapi.json` | EXISTS (188,226 B, git-tracked) |
+| `crates/kiln-server/tests/qwen3_chat_template_e2e.rs:22` | `include_str!("../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja")` | `crates/kiln-core/test_fixtures/qwen35_4b_chat_template.jinja` | EXISTS (7,756 B, git-tracked) |
+| `crates/kiln-train/tests/qwen35_sft_oracle.rs:63` | `include_str!("fixtures/qwen35_sft_oracle_v1.json")` | `crates/kiln-train/tests/fixtures/qwen35_sft_oracle_v1.json` | EXISTS (19,124 B, git-tracked) |
+| `crates/kiln-vulkan-kernel/tests/vk_flce_parity.rs:114-115` | `include_str!("../../kiln-train/tests/fixtures/grpo_trl_oracle_v1.json")` | `crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` | EXISTS (10,408 B, git-tracked) |
+
+**1B. Runtime reads of repository files** (join sites; reads at join+2):
+
+| file:line(s) | exact path expression | resolved absolute target | status |
+|---|---|---|---|
+| `crates/kiln-model/tests/backend_capability_contract.rs:37,:82,:259,:1217,:1259,:1324,:1484,:1503,:1625,:1669,:1738,:1806,:1858,:1941,:2196` | `workspace_root().join("docs/contracts/backend-capability-report.json")` (`workspace_root()` = `CARGO_MANIFEST_DIR/../..` via `:10-:19`) | `<root>/docs/contracts/backend-capability-report.json` | EXISTS (151,471 B, git-tracked) |
+| `crates/kiln-model/tests/backend_capability_contract.rs:2195` (join), `:2198,:2215` (reads) | `root.join("docs/contracts/backend-capability-report.md")` | `<root>/docs/contracts/backend-capability-report.md` | EXISTS (59,914 B, git-tracked) |
+| `crates/kiln-model/tests/backend_capability_contract.rs:2180` (join), spawned via `Command::new("python3")` at `:2182` (`--self-test`) and `:2202` (`--check`) | `root.join("scripts/generate_backend_capability_report.py")` | `<root>/scripts/generate_backend_capability_report.py` | EXISTS (152,512 B, git-tracked) — auxiliary script, not a data fixture |
+| `crates/kiln-train/tests/qwen35_sft_oracle.rs:53-:54` | `std::env::var_os("KILN_QUALIFICATION_MODEL_PATH").map_or_else(\|\| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Qwen3.5-4B"), PathBuf::from)` | `<root>/Qwen3.5-4B/` (gitignored, `.gitignore:10`) | working-tree only (not tracked) — present |
+| `crates/kiln-train/tests/qwen35_sft_oracle.rs:70,:76,:77` | `model_path.join("tokenizer.json")` / `.join("tokenizer_config.json")` / `.join("chat_template.jinja")` | `<root>/Qwen3.5-4B/{tokenizer.json, tokenizer_config.json, chat_template.jinja}` | all 3 present in working tree (gitignored) |
+
+The consumer test is `#[ignore = "requires the source-pinned Qwen3.5-4B
+tokenizer artifacts"]` at `qwen35_sft_oracle.rs:60` — the `#[ignore]d`
+oracle test over the gitignored root `Qwen3.5-4B/` checkout called out in
+the round brief; verified, not assumed.
+
+**1C. Env-gated external model checkouts** (no repository target; test
+skips/panics per its gate when unset — no repo path to verify):
+
+| file:line(s) | mechanism | note |
+|---|---|---|
+| `crates/kiln-model/tests/mtp_byte_eq.rs:38` (env `KILN_MTP_BYTE_EQ_MODEL`), `:68` (`std::fs::File::open` on shard), `:308,:312` (joins `model.safetensors` / `model.safetensors.index.json`), `:319` (index read) | external HF-style model dir | skips with a log line when unset (`:40`) |
+| `crates/kiln-model/tests/vk_resident_decode_parity.rs:36-:37,:43` (env `KILN_QUALIFICATION_MODEL_PATH`), `:216,:223` (env `KILN_QUALIFICATION_HF_LOGITS_PATH` → `std::fs::read`) | external model dir + HF safetensors logits reference | skips unless set; panics only under `KILN_QUALIFICATION=1` (`:46-:48`) |
+
+**1D. Runtime-generated / OS files** (written by the tests themselves or OS
+data — not repository fixtures, listed for completeness):
+`kiln-server/tests/adapter_upload.rs:167,:169,:251,:293,:294`;
+`kiln-server/tests/real_model_integration.rs:1011,:1272,:1280,:1309,:1369,
+:1389,:1395,:1396,:4028`; `kiln-server/tests/remote_teacher_identity.rs:404`;
+`kiln-server/tests/request_log_capture.rs:69`;
+`kiln-tensor/tests/rocm_trim_pool.rs:13` (`/proc/meminfo`); plus
+`fs::read_dir` tmpdir listings in `adapter_compose.rs` (9 sites),
+`adapter_path_traversal.rs:359`, `adapter_upload.rs:213,:301,:574`,
+`real_model_integration.rs:1451,:3620`.
+
+**1E. Negatives (verified, not assumed):** zero `include_bytes!` sites; zero
+`tokio::fs` / `dunce` / `include_dir` / `OpenOptions` sites; the only
+`File::open` in the corpus is `mtp_byte_eq.rs:68` (1C). **kiln-eval loads no
+external fixture files at all**: both `anthropic_to_suite.rs` and
+`real_trajectory_shapes.rs` build trajectories from inline
+`serde_json::json!` / string constants — the `/data/logs/capture/...` string
+at `real_trajectory_shapes.rs:91` and `:98` is captured test *data*, not a
+path load (the round brief's "trajectory-fixture JSON in kiln-eval"
+expectation is therefore resolved as a verified negative). The two
+`include_str!` mentions at `ui_distill_tab.rs:4` / `ui_eval_corrections.rs:6`
+are doc-comments describing the server-side bake, not corpus loads.
+
+**MISSING targets: 0. Stale include/read sites: 0.**
+
+### Census 2 — Orphan-fixture census (non-`.rs` files under `crates/*/tests/`)
+
+Exactly 3 files (proof: `find crates/*/tests -type f ! -name '*.rs'`).
+Referrer search: basename grep across `crates/*/tests/*.rs` AND
+`crates/*/src` (plus `git grep -l` for corroboration).
+
+| fixture (bytes, git-tracked) | referrer(s) |
+|---|---|
+| `crates/kiln-optim/tests/fixtures/adamw_pytorch_oracle_v1.json` (51,695 B, tracked) | `crates/kiln-optim/tests/adamw_pytorch_oracle.rs:9`; `crates/kiln-model/tests/adamw_pytorch_oracle.rs:17` (no `crates/*/src` refs; repo-wide: `scripts/qualification/adamw_pytorch_oracle.py`, `scripts/qualification/tests/test_adamw_pytorch_oracle.py`, `docs/training/NATIVE_SFT_PROFILE.md`) |
+| `crates/kiln-train/tests/fixtures/qwen35_sft_oracle_v1.json` (19,124 B, tracked) | `crates/kiln-train/tests/qwen35_sft_oracle.rs:63` (no `crates/*/src` refs; repo-wide: `scripts/qualification/qwen35_sft_oracle.py`, `scripts/qualification/tests/test_qwen35_sft_oracle.py`, `docs/training/sft-tokenization.md`) |
+| `crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` (10,408 B, tracked) | `crates/kiln-vulkan-kernel/tests/vk_flce_parity.rs:115`; `crates/kiln-train/src/grpo_tape_shim.rs:2608` (inside `#[cfg(test)] mod tests` at `:2499`); (repo-wide: `scripts/qualification/grpo_trl_oracle.py`, `scripts/qualification/tests/test_grpo_trl_oracle.py`) |
+
+**ORPHANS: 0.** (Note: `crates/kiln-vulkan-kernel/tests/support/mod.rs` is
+`.rs` — excluded from this census by definition.)
+
+### Verdict table
+
+| fixture | referrers | verdict | proof command |
+|---|---|---|---|
+| `crates/kiln-optim/tests/fixtures/adamw_pytorch_oracle_v1.json` | 2 test files (1A rows 1-2) | **REFERENCED** | `grep -n "adamw_pytorch_oracle_v1.json" crates/kiln-optim/tests/*.rs crates/kiln-model/tests/*.rs` |
+| `crates/kiln-train/tests/fixtures/qwen35_sft_oracle_v1.json` | 1 test file (1A row 5) | **REFERENCED** | `grep -n "qwen35_sft_oracle_v1.json" crates/kiln-train/tests/*.rs` |
+| `crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` | 1 test file + 1 `crates/*/src` cfg(test) site | **REFERENCED** | `grep -rn "grpo_trl_oracle_v1.json" crates/*/tests/*.rs crates/*/src` |
+
+### Findings + owner-queue additions
+
+**Findings: 0.** All 8 distinct runtime targets (5 git-tracked embeds,
+2 git-tracked runtime reads + 1 spawned script, 1 gitignored model
+checkout with all 3 child artifacts present) verified EXISTS; all 3
+non-`.rs` fixtures REFERENCED; no ORPHAN, no MISSING, no stale load.
+No owner-queue additions (delta: 0).
+
+### Standing gates (17/17 pass, literal CI commands, run after the only write —
+this ledger append — and again after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119761688 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (797.8 ms) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS — rc=0 (static-only smoke) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`,
+no push. Commit hash reported in the round 174b reply (single-commit pattern;
+no hash backfill needed since this entry is the only change).
