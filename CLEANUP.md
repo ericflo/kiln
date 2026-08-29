@@ -10415,3 +10415,147 @@ fixed in-round: the smoke's cold-reader "GRPO loop" group is an AND of
   approval for execution scope; round-157 plan table is still the exact
   execution spec.
 - Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
+
+## Cleanup Agent (round 163) — 2026-08-28
+
+**EXECUTED — D-1 phase 2: the 3 (c)-class README.md reconciles
+(owner-approved per the round-157 plan).** Work commit `7e9c2db0f`
+(README.md, docs/guides/ECHO_GUIDE.md, docs/site/api.html, QUICKSTART.md;
+no push). Phase 3 (a-class moves) remains unexecuted; the D-1 row stays in
+the owner queue for a phase-3 decision.
+
+### What changed
+
+**2.1 ECHO.** README-unique paper citation + TerminalBench-2.0 headline
+landed in `docs/guides/ECHO_GUIDE.md` as a new `## Provenance and paper
+evidence` section (paper title, Shrivastava/Awadallah/Papailiopoulos,
+MSR AI Frontiers 2026; Qwen3-8B 2.70%→5.17%, Qwen3-14B 5.17%→10.79%;
+"paper-reported evidence … not a guarantee for a local run"). The trimmed
+README paragraph's implementation claims landed as a new `## Implementation
+notes` section in the same guide — `crates/kiln-train/src/trajectory_mask.rs`
+builds `(input_ids, action_mask, env_mask)` (verified in source), the
+`tokenize_grpo_group` driver in `trainer/grpo_jsonl.rs` (source:
+`tokenize_grpo_group_timed`), the fused-GRPO-tape-root /
+`(softmax − one-hot)` rows note, and "bit-identically to the pre-ECHO loss"
+folded into the legacy-single-turn sentence under `## When ECHO is active`.
+`echo.enabled` / initial-final env-CE receipt fields were already covered by
+the guide's `## Read the receipt`.
+
+**Gate-forced retention (deviation from the ~10-line target):**
+`check_docs_site_smoke.mjs` `validateGrpoOverviewRequestsImports` requires
+an `import requests` + `requests.post` GRPO-submission example inside
+`## The GRPO Loop` — HEAD carried the canonical `POST /v1/train/agentic`
+Python example there and the 6-line trimmed version fails the gate. The
+example was restored byte-identical (verified by `diff` against
+`git show HEAD:README.md`). The hard smoke invariant outranks the soft
+line-count target; the ECHO subsection lands at 31 content lines.
+
+**2.2 Quick Start.** Install-path narrative collapsed to four bold-labeled
+path paragraphs in the exact layout the smoke gate's
+`validateReadmeQuickStartPaths` captures (independent paragraphs, not list
+bullets — the bullet layout fails the `\n**Path 3` lookahead). Path 2 keeps
+the full `KILN_VERSION`/curl/tar download block the gate terms on
+(`kiln-v${KILN_VERSION}`, `x86_64-unknown-linux-gnu-cuda124.tar.gz`, the
+GitHub release download URL, the
+`QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build`
+anchor). Desktop App / Container / Source details link to their
+QUICKSTART.md quick paths. Training deep-dive collapsed to pointer bullets
+(rank ceilings, tokenization, HF/TRL interop, ingestion, seed contract →
+NATIVE_SFT_PROFILE.md / sft-tokenization.md / HF_TRL_INTEROP.md /
+sft-ingestion.md / api.html#training). pi-setup compressed to one paragraph;
+the exact backup filenames (`models.json.bak-<timestamp>` /
+`settings.json.bak-<timestamp>`) landed in the canonical home,
+QUICKSTART.md L285. Embedded agent runs collapsed to one paragraph → new
+api.html section `id="embedded-agent-runs"` (4 endpoints, curl examples,
+FIFO queue, `[agent].max_concurrent_runs` default 2, `run_timeout_secs`
+default 900, loopback-only, dashboard **Distill → Agent runs** tab) placed
+next to the adjacent `/v1/agent/*` endpoints. The README banner is retained
+in full: `validateReadmeBanner` hard-requires the fenced box with
+`Mode:`/`CUDA:`/`GPU:`/`VRAM:`/`Listen:`/`Endpoints:` labels and
+`Mode: GPU inference`.
+
+**2.3 Prompt logprobs.** README claims verified against the kiln-serve
+source before trimming. Missing detail landed in `docs/site/api.html`
+`/v1/completions`: "omits the unused final logits row" + exclusive-admission
+rationale + the quarantine observability paragraph (`/health` 503 with
+`backend_runtime.restart_required=true`, `backend_quarantined` rejections,
+queued-job failure, no unsafe reset endpoint). The 4096-token and 65,536-entry
+caps were already documented in api.html.
+
+### Claim-landing table
+
+| README-unique claim | Destination (verified post) |
+|---|---|
+| ECHO paper citation (title, 3 authors, MSR AI Frontiers 2026) | `docs/guides/ECHO_GUIDE.md` `## Provenance and paper evidence` |
+| TerminalBench-2.0 headline (Qwen3-8B 2.70%→5.17%, Qwen3-14B 5.17%→10.79%) | same section; README retains "roughly doubles" in the pointer |
+| `tokenize_grpo_group`, `action_mask`/`env_mask`, `λ_echo = 0.05`, fused tape root, `(softmax − one-hot)` rows | `docs/guides/ECHO_GUIDE.md` `## Implementation notes` (cross-checked against `crates/kiln-train/src/trajectory_mask.rs`, `trainer/grpo_jsonl.rs`) |
+| "bit-identically to the pre-ECHO loss" for legacy single-turn | `docs/guides/ECHO_GUIDE.md` `## When ECHO is active` |
+| Canonical `POST /v1/train/agentic` submit example | stays in README (smoke-gate invariant); JSON shape also in ECHO_GUIDE.md `## Submit an agentic group` |
+| Embedded agent-runs API surface (4 endpoints, curl, FIFO queue, defaults, loopback, dashboard tab) | `docs/site/api.html` `id="embedded-agent-runs"` |
+| "omits the unused final logits row" + exclusive admission | `docs/site/api.html` prompt-logprobs section |
+| Quarantine observability (503, `restart_required`, `backend_quarantined`, no reset) | `docs/site/api.html` prompt-logprobs section |
+| Training deep-dive (7 sub-claims: rank ceilings 1024/48/32, tokenization, HF export CLI, ingestion, optimizer tagged-objects, DistillRefresh stable, seed contract) | pointer bullets → `NATIVE_SFT_PROFILE.md` L309–378, `sft-tokenization.md`, `HF_TRL_INTEROP.md`, `sft-ingestion.md`, `api.html#training` (L960–965) |
+| pi-setup exact backup filenames | `QUICKSTART.md` L285 (added inline) |
+| Install-path specifics (Docker image/env, ROCm/Vulkan/Metal/Windows matrix, SHA-256 sidecars, cargo build flags) | `QUICKSTART.md` quick-path sections (existing) |
+| Vulkan fallback, `nvidia-smi` check, banner labels | `QUICKSTART.md` L119/L198/L213 + README banner (gate-required) |
+
+### Per-section accounting (content lines, heading-exclusive)
+
+| Step | Section | Phase-1 tree | Now | Save | Plan target |
+|---|---|---|---|---|---|
+| 2.1 | ECHO (agentic GRPO subsection) | 33 | 31 | 2 | ~10 (gate-forced retention) |
+| 2.2 | Quick Start | 274 | 100 | 174 | 90–100 |
+| 2.3 | Prompt logprobs | 229 | 29 | 200 | 20–30 |
+| | **Total (c-class)** | **536** | **160** | **376** | ~135 |
+| | **README.md** | **893** | **517** | **376** | — |
+
+Sanity: 893 − 376 = 517 = `wc -l` of the new README. `diff` of the phase-1
+README against the new one shows every changed hunk falls inside exactly
+these three sections — all other regions byte-identical.
+
+### Gate verdicts (pre on the phase-1 tree / post on the new tree)
+
+| Gate | Pre | Post |
+|---|---|---|
+| `wc -l README.md` | 893 | 517 |
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths) | PASS (4564 tracked paths) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 exceptions) | PASS (646 files, 5000-line default, 14 exceptions) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) | PASS (59 documents) |
+| `node --test scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) | PASS (rc=0) |
+
+Proof greps (post): `TerminalBench` ×1 and `tokenize_grpo_group` ×1 and
+`bit-identically` ×1 in ECHO_GUIDE.md; `65,536` ×1, "omitting the unused
+final logits row" ×1, `id="embedded-agent-runs"` ×1, `v1/agent/runs` ×8 in
+api.html; all README local relative links resolve (file + anchor); the
+restored Python example is byte-identical to HEAD's (`diff` clean).
+
+### Lessons / follow-ups
+
+- **The smoke gate is structural, not cosmetic.** `validateReadmeQuickStartPaths`
+  captures the Path-2 body between two exact bold-paragraph labels
+  (`**Path 2 — Server binary (terminal-first, no source build):**` …
+  `\n**Path 3 — Container:**`) and term-checks the capture — list-bullet
+  paths, or a Path-2 body without the download command, fail it.
+  `validateReadmeBanner` and `validateGrpoOverviewRequestsImports` are the
+  other two README-structural invariants. Any future README trim must treat
+  the gate as the source of truth for which content is README-pinned
+  (banner, Path-2 download block, GRPO submit example) and target only the
+  rest.
+- **Python `\` + newline in non-raw strings** is a line continuation:
+  trailing-backslash curl lines in a `"""..."""` block silently drop both
+  characters. Use `\\` (or raw strings) for literal backslashes in splice
+  scripts.
+- **Accidental overwrite recovery:** a stray `write` tool call clobbered
+  `docs/guides/ECHO_GUIDE.md` mid-round; the just-popped `git stash`
+  commit (`baddd216c`) still held the pre-clobber content and restored it
+  intact. Keep the working state stashed/committed before large scripted
+  splices.
+- **Deviation to ratify:** ECHO subsection is 31 lines, not the ~10-line
+  plan target, because the smoke gate pins the submit example to the README.
+  If the owner wants the example out of the README, the gate itself must
+  change first (scripts/check_docs_site_smoke.mjs
+  `validateGrpoOverviewRequestsImports`).
+- Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
+- Phase 3 (a-class moves per the round-157 plan) remains pending owner
+  approval for execution scope.
