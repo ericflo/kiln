@@ -13978,3 +13978,93 @@ OWNER-DECISION, severity MED, no gate-edit, no bundle (unchanged). The
 R181 row's `type_complexity` framing is withdrawn as a misdescription
 introduced during the re-anchor; D-3 (judgment-class lint keeps) is the
 correct home for the `:3112` allow, where it already sits.
+
+## Cleanup Agent (round 182 — full-claims audit of docs/serving + docs/training) — 2026-08-29
+
+**Scope.** Read-only full claims audit of **all 14 `.md` files** under
+`docs/serving/` (5) and `docs/training/` (9), ~4,083 lines, at HEAD
+`e05176988` (round 181c commit, clean tree). Every procedural claim
+(commands, env vars, config keys, CLI flags, file paths, versions, counts,
+error codes, schema IDs, numeric limits, default values) was cross-checked
+against canonical sources: `docs/contracts/CONFIGURATION.md`,
+`kiln.example.toml`, `contracts/runtime-env-direct-reads-v1.json`,
+`crates/*/src` (grep/sed only), `scripts/hf_trl/requirements-sft.lock`, and
+`test -e` for every path-like link. Narrative prose, benchmark tables, and
+pure cross-links were N/A per brief; all 40 path-like links across the 14
+files were verified to exist (0 broken). Light tools only — no cargo, no
+test suites beyond the standing gates. 123 discrete procedural claims
+audited (per-file tallies below). Findings are owner-queue evidence, not
+fixes; the only file modified is CLEANUP.md.
+
+### Per-file verdict table
+
+| File | Claims audited | Verdict |
+|---|---|---|
+| docs/serving/LATENCY_OBSERVABILITY.md | 10 | CONSISTENT — 8192 gap cap (`latency_observability.rs:17`); stall threshold `max(250ms, 5×p50)` (`decode_stats.rs:127`); histogram buckets (`metrics.rs:23`); queue_delay_ms formula (`streaming.rs`); `token_timing` event, `include_performance`, `/v1/stats/decode`, `recent-requests`, `actor_cycle_idle`, `unexplained_ms` all live |
+| docs/serving/THINKING_BUDGET_CONTRACT.md | 9 | CONSISTENT — 9 outcomes = `THINKING_BUDGET_OUTCOMES` (`metrics.rs:70-79`); trigger enum `tokens/time/max_tokens`; 11-value source vocabulary exact-matches `contracts/thinking-budget-v1.schema.json`; `contract_version: 1` (`thinking-budget-v1.conformance.json`); override states `inherit/unlimited/limit`; rollout-generate `--thinking true` (`rollout_generate_cli.rs:566`); `kiln config --json`; health `maintenance`; 3 budget metrics |
+| docs/serving/SERVING_BENCHMARK_PROTOCOL.md | 9 | CONSISTENT — `--variant --host-id --model --model-id --output` match `run.py`; `allowed_roots` qualification/receipts (`run.py:292`); refuses overwrite (`run.py:2090-2095`); `/v1/models` readiness in launch schema; all 7 qualification schema JSONs + 2 workload JSONs present |
+| docs/serving/TRAJECTORY_TURN_THROUGHPUT.md | 7 | **1 STALE** (F182-1) — otherwise CONSISTENT: bench flags, `/v1/completions/batch` route, `batching.prefix_aware_admission` TOML key, `/v1/config.batching` capture, and `KILN_BATCH_PREFIX_AWARE_ADMISSION` as a retired alias (`config.rs:6634` in `RETIRED_PUBLIC_ENVIRONMENT_ALIASES`) all verified |
+| docs/serving/SERVING_PROFILES.md | 9 | CONSISTENT — maintenance 503 + `code: "inference_disabled_by_profile"` (`api/eval.rs:110`, `api/completions/validation.rs:40`, `api/agent_runs.rs:126`); all 8 `effective_policy` fields + `writer_priority` / `inference_disabled_drain_then_exclusive` exact-match `ServingRuntimePolicy` (`config.rs:843-884`); `immutable_after_startup: true`, `request_overrides_allowed: false` (`api/config.rs:737/:758`); `source` vocabulary |
+| docs/training/HF_TRL_INTEROP.md | 8 | CONSISTENT — all 9 lock pins exact-match `requirements-sft.lock` (torch 2.13.0, transformers 5.13.1, trl 1.8.0, peft 0.19.1, datasets 5.0.0, accelerate 1.14.0, tokenizers 0.22.2, safetensors 0.8.0, jinja2 3.1.6); 4 `kiln.hf-trl-*` schema IDs + `kiln.rollout-provenance.v1` all in code; `hf_trl_invalid_request` / `hf_trl_export_failed` (`api/hf_trl.rs:132/:145`); `scripts/hf_trl/train_sft.py` exists |
+| docs/training/LONG_CONTEXT_GRPO_BENCH.md | 8 | CONSISTENT — default sweep `8192,16384,32768,65536`; all flags; `kiln.grpo-policy-audit.v1` (`train_receipt.rs:45`); `train_receipt.json`; report timing fields |
+| docs/training/NATIVE_SFT_PROFILE.md | 13 | CONSISTENT — `native_online_lora_v1` (`lib.rs:1091`); 5 HF-style knobs rejected via `deny_unknown_fields` + explicit test (`lib.rs:2929-2933`); 8 `KILN_USE_TAPE_*` + `KILN_USE_FLCE` all 0 live hits (consistent with "removed"); LR table Muon 1e-3/2e-3, AdamW/SGD 1e-4/1e-5 exact-match (`lib.rs:2880/:2885/:2893`, comment :1049); Muon rank CUDA/ROCm 2..=48, Metal/Vulkan 2..=32, CPU 2..=unbounded (`capability.rs:1328-1380`); Metal SGD unsupported (same table); `model_maximum` mechanism (`api/config.rs:701`); `distill_refresh` `unavailable_reason` byte-exact (`state.rs:224`); `kiln.training-optimizer-support` v1 (`api/config.rs:730`); `train_mtp` server-SFT refusal (`training_queue.rs:1553-1564`) |
+| docs/training/OPD_TEACHER_JSONL.md | 10 | CONSISTENT — 64 MiB dataset cap (`MAX_MATERIALIZED_OPD_DATASET_BYTES`, `api/training.rs:2807`); `top_k` resolution + provider caps (`api/training.rs:1172-1198`, `remote_teacher.rs:63-76`); `sampler_segments` default 18 (`opd.rs:2760`); OPD checkpoint default 25 (`opd.rs:873-879`); protocol `vllm.prompt-logprobs.numeric-token-ids.causal.v1` (`teacher_identity.rs:13`); `logprobs_mode: raw_logprobs` (`teacher_identity.rs:14`); `max_prompt_logprob_candidates` 1,000,000 (`teacher_identity.rs:24`); `teacher_top_k` loss; both schema IDs live |
+| docs/training/OPENENV_REPLAY_REFERENCE.md | 14 | **1 UNRESOLVED** (F182-2) — otherwise CONSISTENT: 16,384 task items (`types.rs:21`); 2 MiB discovery (`types.rs:19`); 16 MiB client messages (`types.rs:20`); 200-row pages (`openenv_cli.rs:55`); 512 MiB retained budget (`openenv_cli.rs:62`); 256 MiB artifact cap (`openenv_replay.rs:30`); idempotency key 1..=128 (`api/openenv.rs:65`); `kiln.openenv-task-catalog.v1` (`api/openenv.rs:62`); `kiln_openenv_task_catalog_inspections_total` metric (`metrics.rs:3240-3241`); all 11 CLI subcommands present (`openenv_cli.rs:372+`); promotion gate ≥20 paired seed groups at p<0.05 (`openenv_evaluation.rs:28-29`); `openenv_artifact_integrity_failed` and friends |
+| docs/training/TRAIN_RECEIPT_SCHEMA.md | 6 | CONSISTENT — `schema_version: 1` (`train_receipt.rs:31`); `receipt_type: "kiln_train_receipt"` (`train_receipt.rs:1064`); all 13 failure categories live in code; `failure_reason`/`failure_message` fields (`train_receipt.rs:106-108`); `jsonl_grpo_groups_dry_run` mode (`grpo_jsonl.rs:320`) |
+| docs/training/sft-ingestion.md | 6 | CONSISTENT — `kiln.sft-ingestion.v1` (`sft_ingestion.rs:16`); source vocabulary 6 values byte-exact (`sft_ingestion.rs:105`); `row_index` one-based (`sft_ingestion.rs:293`); `dataset_split` default `train` (`kiln-eval/data_identity.rs:21-22`); counter semantics (`examples_read==rows_read` etc.) |
+| docs/training/sft-tokenization.md | 6 | CONSISTENT — pins `transformers==5.13.1`, `tokenizers==0.22.2`, `jinja2==3.1.6` exact-match the lock; `KILN_QUALIFICATION_MODEL_PATH` live (2 files, runtime-env JSON); `scripts/qualification/qwen35_sft_oracle.py`, `cargo-test-bounded.sh`, and the qwen35 SFT oracle fixture all exist |
+| docs/training/training-checkpoints.md | 8 | CONSISTENT — SFT/GRPO request default `None` (`lib.rs:1282/:2075`); OPD default 25 (`opd.rs:873`); zero invalid (`lib.rs:1241-1242/:2039-2040`); server-level `training.checkpoint_interval` (`CONFIGURATION.md:1184`); `{name}-checkpoint-step-{08d}.kiln-checkpoint` naming (`checkpointing.rs:382`); `latest_checkpoint` in job detail (`api/training.rs:4425`); `resume_checkpoint` basename-or-absolute-path admission; `--checkpoint-interval` / `--resume-checkpoint` CLI flags |
+
+### Findings
+
+Class vocabulary (round 159): STALE-CLAIM, BROKEN-REF, OWNER-DECISION, RISK,
+UNRESOLVED (claim about an external source not pinned in this repository).
+Severity: MED = live misleading claim; LOW = FYI/external.
+
+| ID | Title | Doc cite (verified at HEAD) | Canonical side (verified at HEAD) | Class | Sev | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| F182-1 | "all nine batching values are immutable" — no canonical source yields 9 | `docs/serving/TRAJECTORY_TURN_THROUGHPUT.md:114-115` (verbatim) | `[batching]` TOML has **4** fields (`docs/contracts/CONFIGURATION.md:901-911`: `rowwise_decode`, `prefix_aware_admission`, `prefill_admission_quantum`, `actor_cycle_idle_ms`); `/v1/config.batching` (`BatchingRuntimeConfig`, `crates/kiln-server/src/config.rs:685-697`) has **6** top-level settings incl. derived `burst_prefill_admission` + `actor_prefill_tile_alignment_required`; immutability semantics themselves are correct (all four require restart, `CONFIGURATION.md:895-899`) | STALE-CLAIM | MED | no | Reword to "all batching values" (or name the exact field set); drop the unsupported count |
+| F182-2 | "The current pin publishes a C99 counter plus twenty-two text-profiled servers—fourteen arcade/synthesis environments and eight text-first math families" | `docs/training/OPENENV_REPLAY_REFERENCE.md:538-540` (verbatim) | External: the oracle is `github.com/ericflo/miniopenenv`, cloned at `origin/main` by `.github/workflows/openenv-interop.yml:30-31`; `scripts/check_miniopenenv_interop.sh:8-58` derives the game/task/math counts at runtime from the upstream Makefile — the 22/14/8 split is not pinned or asserted anywhere in this repository | UNRESOLVED | LOW | no | Pin the oracle commit (or assert the count in the interop test) so the claim is verifiable in-repo; until then treat as external-truth |
+
+**Totals.** 14/14 files audited; 123 procedural claims: **121 CONSISTENT,
+1 STALE (F182-1, MED), 1 UNRESOLVED (F182-2, LOW)**. 0 DRIFTED, 0
+BROKEN-REF (all 40 path-like links resolve), 0 UNDOCUMENTED env vars
+(8 `KILN_USE_TAPE_*` + `KILN_USE_FLCE` confirmed removed, matching the
+"removed without aliases" prose). Both findings are owner-queue additions;
+neither requires a gate/workflow edit.
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | none |
+| no gate edit | F182-1 (doc reword), F182-2 (oracle pin/test assertion, workflow-adjacent but no gate change) |
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119893378 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this append; post-commit re-run confirms) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, … continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 182 reply
+(single-commit pattern, post-commit gate re-run).
