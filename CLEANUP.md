@@ -13494,3 +13494,210 @@ all gates passed on both the post-append and post-commit runs.)
 CLEANUP.md append only (no other file touched); committed to local `main`,
 no push. Commit hash reported in the round 179 reply (single-commit pattern;
 no hash backfill needed since this entry is the only change).
+
+## Cleanup Agent (round 180) — 2026-08-29
+
+**Scope.** Fresh-eyes blind-spot sweep of corners no targeted round has
+opened. Four candidate corners attempted, bounded depth, read-only
+(grep/sed/python3; no builds, no test suites): (b) `.github/workflows/*.yml`
+path/script/permissions/model-string consistency; (a) `contracts/`
+cross-file consistency (README index + enforced-by/GENERATED-by claims +
+$sid/manifest cross-refs); (c) one deep doc per dir —
+`docs/serving/TRAJECTORY_TURN_THROUGHPUT.md` and
+`docs/training/sft-tokenization.md` — procedural claims (commands, flags,
+endpoints, metric names, file paths, version pins) vs live code; (d) five
+frozen one-off scripts (non-CI-referenced) — documented usage lines vs
+actual arg parsing. 1 finding, 4 negative-evidence corners. The only write
+is this ledger append.
+
+### Corner (b) — workflows (one finding + 4 negative checks)
+
+**F180-1 (MED, DRIFTED, owner-queue): `.github/workflows/pages.yml`
+push-trigger path filter misses `crates/kiln-server/src/openenv_credentials.rs`,
+which the pull_request trigger covers.**
+
+- Claim (implicit in-file contract): the two triggers of the same workflow
+  select the same relevant source paths for the docs-site rebuild.
+- Evidence A: `.github/workflows/pages.yml:17` (pull_request trigger) lists
+  the glob `- 'crates/kiln-server/src/openenv*.rs'`, which matches all four
+  tracked OpenEnv sources.
+- Evidence B: `.github/workflows/pages.yml:47-49` (push/main trigger) lists
+  only three explicit files — `openenv_cli.rs`, `openenv_evaluation.rs`,
+  `openenv_replay.rs` — and omits `openenv_credentials.rs`.
+- Evidence C: `git ls-files 'crates/kiln-server/src/openenv*'` shows four
+  `.rs` files including `openenv_credentials.rs` (tracked; added 2026-07-31
+  in `8aee2d4eb` "Add durable OpenEnv workflow admission" /
+  `f4922d28a` "Make OpenEnv workflow submission retry-safe" /
+  `995d3abd7` "Authenticate protected OpenEnv environments").
+  `git log -p --follow .github/workflows/pages.yml | grep openenv_credentials`
+  → zero hits: the file was never added to the push list.
+- Impact: a push to `main` touching only `openenv_credentials.rs` (e.g. an
+  OpenEnv credential/auth contract change that alters documented behavior —
+  the pages job runs `check_openenv_contract.py --self-test` and renders
+  `contracts/kiln-openenv-v1.schema.json`) silently skips the docs-site
+  rebuild, while the identical change in a PR is covered. Silent omission,
+  not a failure — CI green cannot expose it.
+- Classification: DRIFTED (trigger-filter drift within one workflow, same
+  day as the "Cut GitHub Actions duplication" refactor `084bfe322`
+  2026-07-31, whose push list was evidently derived from the pre-credentials
+  file set).
+- Mechanical fix (NOT applied; owner-managed surface): after
+  `.github/workflows/pages.yml:49` add
+  `      - 'crates/kiln-server/src/openenv_credentials.rs'` (or replace
+  lines 47-49 with the PR-side glob
+  `      - 'crates/kiln-server/src/openenv*.rs'` to keep the triggers
+  structurally identical).
+
+Negative evidence (same corner, all pass):
+
+- Script/path references: extracted every `scripts/…|bench-results/…|
+  docs/…|qualification/…` file reference from all 13 workflow files
+  (38 unique); all resolve (`test -e`): OK, 0 MISS. Includes the manual-only
+  `perf-regression-nightly.yml` (legacy, no schedule/PR trigger — its script
+  paths `scripts/{run,write,import,lock,plan,check}_backend_latency_*.py`,
+  `bench-results/check_sft_train_regression.py`,
+  `docs/contracts/backend-latency-fixtures.json` all exist) and
+  `bench-results/regression/sft_{native,generic}_a6000_baseline.json`
+  (both exist).
+- Model strings: `grep -rn "Qwen3" .github/workflows/` → 0 hits (no literal
+  model names in workflows); fixture ids in
+  `perf-regression-nightly.yml:31-36` (`*_qwen35_4b` token) exactly match
+  the 5 ids in `docs/contracts/backend-latency-fixtures.json` and the 5
+  receipt files in `bench-results/backend-latency/` — consistent with the
+  canonical Qwen3.5-4B naming.
+- `opd-bench-gate.yml` retirement comment: claims commit `4f04c8a50`
+  deleted the kiln-opd-loss-kernel examples dir. Verified: commit exists
+  (`4f04c8a50 2026-05-27 kiln-opd-loss-kernel: delete bench example using
+  deleted candle entries (#1082)`); `ls crates/kiln-opd-loss-kernel/` →
+  build.rs, Cargo.toml, csrc, src, tests (no examples/). Claim accurate.
+- `permissions:` inventory: 6 workflows set explicit blocks (desktop-build,
+  pages `contents:read+pages:write+id-token:write`, openenv-interop
+  `contents:read`, repository-hygiene `contents:read`, server-release,
+  plus job-level in runpod-image); 7 rely on repository defaults. No block
+  contradicts the job's actions (no `GITHUB_TOKEN` write beyond what the
+  declared scopes allow). No finding.
+- `perf-regression-nightly.yml` comment pointer "see
+  docs/contracts/CONFIGURATION.md 'legacy CUDA-native selector'" →
+  `CONFIGURATION.md:408` row for `KILN_CUDA_NATIVE_TRAINING` ("the obsolete
+  legacy CUDA-native selector remains unavailable"). Resolves.
+
+### Corner (a) — contracts/ cross-file consistency (all negative)
+
+- `contracts/README.md:1-3` "Index of the 15 tracked contract files":
+  directory holds exactly 15 data files + README; the README tables list
+  exactly those 15 (1+7+2+4+1). Consistent.
+- "enforced by" column (all 15 rows): each cited script exists and is the
+  gate that pins the file (cross-checked against the 14 hygiene gate
+  commands in `repository-hygiene.yml:33-47` and the pages/ui-smoke/
+  release-version-drift steps); step name "Check generated, documentation,
+  and repository contracts" exists verbatim at
+  `repository-hygiene.yml:32`. 12 of 15 files are enforced in that step;
+  the other 3 (runtime-defaults, thinking-budget ×2) run in
+  pages.yml/ui-smoke.yml/release-version-drift.yml — "Most enforce in …"
+  holds (12/15).
+- "GENERATED by" column: each generator's output constant matches the
+  claimed file (`generate_observability_schema.py:23`,
+  `generate_artifact_schema.py:13`, `generate_eval_schema.py:13`,
+  `generate_control_plane_schema.py:13` → `contracts/kiln-*-v1.schema.json`);
+  the two `--write` claims verified (`check_runtime_env_contract.py:1056`,
+  `check_source_parsing_tests.py:778`), and both generated files carry the
+  matching "Generated by … --write" header line.
+- `check_http_api_contract.py` really does cross-check the inference
+  schema (README claim): `INFERENCE_SCHEMA_PATH` at
+  `check_http_api_contract.py:20`, entrypoint-drift check at :927,
+  55-definition pin at :940.
+- "JSON schemas are additionally served on the documentation site by
+  pages.yml": all nine kiln schemas appear as `json_schema`/`openapi`
+  documents in `docs/site/docs-manifest.json` (config, http-api,
+  inference, observability, thinking-budget, openenv, evals,
+  control-plane, artifacts), each `source` path exists.
+- `$id` cross-consistency: all 8 JSON schemas use the
+  `https://ericflo.github.io/kiln/contracts/<file>` id matching their
+  served location; the OpenAPI file has no `$id` (correct — it is an
+  OpenAPI 3.1 document, not a JSON Schema).
+- Cross-claim check: OpenAPI path `/v1/completions/batch` (used by
+  `scripts/bench-trajectory-turns.py:281`) present among the 111 OpenAPI
+  paths; `batching.actor_active` (TRAJECTORY_TURN_THROUGHPUT.md:60)
+  present at `crates/kiln-server/src/api/config.rs:130/481/1279`; all six
+  `kiln_*` metrics referenced by the bench script
+  (`metrics.rs` greps for hit tokens/blocks, decode/prefill tokens,
+  prefix-admission deferrals, errors) exist. No cross-file drift found.
+
+### Corner (c) — one deep doc per dir (all negative)
+
+- `docs/serving/TRAJECTORY_TURN_THROUGHPUT.md` (procedural claims):
+  benchmark command flag set (`--host --db --adapter-uri --adapter-dir
+  --mode batch --order session --batch-size --http-workers --max-tokens
+  --limit --out`) — every flag present in
+  `scripts/bench-trajectory-turns.py:360-386` argparse, defaults
+  consistent (`--adapter-dir /workspace/kiln-adapters` :365,
+  `--batch-size 16` :375, `--http-workers 1` :376, `--max-tokens 64` :378,
+  `--out trajectory-turn-throughput.json` :386); endpoint
+  `/v1/completions/batch` verified against the OpenAPI (see corner (a));
+  `batching.actor_active=true` response field verified in
+  `api/config.rs`; report delta keys (`prefix_hit_tokens_delta`,
+  `batching_prefill_tokens_delta`, `batching_decode_tokens_delta`,
+  `batching_prefix_deferrals_delta`, `batching_errors_delta`) exactly
+  match the script's report dict (`bench-trajectory-turns.py:419-438`),
+  and each underlying metric exists in `crates/kiln-server/src/metrics.rs`.
+- `docs/training/sft-tokenization.md` (procedural claims): referenced
+  files all exist — `crates/kiln-train/tests/fixtures/qwen35_sft_oracle_v1.json`,
+  `scripts/qualification/qwen35_sft_oracle.py`,
+  `scripts/qualification/cargo-test-bounded.sh`; mask contract string
+  `kiln.qwen35-assistant-only.v1` present in both the fixture
+  (`mask_contract.version`) and the test
+  (`crates/kiln-train/tests/qwen35_sft_oracle.rs:65`); doc's uv pins
+  (`transformers==5.13.1`, `tokenizers==0.22.2`, `jinja2==3.1.6`) and
+  "TRL 1.8" exactly match the fixture oracle record (transformers 5.13.1,
+  tokenizers 0.22.2, jinja2 3.1.6, trl 1.8.0). No drift.
+
+### Corner (d) — five frozen one-off scripts (all negative)
+
+Sample (non-CI-referenced; each's documented usage checked against its
+arg parsing):
+
+| script | documented usage | evidence | verdict |
+|---|---|---|---|
+| audit-substrate-status.sh | `--markdown` (bench-results/substrate-status.md:222, README.md:73) | `case` on `$1` with `--markdown` at :25-26; `--summary`-free | MATCH |
+| runpod-substrate-validate.sh | `[--gpu-smoke]` (header :19; substrate-validate finding :79) | `case` with `--gpu-smoke` at :34-35 | MATCH |
+| bench-trajectory-turns.py | full flag set (docs/serving/TRAJECTORY_TURN_THROUGHPUT.md:78-90) | argparse :360-386 covers all; `--limit` :374 | MATCH |
+| audit-candle-usage.sh | `--summary` (header :18) | `[[ "${1:-}" == "--summary" ]]` after :29 | MATCH |
+| audit-preserve-list.sh | no flags (bench-results/preserve-list.md:9) | no arg parsing; set -euo pipefail only | MATCH |
+
+### Findings
+
+| id | severity | file:line | classification | one-line |
+|---|---|---|---|---|
+| F180-1 | MED | .github/workflows/pages.yml:47-49 (vs :17) | DRIFTED | push-trigger path filter omits `openenv_credentials.rs` that the PR-trigger glob covers; main-only pushes to that file skip the docs-site rebuild |
+
+**Owner-queue delta: +1 (F180-1 MED).** Workflows are owner-managed
+surfaces; the one-line fix above is proposed, not applied.
+
+### Standing gates (17/17 pass, literal CI commands, run after the only
+write — this ledger append — and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119848438 bytes; CSV <= 1048576, each file <= 10485760" (gate counts git-index bytes, so both the pre-append and post-append passes show the pre-commit figure; the post-commit pass counts the appended entry) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, … continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 180 reply (single-commit
+pattern; no hash backfill needed since this entry is the only change).
