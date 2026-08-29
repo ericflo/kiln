@@ -11187,3 +11187,168 @@ the tree, 80 min, no commit); the orchestrator should treat 2× the
 session norm with no tree movement as the salvage trigger. The finding
 itself was exactly the split's last doc-comment residue — the split
 campaign's final known loose end.
+
+---
+
+## Cleanup Agent (round 169) — 2026-08-29
+
+**REPORT-ONLY — README gate-pin inventory and fragility audit (round 1, 169-class).**
+Read-only round: the only write is this ledger entry. Every live gate
+assertion that reads or pins `README.md` text was inventoried, verified
+against the current 479-line post-split README (HEAD `40c6cf347`), and
+classified STRONG / WEAK / RISK per the round-169 rubric. No gate, script,
+or doc was modified.
+
+### Scope and method
+
+- Inventory sources: `scripts/check_*.mjs`, `scripts/check_*.py`,
+  `scripts/docs-site/*.mjs`, `.github/workflows/*.yml` — case-insensitive
+  `readme` grep across `scripts/` (file list below), plus per-script section
+  reads of every README assertion site; `docs-manifest.json` and
+  `contracts/production-file-budget-v1.json` checked for README sources /
+  size budgets (none — R167 already proved the site serves zero README
+  copies; the budget contract has no README mention).
+- Verification: targeted greps against README.md (line numbers below are
+  current-README lines), existence checks for pinned assets, and a full
+  local run of all 14 `Fast repository contracts` gates in CI order plus the
+  docs-site trio (table below). `KILN_DOCS_SMOKE_STATIC_ONLY=true` was
+  confirmed by reading to exercise **all 8 README validators** — the
+  static-only early return sits at `check_docs_site_smoke.mjs:4140`, after
+  the validator call block at L4106–4116 — so rc=0 is genuine evidence for
+  the README pins, not a skip.
+- No cargo, no test suites beyond the named gate scripts.
+
+### Pin inventory (16 live assertions; 4 scripts; README lines current as of HEAD)
+
+| # | Gate pin (file:line) | What it pins and why | Current anchor in README (479 lines) | Verified | Class |
+|---|---|---|---|---|---|
+| 1 | `check_runtime_defaults.mjs:127` (map L21) | README must contain `docs/contracts/CONFIGURATION.md` — the post-168a split-chain pointer; the canonical side is pinned there (L129–130: `server.port` default row + runtime-defaults link in CONFIGURATION.md) | L25 nav link + L410 Configuration stub bullet | both present | **STRONG** — exact string, anchored to the owner-approved split structure itself |
+| 2 | `check_release_versions.py:30` (`CURRENT_SERVER_SURFACES`) | Negative: README must contain no `kiln-vX.Y.Z`, `kiln-X.Y.Z-<arch>`, `ghcr.io/ericflo/kiln-server:X.Y.Z`, or `Version: <current server version>` — keeps user-facing examples off stale release pins | only `kiln-v*` + latest-release lookup (L195, L202); banner L220 reads `Version: <workspace version>` (the allowed placeholder) | no forbidden token (grep) | **WEAK** — negative guard by design; passes vacuously under any content drift, fails only when a pinned version is introduced |
+| 3 | `check_release_versions.py:46` (`DESKTOP_SURFACES`) | Any `desktop-vX.Y.Z` / `Kiln.Desktop_X.Y.Z_` in README must match desktop/Cargo.toml (v0.2.16) | zero occurrences in README (grep) | passes vacuously | **WEAK** — no desktop tokens exist in the post-split README; would survive any content drift |
+| 4 | `check_release_versions.py:57` (`CLI_EXAMPLE_SURFACES`) | Every README CLI example must parse against the cli.rs contract (`kiln`/`./target/release/kiln` binaries, flag vocabulary, no-value flags) | `./kiln serve` (L47, L198, L243), `./kiln pi-setup [--kiln-url …]` (L253–256), `hf download`, `kiln health` prose (L233) | gate PASS | **STRONG** — semantic anchor to the retained Quick Start + Features CLI examples |
+| 5 | `check_release_versions.py:579` (`required_latest_snippets`) | README must contain verbatim `ghcr.io/ericflo/kiln-server:latest` and `KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest` — user-facing install commands must stay version-fresh | L202 (Path 3) + L195 (Path 2 block) | both present | **STRONG** — exact pinned text inside the retained class-(c) Quick Start |
+| 6 | `check_thinking_budget_contract.mjs:88` | README must link `docs/serving/THINKING_BUDGET_CONTRACT.md` — canonical thinking-budget reference discoverable from the hub (same pointer pattern as #1) | L417, Configuration stub "Related contracts" line | present | **STRONG** — exact link pin, currently satisfied; note: single-line anchor inside a (b)-class stub, so a future owner trim of that line fails the gate (fail-by-design, not silent drift) |
+| 7 | `check_docs_site_smoke.mjs:1679` (`validateReadmeStartupBanner`) | Fenced block containing `K I L N` + `Endpoints:`; labels `Mode:`/`CUDA:`/`GPU:`/`VRAM:`/`Listen:`/`Endpoints:` in order; `Mode: GPU inference` — the Quick Start sample output stays a faithful cold-start sample | banner block L213–229 (labels L221→L228 in order) | all labels, order, and Mode line present | **STRONG** — anchored to retained class-(c) Quick Start content |
+| 8 | `check_docs_site_smoke.mjs:1706` (`validateReadmeMedia`) | Dashboard PNG referenced + file exists + alt text carries `dashboard`/`status`/`adapters`/`training` + `chat` or `quick inference`; demo links `https://ericflo.github.io/kiln/demo/` and `docs/site/demo/` | L295 image (alt: "Kiln embedded server dashboard showing healthy status metrics, adapters panel, training progress, and chat quick-inference panels"); links L15 + L289; asset exists (2,552,232 B) | all present | **STRONG** — anchored to retained class-(a) "See it in action" |
+| 9 | `check_docs_site_smoke.mjs:1978` (`validateReadmeColdReaderCoverage`) | 8 all-terms normalized groups (what-it-is; serving-profile contract; install/run paths; GRPO loop; embedded dashboard; demo/asciicast; dashboard screenshot; QUICKSTART/CHANGELOG/LICENSE) + 1 any-group (site or `docs/site`) — the hub must stay self-sufficient for a first-time reader | what-it-is L11; profiles L42–44; paths L190–204 (`source cli` via "Source / CLI" L204); GRPO L115–118; dashboard L287; demo L289; screenshot L295; links nav L14–31 | all groups satisfied (gate PASS) | **STRONG** as a group set; note the generic individual terms (`dashboard`, `Docker`, `LICENSE`) would survive large drift on their own — the multi-term groups are what enforce coverage |
+| 10 | `check_docs_site_smoke.mjs:2003` (`validateReadmeImageReferences`) | ≥1 local image reference in README; every local image target resolves to an existing file | L3 `assets/logo.png` (1,447,368 B) + L295 `docs/site/assets/server-ui-dashboard.png` (2,552,232 B) | both exist | **STRONG** (structural; weak only in that one image suffices) |
+| 11 | `check_docs_site_smoke.mjs:2246` (`validateReadmeQuickStartPaths`) | `## Quick Start` + all four path labels (`Desktop App (recommended)`, `Server binary (terminal-first, no source build)`, `Container`, `Source / CLI`) + Path-2 body details: `Qwen/Qwen3.5-4B`, `kiln-v${KILN_VERSION}`, `x86_64-unknown-linux-gnu-cuda124.tar.gz`, a `…/releases/download/kiln-v` URL, and the `QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build` matrix anchor | L186 heading; L190/L192/L202/L204 paths; L195–197 block; L200 matrix link | all present | **STRONG** — the owner's landing structure, retained class-(c) |
+| 12 | `check_docs_site_smoke.mjs:2286` (`validateReadmeAdapterListSemantics`) | A `` `/v1/adapters` `` table row exists with `saved/available LoRA adapters` + `active adapter` + `content revision` — the API index row must carry correct saved/active semantics | L324 (single hit; row text exact) | present | **STRONG** — anchored to the retained curated API table |
+| 13 | `check_docs_site_smoke.mjs:2304` (surface list L1148) | README (with QUICKSTART/api.html/adapters.rs) must not contain 5 stale "loaded adapters" phrasings | 0 occurrences in README | passes | **WEAK** — negative guard; survives any benign drift, fails only on reintroduction of the stale phrasing |
+| 14 | `check_docs_site_smoke.mjs:2315` (`validateGrpoOverviewRequestsImports`) | `## The GRPO Loop` heading + a `requests.post` in that section with `import requests` within the 800 chars before it — the hub's GRPO example must be a runnable, self-contained OpenAI-client submit | L115 heading; L132 `import requests`; L135 `requests.post("…/v1/train/agentic", …)` (≈120-char gap; single `requests.post` in the README) | all present | **STRONG** — see GRPO-anchor finding below |
+| 15 | `check_docs_site_smoke.mjs:3137` (`markdownLocalLinkSourcePaths`) | README is a source for local-link validation: every local Markdown link resolves; no dead anchors | gate PASS; R167 already audited all 12 README cross-refs (zero stale) | satisfied | **STRONG** (link-integrity, not a prose pin) |
+| 16 | `check_docs_site_smoke.mjs:3281` (`directoryHasMarkdownIndex`) | README directory links must point at directories containing `index.html` or `README.md` | `docs/site/demo/` (L289) contains both `index.html` and `README.md` | satisfied | **STRONG** (structural) |
+
+### GRPO-pin anchor finding (task question #2, confirmed)
+
+Pin #14 is anchored to `## The GRPO Loop` (L115), which **survived** the
+split, and the pinned example it guards is the `### Agentic GRPO with ECHO`
+Python block (L130–155) — the smoke-gated example rounds 162–164
+deliberately retained: round 157's audit classified that subsection as
+class (c), i.e. README copy newer than the canonical doc (the
+TerminalBench-2.0 headline claim is README-only; `ECHO_GUIDE.md` has no
+paper citation and no TerminalBench claim). It is **not** anchored to any
+(b)-class narrative the split converted to stubs (OpenEnv Loop, OPD, vLLM
+teachers are now pointer sections, and no gate pins prose in them). A
+future edit deleting the ECHO example would fail pin #14 — that is the
+intended fail-by-design behavior of a STRONG pin, not a 168a-class RISK.
+
+### RISK verdict
+
+**Zero RISK pins.** No queued owner edit targets any pinned content: the
+168a failure class (a pin on content an owner-approved edit removed) was
+fixed in `1fb266f7f`/`07ae631e0`, and pin #1 above now pins the split
+chain the owner approved. Scanned against the full owner queue (D-2..D-16,
+A-1..A-11, F-1..F-4, R165–R167 additions): no item proposes cutting the
+banner, the Quick Start paths, the adapters row, the GRPO/ECHO example, the
+dashboard media, or the CONFIGURATION/thinking-budget pointer lines.
+
+**WEAK pins (noted, gates unchanged per rules):** #2, #3, #13 (negative /
+vacuous guards — they pass by absence and would survive large content
+drift) plus the generic single terms inside #9 and the one-image floor in
+#10. All currently satisfied.
+
+**No provably broken pin:** all 14 CI gates pass locally and the latest CI
+run is green (below).
+
+### Out-of-scope `readme` hits (verified non-pins on the root README)
+
+- `check_docs_site_smoke.mjs` L1101–1108 (`expectedDemoReadmeLinks`),
+  L2913–2940 (`validateLaunchSentinel`), L3430+ (`validateDemoReadmeInventory`)
+  — pin `docs/site/demo/README.md` and `docs/site/launch/README.md`, other files.
+- `check_openenv_contract.py:57`, `generate_control_plane_schema.py:475/:481/:1788` —
+  `readme_content` is an OpenEnv artifact **field name**, not a file read.
+- `scripts/docs-site/*.mjs` — zero README references (grep rc=1); the site
+  renders the manifest, which serves no README copy (R167: 0/59 docs).
+- CI workflows — no workflow reads README.md text; `server-release.yml`
+  "See the repository README" is release-notes prose; `desktop-build.yml`
+  mentions are comments. `pages.yml` triggers Pages on any change to
+  `scripts/check_*.mjs|py` — so any future README-gate edit re-runs the
+  Pages smoke automatically (the 168a lesson is structurally covered).
+- `contracts/production-file-budget-v1.json` / `check_production_file_budget.py` —
+  no README-specific budget; the 479-line README is far under the 5000-line
+  default.
+- `scripts/audit-substrate-status.sh:67`, `scripts/qualification/tests/test_source_tree_hash.py` —
+  other READMEs (bench-results baseline, desktop), not gate pins.
+
+### Gate verdicts (committed tree; CI order)
+
+| Gate | Verdict |
+|---|---|
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths, 119,641,332 bytes) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 reviewed exceptions) |
+| `python3 scripts/check_runtime_env_contract.py --check` | PASS (448 reads, 19 process mutations; 0 runtime migration reads) |
+| `python3 scripts/check_source_parsing_tests.py` | PASS (0 tests, 0 reads, 0 text assertions) |
+| `python3 scripts/check_config_schema.py --self-test` | PASS (117 canonical fields, 3 dynamic templates) |
+| `python3 scripts/check_openenv_contract.py --self-test` | PASS |
+| `python3 scripts/check_http_api_contract.py --self-test` | PASS (111 paths, 125 operations) |
+| `python3 scripts/generate_observability_schema.py --check` | PASS (172 closed definitions) |
+| `python3 scripts/generate_artifact_schema.py --check` | PASS (84 reachable definitions, 22 entrypoints) |
+| `python3 scripts/generate_eval_schema.py --check` | PASS (90 reachable definitions, 33 entrypoints) |
+| `python3 scripts/generate_control_plane_schema.py --check` | PASS (164 reachable definitions, 61 entrypoints) |
+| `node scripts/check_thinking_budget_contract.mjs` | PASS (pin #6 satisfied) |
+| `node scripts/check_runtime_defaults.mjs` | PASS (pin #1 satisfied; `runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)`) |
+| `python3 scripts/check_release_versions.py` | PASS (pins #2–#5 satisfied; server examples avoid pinned 0.5.2, desktop pins match desktop-v0.2.16) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents, 0 copied assets) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0; all 8 README validators executed before the static-only return — pins #7–#16 satisfied) |
+
+### CI verification (round 168a fix, confirmed green)
+
+`gh run list --limit 3`:
+
+```
+completed success … Repository checks main push 33228381316 58s   2026-08-29T02:12:45Z
+completed success … CI              main push 33228381309 4m17s 2026-08-29T02:12:45Z
+completed success … Pages           main push 33228381303 1m13s 2026-08-29T02:12:45Z
+```
+
+Latest `Repository checks` = **success** on round 168b's commit `40c6cf347`
+— the 168a fix (`07ae631e0`) remains green in CI.
+
+### Owner-queue additions
+
+**R169 addition (1) — FYI F-5 (record only; no gate impact):**
+A-1's README cells (`README.md:1295` batching.mode row, `:1300-1303`
+rendezvous rows, `:1365-1382` direct-fallback paragraph, `:1259-1277`
+14-crate Project Structure) and D-16's README cell (`README.md:1673-1681`
+"embeds dashboard/settings/logs") cite **pre-split lines that no longer
+exist**. Verified post-split state: the Configuration narrative is gone
+(stub at L404–417) so A-1's three README prose cells are moot; the crate
+count was already fixed 14→33 in R164 phase 3 (stub L390–392); the desktop
+section is now a stub (L433–439) pointing at `desktop/README.md#releases`,
+so D-16's "README embeds … screenshots" premise is stale (the embed
+candidates live in desktop/README.md, which D-16 already names). None of
+the 16 R169 pins covers any of these lines (verified against the inventory
+above), so there is no gate RISK — but a future round re-executing A-1 or
+D-16 should re-anchor or drop the README cells before acting. Existing
+queue rows were not modified (owner-managed; report-only per rules).
+
+**Total open owner items: 36** (35 from R167 + F-5). Not touched: all
+D-2..D-16, A-1..A-11, F-1..F-4, and R165–R167 additions; D-1 remains
+RESOLVED.
+
+### Commit
+
+`R169_HASH` (CLEANUP.md only; no push); this hash line lands in the small
+follow-up commit per the round-154/166/167 precedent.
