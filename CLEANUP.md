@@ -11352,3 +11352,166 @@ RESOLVED.
 
 `29785f041` (CLEANUP.md only; no push); this hash line lands in the small
 follow-up commit per the round-154/166/167 precedent.
+
+---
+
+## Cleanup Agent (round 170) — 2026-08-29
+
+**Audit + precision-trim round: full consistency audit of every README pointer
+stub left by the README split (round 162). Each stub's enumerated claims were
+checked against its destination document; four provable over-claims were
+precision-trimmed; one gate-vs-GitHub anchor conflict was routed to the owner.
+Final tree is green on the full standing gate suite.**
+
+### Scope and method
+
+- Scope: every pointer stub the README split created (class-(b) narrative
+  converted to a "See [X] for …" pointer) — not the pre-existing Quick Start,
+  the retained API table, or the retained class-(c) example. For each stub,
+  every enumerated claim was checked against the destination document
+  (line-anchored grep + section read) and classified ACCURATE / TRIM (proven
+  over-claim) / ROUTE (gate-vs-reality conflict or out of scope); accurate
+  stubs were recorded as-is, over-claims were precision-trimmed only where
+  provable and with no new claim or owner narrative introduced, and anything
+  unprovable or out of scope was routed to the owner queue.
+- Verification: the full standing gate suite was run on the final tree (14
+  repository-hygiene gates in CI order + docs-site validate + build tests +
+  static smoke). All green (below).
+
+### Stub inventory and verdicts (README 479 lines; destination links as of HEAD)
+
+| # | L# | Stub → destination | Verdict | Key evidence |
+|---|----|--------------------|---------|--------------|
+| 1 | L112–113 | OpenEnv → `OPENENV_GUIDE.md`, `OPENENV_REPLAY_REFERENCE.md` | ACCURATE | both docs exist; OpenEnv loop + replay covered |
+| 2 | L125 | GRPO → `GRPO_GUIDE.md` | **TRIM (T1)** | `## The loop` (L70), `## Recommended recorded-policy workflow` (L113); single worked scorer `score_math.py` (L140–181, L270); JSON = reward-group example, code = sandbox guidance (L165) only → "worked examples (math, JSON, code)" over-claims 2 of 3 |
+| 3 | L157 | ECHO → `ECHO_GUIDE.md` | **TRIM (T2)** | L192 "ECHO is request-local. It has no process-global environment override." + zero ECHO env vars → "env vars" over-claim; objective L25, trajectory L66, observation-only adaptation L238 = paper §5.5 (echo_paper.md L282), provenance L14–20, receipt L263+ all supported |
+| 4 | L165 | OPD → `OPD_TEACHER_JSONL.md`, `training-checkpoints.md#opd` | ACCURATE | both docs exist; OPD teacher format + checkpoints covered |
+| 5 | L175 | vLLM teacher → `VLLM_TEACHER_IDENTITY.md` | ACCURATE | contract doc exists; teacher identity covered |
+| 6 | L257 | SFT profile → `NATIVE_SFT_PROFILE.md` | ACCURATE | `native_online_lora_v1`, tagged optimizers, rank ceilings covered |
+| 7 | L258 | SFT tokenization → `sft-tokenization.md` | ACCURATE | token/label oracle + assistant-only masking covered |
+| 8 | L259 | HF/TRL → `HF_TRL_INTEROP.md` | **TRIM (T3)** | export-sft/export-grpo/import-peft + reference-runner + identity/envelope/receipt all present (L23–29, L56–98); `grep -in distill HF_TRL_INTEROP.md` → 0 hits → "DistillRefresh workload + stable reason" over-claim |
+| 9 | L260 | SFT ingestion → `sft-ingestion.md` | ACCURATE | row-admission contract + `invalid_row_policy` + receipt hashes covered |
+| 10 | L261 | Training API → `docs/site/api.html#training` | **TRIM (T4)** | `GET /v1/config` + `GET /v1/recipes` present; `grep -c "training-optimizer-support" api.html` → 0 → schema claim over-claim |
+| 11 | L335 | Latency/obs → `LATENCY_OBSERVABILITY.md` | ACCURATE | latency/observability contract covered |
+| 12 | L388 | Adapter manifest → `ADAPTER_MANIFEST.md` | ACCURATE | contract doc exists |
+| 13 | L410 | Configuration → `CONFIGURATION.md` | ACCURATE | R168a split-chain pin satisfied; canonical home |
+| 14 | L429 | Security → `security-audit-v0.1.md` | ACCURATE | audit doc exists; `127.0.0.1:8420` matches runtime-defaults contract |
+| 15 | L398/402 | Architecture → `ARCHITECTURE.md` | ACCURATE | `#workspace-layout` anchor resolves |
+| 16 | L442 | Desktop → `desktop/README.md#releases` | ACCURATE | releases anchor resolves |
+| 17 | L204 | Build Kiln → `QUICKSTART.md#1-optional-source-cli-branch-build-kiln` | **ROUTE** | gate-vs-GitHub anchor conflict — see below |
+
+### Precision trims applied (4; exact before → after, removals only)
+
+All four are pure removals (no added claims, no owner narrative). Each is
+proven from the destination doc, and all four keep the full standing gate
+suite green, including all 16 R169 README pins (none pins the trimmed prose).
+
+**T1 — GRPO (L125):**
+```
+- See … for the loop, the recorded-policy workflow, and worked verifiable-reward examples (math, JSON, code).
++ See … for the loop, the recorded-policy workflow, and a worked verifiable-reward example (math).
+```
+Proven: `GRPO_GUIDE.md` has exactly one worked verifiable-reward scorer,
+`score_math.py` (L140 "Write a scorer", L162 `chmod +x score_math.py`,
+L181/L270 `--scorer ./score_math.py`); JSON appears only as a reward-group
+example and code only as sandbox guidance (L165). "worked … (math, JSON,
+code)" therefore over-claims two of the three.
+
+**T2 — ECHO (L157):**
+```
+- See … full usage (CLI flags, env vars, verifier-free adaptation per paper §5.5) …
++ See … full usage (CLI flags, verifier-free adaptation per paper §5.5) …
+```
+Proven: `ECHO_GUIDE.md` L192 "ECHO is request-local. It has no process-global
+environment override." and zero ECHO-specific env vars are documented. (Kept:
+"CLI flags" = the guide's development-only ablation flags L209; "verifier-free
+adaptation per paper §5.5" = the guide's "Observation-only adaptation" L238,
+which implements paper §5.5 "Verifier-Free Adaptation" [echo_paper.md L282]
+and cites the paper L14–20.)
+
+**T3 — HF/TRL (L259):**
+```
+- … the portable `export-sft` / `export-grpo` / `import-peft` bundles with the pinned correctness runner, the versioned identity/envelope/receipt model, and the fail-closed DistillRefresh workload and its stable reason.
++ … the portable `export-sft` / `export-grpo` / `import-peft` bundles with the pinned correctness runner, the versioned identity/envelope/receipt model.
+```
+Proven: `grep -in "distill" docs/training/HF_TRL_INTEROP.md` → 0 hits; the doc
+has no DistillRefresh workload or "stable reason". Remaining claims (bundles,
+reference-runner, identity/envelope/receipt) all present (L23–29, L56–98).
+
+**T4 — Training API (L261):**
+```
+- … the running contract, including the `kiln.training-optimizer-support` schema, `GET /v1/config`, and `GET /v1/recipes`.
++ … the running contract, including `GET /v1/config` and `GET /v1/recipes`.
+```
+Proven: `grep -c "training-optimizer-support" docs/site/api.html` → 0; the
+api.html training section exposes `GET /v1/config` and `GET /v1/recipes` but no
+such schema.
+
+### Routed to owner — gate-vs-GitHub anchor conflict (L204; not fixed)
+
+**Stub:** `**Path 4 — Source / CLI:** … → [Build Kiln](QUICKSTART.md#1-optional-source-cli-branch-build-kiln)` (L204).
+
+**Conflict (proven):**
+- Heading: `QUICKSTART.md:96` `## 1. Optional Source / CLI Branch: Build Kiln`.
+- **Real GitHub anchor (correct):** `1-optional-source--cli-branch-build-kiln` (double hyphen). Proven by GitHub's own `github-slugger` source (`return value.replace(regex, '').replace(/ /g, '-')` — one hyphen per space, no collapse) and its official test fixtures: `"heading with a - dash"` → `heading-with-a---dash` (three hyphens); `routing [, bindCallback` → `routing--bindcallback` (double hyphen). Empirical: `"a / b"` → `a--b`; `"A - B"` → `a---b`.
+- **Repo-gate anchor (what the smoke gate accepts):** `1-optional-source-cli-branch-build-kiln` (single hyphen). Both repo sluggers collapse: `githubHeadingSlug` in `scripts/check_docs_site_smoke.mjs` and `slugifyHeading` in `scripts/docs-site/lib.mjs` both use `.replace(/\s+/g, '-')`.
+- README.md is **not** on the docs site (`docs-manifest.json`: 0 README matches; R167 proved the site serves zero README copies). So this link is a **GitHub-only** surface where the real GitHub slugger is authoritative.
+- Result: the **correct** anchor (double-hyphen) **fails** the required static smoke gate (its slugger collapses); the **gate-passing** anchor (single-hyphen) is **dead on real GitHub**. The two are mutually exclusive.
+
+**Why not fixed here:** the required static smoke gate enforces the repo's own
+collapsing anchor contract, and the round requires that gate to be `rc=0`.
+Keeping the correct (double-hyphen) anchor leaves a required gate red — "a
+cleanup that breaks something is not a cleanup." The correct resolution
+requires either (a) aligning the internal slugger to GitHub's no-collapse
+behavior, or (b) renaming the QUICKSTART heading to avoid the ` / ` — both out
+of scope for a precision-only README trim (a = gate/slugger code change,
+b = heading rename that affects other links and gates).
+
+**Decision:** the L204 anchor stays at the gate-passing single-hyphen form;
+the tree stays green; the slugger mismatch is routed to the owner with the
+evidence above.
+
+**Owner actions (either one resolves):**
+- (a) Align `githubHeadingSlug` (`scripts/check_docs_site_smoke.mjs`) and
+  `slugifyHeading` (`scripts/docs-site/lib.mjs`) to GitHub's no-collapse
+  slugger (`.replace(/ /g, '-')` with no `\s+` collapse), then set the README
+  anchor to the double-hyphen form; **or**
+- (b) Rename `QUICKSTART.md:96` to a heading with no ` / ` (e.g.
+  `## 1. Optional Source or CLI Branch: Build Kiln` → anchor
+  `1-optional-source-or-cli-branch-build-kiln`) and update the single link
+  (README L204).
+
+**Impact if left as-is:** the "Build Kiln" link on the public GitHub README is
+a dead anchor (click-through lands at the top of QUICKSTART.md). Low severity
+(the target page still loads and the section is the first `## 1.`), but a real
+UX defect that only the owner can fix while keeping the gate green.
+
+### Gate verdicts (final tree; CI order)
+
+| Gate | Verdict |
+|---|---|
+| 14 repository-hygiene gates (`repository-hygiene.yml` "Fast repository contracts", CI order) | all `rc=0` |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents, 0 copied assets) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0; all 8 README validators executed) |
+
+None of the 16 R169 README pins is broken by T1–T4 (pin #14 is anchored to the
+retained `## The GRPO Loop` heading + the ECHO Python block, neither touched).
+
+### Owner-queue additions
+
+**R170 (1) — anchor/slugger mismatch (gate-vs-GitHub), OPEN:**
+README L204 "Build Kiln" anchor is dead on public GitHub (single-hyphen form
+the smoke gate requires; the real GitHub anchor is the double-hyphen form).
+Fix needs a slugger code change (align to no-collapse) or a QUICKSTART heading
+rename — both out of scope for precision-only README trims. Evidence:
+github-slugger official fixtures (`heading-with-a---dash`,
+`routing--bindcallback`), the two repo sluggers' `.replace(/\s+/g, '-')`, and
+the docs-manifest README absence. Owner to choose (a) or (b) above.
+
+**Total open owner items: 37** (36 from R169 + this anchor item).
+
+### Commit
+
+README 4 trims (T1–T4) + this ledger entry; the commit hash lands in the small
+follow-up commit per the round-154/166/167 precedent.

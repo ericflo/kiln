@@ -122,7 +122,7 @@ means for your use case. The default `POST /v1/train/grpo` submission uses
 batching path, validates the seed, adapter, prompt, scored content, and usage
 before scoring, and atomically writes JSONL for `behavior_policy="recorded"`.
 
-See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for the loop, the recorded-policy workflow, and worked verifiable-reward examples (math, JSON, code).
+See [docs/guides/GRPO_GUIDE.md](docs/guides/GRPO_GUIDE.md) for the loop, the recorded-policy workflow, and a worked verifiable-reward example (math).
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
@@ -154,7 +154,7 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 })
 ```
 
-See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for the objective, trajectory contract, full usage (CLI flags, env vars, verifier-free adaptation per paper §5.5), the paper citation and its TerminalBench-2.0 headline, and the receipt-grade diagnostics.
+See [docs/guides/ECHO_GUIDE.md](docs/guides/ECHO_GUIDE.md) for the objective, trajectory contract, full usage (CLI flags, verifier-free adaptation per paper §5.5), the paper citation and its TerminalBench-2.0 headline, and the receipt-grade diagnostics.
 
 ### Off-policy OPD teacher data
 
@@ -256,9 +256,9 @@ The training deep-dive lives in the canonical docs:
 
 - [Native SFT Profile](docs/training/NATIVE_SFT_PROFILE.md) — the fixed `native_online_lora_v1` microtrainer profile (one conversation, one optimizer update at a time, constant learning rate, no gradient accumulation, warmup, decay, or clipping; unsupported general-trainer fields fail closed), the optimizer tagged objects (omission selects Muon), the precision and optimizer-state matrix, and the rank ceilings (1024 for AdamW/SGD on canonical Qwen3.5-4B; 48 on CUDA/ROCm, 32 on Metal/Vulkan for Muon).
 - [SFT Tokenization and Assistant-Only Loss](docs/training/sft-tokenization.md) — the source-pinned Qwen/Hugging Face token-and-label oracle: `add_generation_prompt=false`, complete assistant turn bodies plus their terminator supervised, assistant role headers and all system, user, and tool-response turns masked.
-- [HF/TRL Interoperability](docs/training/HF_TRL_INTEROP.md) — the portable `export-sft` / `export-grpo` / `import-peft` bundles with the pinned correctness runner, the versioned identity/envelope/receipt model, and the fail-closed DistillRefresh workload and its stable reason.
+- [HF/TRL Interoperability](docs/training/HF_TRL_INTEROP.md) — the portable `export-sft` / `export-grpo` / `import-peft` bundles with the pinned correctness runner, the versioned identity/envelope/receipt model.
 - [SFT Ingestion, Invalid Rows, and Row Identity](docs/training/sft-ingestion.md) — one row-admission contract across every source; `invalid_row_policy: fail|skip` semantics and receipt-recorded kept/rejected hashes.
-- [Site API reference — training](https://ericflo.github.io/kiln/api.html#training) — the running contract, including the `kiln.training-optimizer-support` schema, `GET /v1/config`, and `GET /v1/recipes`.
+- [Site API reference — training](https://ericflo.github.io/kiln/api.html#training) — the running contract, including `GET /v1/config` and `GET /v1/recipes`.
 
 **Optional: use Kiln as pi's local agent model.** With the server running on
 `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without
