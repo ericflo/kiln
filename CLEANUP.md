@@ -15018,3 +15018,107 @@ ledger append)
 `CLEANUP.md` append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 189 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 190 — THIRD_PARTY_LICENSES.md freshness & asset-credit audit) — 2026-08-29
+
+**Scope.** Read-only freshness + asset-credit audit of the 6,756-line `THIRD_PARTY_LICENSES.md` (cargo-about generated; license bodies are verbatim text and out of scope per the audit brief) at HEAD `be70e1272` (round 189 commit, clean tree). Audited: header claims (lines 1–12: generation provenance, "kiln-server and desktop binaries" coverage, kiln's own MIT, regeneration recipe with the cargo-about 0.6.6 pin), all 9 Overview per-license counts (lines 35–45) vs live derivation, the hand-written "Bundled runtime assets" section (lines 14–33: font names/weight ranges/copyrights/licenses/URLs/embed paths; xterm.js vendoring + license), and every internal Overview anchor link. Method: `python3` parse of `Cargo.lock` (lockfile v4, 435 `[package]` blocks / 402 non-kiln (name,version) pairs); all 341 doc used-by pairs (336 unique crates) cross-checked against the lock; license attribution re-derived for 335 resolvable third-party crates from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/` manifests (Cargo.lock v4 carries no `license` fields — cargo-about resolves from the registry cache; the single unresolvable manifest is kiln-hip, a workspace crate, `license = "MIT"` at `Cargo.toml:89`); `desktop/Cargo.lock` (526 unique names) set-diffed against the root lock (281 desktop-only); `test -e` + `file` + raw `fvar` table parsing of the embedded assets; embed call-sites checked in `crates/kiln-server/src/api/ui.rs`; cargo-about 0.6.6 CLI flags verified against upstream source (tag `0.6.6`, `src/cargo-about/generate.rs`: `--workspace`, `--all-features`, short `-o` = `output_file`, positional `templates`). Light tools only — no cargo build/install, no regeneration (owner decision), no test suites beyond the standing gates. All findings are owner-queue evidence; the only file mutated is CLEANUP.md.
+
+### Claim verdicts — header (THIRD_PARTY_LICENSES.md:1–12)
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| H1 | "generated … from the dependencies in `Cargo.lock`" | :3 | All 341 used-by pairs (336 unique crates) exist in root `Cargo.lock` at exact versions (402 non-kiln pairs; the 67 lock entries absent from the doc are target-gated to wasm32/windows-gnu/redox/haiku/android or build/dev-only deps — both excluded by `about.toml:9-25` `targets` + `:29-32` `ignore-build-dependencies`/`ignore-dev-dependencies`) | CONSISTENT |
+| H2 | "enumerates every third-party Rust crate that is statically linked into the released `kiln-server` and desktop binaries" | :3 | Root-workspace half ✓ (H1). Desktop half ✗: `desktop/Cargo.toml:1-3` — empty `[workspace]` "intentionally left so this crate is its OWN workspace root and is NOT pulled into the parent kiln Cargo workspace"; root `Cargo.toml` `[workspace]` members do not include `desktop/`; 281 of 526 unique `desktop/Cargo.lock` names (tauri, wry, webkit2gtk, tao, gtk, tray-icon, tauri-plugin-*, …) are absent from the doc | DRIFTED → F190-1 |
+| H3 | "The kiln source code itself is MIT-licensed (LICENSE)" | :5 | `LICENSE` exists; line 1 = "MIT License"; "Copyright (c) 2026 Eric Florenzano" | CONSISTENT |
+| H4 | Regeneration recipe: `cargo install cargo-about --version 0.6.6 --locked` + `cargo about generate --workspace --all-features -o THIRD_PARTY_LICENSES.md about.hbs` | :8–12 | `about.hbs` exists (1,140 B handlebars template rendering the overview + license sections); `about.toml` config exists; every flag verified against upstream cargo-about tag `0.6.6` source (`src/cargo-about/generate.rs`) | CONSISTENT |
+
+### Claim verdicts — Overview counts (lines 35–45) vs live derivation
+
+| Overview line | Doc count | Body used-by entries | Live derivation (registry manifests) | Verdict |
+|---|---|---|---|---|
+| :37 MIT (296 crates) | 296 | 296 (141 MIT sections; miniz_oxide 0.8.9 listed in two of them — cargo-about artifact, count still matches) | 296/296 contain MIT: 76 pure `MIT` + 219 dual/OR forms (`MIT OR Apache-2.0`, `Unlicense OR MIT`, `0BSD OR MIT OR Apache-2.0`, `MIT OR Zlib OR Apache-2.0`, `(MIT OR Apache-2.0) AND Unicode-3.0`, `MIT AND BSD-3-Clause`) + 1 first-party kiln-hip (workspace `license = "MIT"`, `Cargo.toml:89`) | CONSISTENT (over-credit re "third-party" → F190-2) |
+| :38 Unicode License v3 (19) | 19 | 19 | 19/19 contain Unicode-3.0 (18 icu4x family incl. `icu_normalizer_data`/`icu_properties_data` + unicode-ident `(MIT OR Apache-2.0) AND Unicode-3.0`) | CONSISTENT |
+| :39 Apache-2.0 (13) | 13 | 13 | 13/13 contain Apache-2.0 (incl. ryu `Apache-2.0 OR BSL-1.0`, ring `Apache-2.0 AND ISC`, serial2 `BSD-2-Clause OR Apache-2.0`) | CONSISTENT |
+| :40 ISC (5) | 5 | 5 | 5/5 ISC (untrusted, rustls-webpki, libloading 0.8.9 + 0.9.0, ring) | CONSISTENT |
+| :41 BSD-3-Clause (3) | 3 | 3 | 3/3 contain BSD-3-Clause (subtle, matchit `MIT AND BSD-3-Clause`, encoding_rs `(Apache-2.0 OR MIT) AND BSD-3-Clause`) | CONSISTENT |
+| :42 CDLA-Permissive-2.0 (2) | 2 | 2 | 2/2 (webpki-roots 0.26.11 + 1.0.7, two graph versions) | CONSISTENT |
+| :43 MIT No Attribution (1) | 1 | 1 | 1/1 (borrow-or-share 0.2.4, `MIT-0`) | CONSISTENT |
+| :44 Mozilla Public License 2.0 (1) | 1 | 1 | 1/1 (option-ext 0.2.0, `MPL-2.0`) | CONSISTENT |
+| :45 zlib (1) | 1 | 1 | 1/1 (foldhash 0.2.0, `MIT OR Zlib`) | CONSISTENT |
+
+No STALE-CLAIM on counts: no used-by crate in the body is missing from `Cargo.lock`, and the 67-lock-entry delta is fully explained by target/build-dep exclusion (H1). Dual-licensed crates (ring, matchit, encoding_rs, unicode-ident) correctly appear in both of their sections, which is why 341 used-by entries span 336 unique crates.
+
+### Claim verdicts — Bundled runtime assets (lines 14–33)
+
+| # | Claim | Doc cite | Live evidence | Verdict |
+|---|---|---|---|---|
+| A1 | Inter variable font, weights 100–900, OFL 1.1, embedded at `crates/kiln-server/src/ui/fonts/InterVariable.woff2` | :20–22 | File exists, 352,240 B, `file`: "Web Open Font Format (Version 2), TrueType"; embed verified at `crates/kiln-server/src/api/ui.rs:43` (`include_bytes!`) and served at `/ui/fonts/InterVariable.woff2` (:141); weight range not locally decompressable (WOFF2 = brotli; no brotli/fontTools in this environment) | CONSISTENT (existence/type/embed) + UNRESOLVED (weight range, LOW) |
+| A2 | JetBrains Mono variable font, weights 100–800, OFL 1.1, embedded at `…/JetBrainsMonoVariable.ttf` | :23–25 | File exists, 300,144 B, `file`: "TrueType Font data, 20 tables (FontKit)"; raw `fvar` parse: `wght` axis min=100/default=400/max=800; name table carries 9 variable named instances (WeightThin…WeightExtraBold); embed at `ui.rs:44`, served at `/ui/fonts/JetBrainsMonoVariable.ttf` (:140) | CONSISTENT |
+| A3 | xterm.js (+ fit addon), MIT, vendored at `crates/kiln-server/src/ui/vendor/` | :26–28 | All 3 files exist at the exact paths (xterm.js 289,441 B, xterm-addon-fit.js 1,497 B, xterm.css 5,559 B); embeds at `ui.rs:36-38`, served at `/ui/vendor/*` (:136–138); no LICENSE file in `vendor/` (minified bundles, no license header) — the doc's attribution is the credit record; upstream-MIT provenance is an external claim | CONSISTENT (existence/embed) + UNRESOLVED (license provenance, LOW) |
+| A4 | "…the license + copyright notice are preserved (this section satisfies that)" (OFL self-satisfaction) | :30–33 | The doc records license name + copyright line + upstream URL but does not reproduce the OFL 1.1 text itself; whether name+notice+URL suffice under OFL 1.1 for binary redistribution is a legal judgment, not a repo defect | RISK (owner decision) → F190-3 |
+| A5 | "Both fonts are used unmodified" | :33 | Would require byte-comparison against upstream releases (external; not in the repo) | UNRESOLVED (LOW, external) |
+
+### Anchors
+
+All 9 Overview anchor links (`#MIT`, `#Unicode-3.0`, `#Apache-2.0`, `#ISC`, `#BSD-3-Clause`, `#CDLA-Permissive-2.0`, `#MIT-0`, `#MPL-2.0`, `#Zlib`, lines 37–45) resolve to matching `### <a id="…">` headers present in the doc. 0 BROKEN-REF.
+
+### Findings
+
+| ID | Class | Severity | Finding (both sides) | Evidence |
+|---|---|---|---|---|
+| F190-1 | DRIFTED | MED | Header claims the doc "enumerates every third-party Rust crate that is statically linked into the released `kiln-server` and desktop binaries" (`THIRD_PARTY_LICENSES.md:3`), but the body covers only the root Cargo workspace: `desktop/Cargo.toml:1-3` deliberately keeps the desktop app "its OWN workspace root and … NOT pulled into the parent kiln Cargo workspace", and 281 of 526 unique `desktop/Cargo.lock` names (tauri, wry, webkit2gtk, tao, gtk, tray-icon, tauri-plugin-*, …) are absent from the doc. The desktop binary's Rust dependency licenses are credited nowhere in the repo. | `THIRD_PARTY_LICENSES.md:3` vs `desktop/Cargo.toml:1-3` + `desktop/Cargo.lock` ∖ root `Cargo.lock` (python3 set diff) |
+| F190-2 | DRIFTED | LOW | Header says "every **third-party** Rust crate" (:3) but the body also lists first-party `kiln-hip 0.5.1` (line 5394, MIT section) — a cargo-about artifact of `about.toml:35` (`private = { ignore = true }` includes licensed workspace crates). Harmless over-credit (kiln is MIT); wording only. | `THIRD_PARTY_LICENSES.md:5394` + `about.toml:35` + `Cargo.toml:89` |
+| F190-3 | RISK (owner decision) | LOW | Asset section claims "(this section satisfies that)" OFL preservation (:31–32), but only the license name + copyright line + upstream URL is recorded; the full OFL 1.1 text is not reproduced in the doc (or elsewhere in the repo). Whether that satisfies OFL 1.1 for redistribution is a legal call. | `THIRD_PARTY_LICENSES.md:30-33` vs OFL 1.1 text (external) |
+
+### UNRESOLVED (not locally verifiable; not queued)
+
+| ID | Claim | Why unresolvable |
+|---|---|---|
+| U1 | Inter "weights 100–900" (:20) | WOFF2 is brotli-compressed; no brotli/fontTools in this environment; file is a valid WOFF2 v2 at the claimed path/size and embedded at the claimed call site (the analogous JetBrains Mono claim IS locally verified via raw `fvar` parse) |
+| U2 | Copyright strings / "used unmodified" / xterm.js MIT provenance (:20–28) | Upstream text lives in external repos (rsms/inter, JetBrains/JetBrainsMono, xtermjs/xterm.js); vendored xterm.js bundles carry no license headers; standard, well-known upstream licensing, but nothing in-repo to cite |
+
+### Totals
+
+| Class | Count |
+|---|---|
+| CONSISTENT | 16 claims (H1, H3, H4, 9 counts, A1 existence, A2, A3 existence, anchors) |
+| DRIFTED | 2 (F190-1 MED, F190-2 LOW) |
+| STALE-CLAIM | 0 |
+| BROKEN-REF | 0 |
+| RISK (owner decision) | 1 (F190-3 LOW) |
+| UNRESOLVED (external) | 2 (U1 LOW, U2 LOW) |
+
+**Owner-queue delta: +3 (F190-1, F190-2, F190-3). Cumulative: 70 + 3 = 73.**
+
+### Gate-edit flag summary
+
+`CLEANUP.md` — append-only ledger entry; no gate flag set, artifact size, contract text, config, env var, version, URL, schema, test, docs-site content, lockfile, CI, generated artifact, or manifest. `git status --porcelain` before/after commit: ` M CLEANUP.md` only, then clean.
+
+### Standing gates (17/17 pass — literal CI commands, run before the ledger append)
+
+| # | Gate | Verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 120011622 bytes; CSV <= 1048576, each file <= 10485760" |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — OpenEnv advertised-action/typed-failure/preflight/bounded-collection/trainer-evidence/manifest-gated/lifecycle/summary/replay/eval/verification/live-replay/interoperability contracts match (no diff) |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+Gate 1 re-run after the commit to confirm byte counts still pass (CLEANUP.md is the largest tracked file and grows by this entry).
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local `main`, no push. Commit hash reported in the round 190 reply
+(single-commit pattern, post-commit gate re-run).
