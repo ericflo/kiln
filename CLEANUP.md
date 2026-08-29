@@ -14816,3 +14816,88 @@ ledger append and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 187 reply
 (single-commit pattern, post-commit gate re-run).
+
+
+## Cleanup Agent (round 188 — docs/public/ source-file claims audit) — 2026-08-29
+
+**Scope.** Read-only full-claims audit of **all 5 remaining un-audited
+`.md` files** under `docs/public/` (the published-site curated set; R173
+already covered BENCHMARKS.md), at HEAD `debd2a72b` (round 187 commit,
+clean tree): `ARCHITECTURE.md`, `CHANGELOG.md`, `CONFIGURATION.md`,
+`OVERVIEW.md`, `QUICKSTART.md`. Every path, count, version, command,
+config key, env var, CLI flag, endpoint, and behavior claim plus every
+cross-reference (relative and absolute) was cross-checked against canonical
+sources: root `ARCHITECTURE.md` / `QUICKSTART.md` / `README.md` /
+`CHANGELOG.md`, `docs/contracts/CONFIGURATION.md`, `docs/site/
+docs-manifest.json` + `docs/site/*.html` (published-site inventory),
+`crates/kiln-server/src/cli.rs`, `crates/kiln-server/src/api/*.rs`,
+`crates/kiln-server/src/state.rs` / `training_queue.rs`,
+`contracts/kiln-*.schema.json`, `kiln.example.toml`, git tags, and `test -e`
+for every path-like link. CHANGELOG.md entries were checked against git
+tags **and** the root `CHANGELOG.md` (canonical release history, R176).
+Light tools only — no cargo, no test suites beyond the standing gates.
+Findings are owner-queue evidence, not fixes; the only file modified is
+CLEANUP.md. ~110 discrete claims audited (per-file tallies below).
+
+### Per-file verdict table
+
+| File | Claims audited | Verdict |
+|---|---|---|
+| docs/public/ARCHITECTURE.md | 18 | CONSISTENT — "four product responsibilities" is an honest subset of the root's five-workflow table (`ARCHITECTURE.md:47-53`); request/learning-path diagrams match root "System at a glance"; default adapter auto-load (`default_auto_load()=true`, `crates/kiln-server/src/api/openenv.rs:128-130`) + `config.auto_load=false` idle path (`api/training.rs:1534-1536`, `kiln-control-plane-v1.schema.json:1430`) + post-eval promotion gate (`kiln.example.toml:432`) all live; "receipts ≠ routing rules" matches v0.5.2 policy + `docs/contracts/CONFIGURATION.md:451-458`; state table + failure boundaries (`restart_required`, `api/health.rs:72/:901`) all grounded; all 5 refs resolve |
+| docs/public/CHANGELOG.md | 33 | CONSISTENT — **honest subset** of root `CHANGELOG.md`: all 6 versions + dates exact-match git tags (`kiln-v0.5.2` 2026-08-01 … `kiln-v0.3.5` 2026-06-09, verified `git log -1 --format=%cs`); every bullet cross-checked against the matching root section — v0.5.2 (13.46 tok/s @ 74.29 ms mean ITL = root :124 = `docs/public/BENCHMARKS.md:13/:20`; Stable-complete; ember dashboard; capability-derived Vulkan), v0.5.1 (0.142→13.43 tok/s = root :134-135; dispatch independence; docs rework), v0.5.0 (thinking budgets = root `thinking_budget_tokens/ms`; typed env overrides; typed startup policy), v0.4.1 (ROCm prefix snapshot root :568-573; non-batched path :575-577; oversized-eviction guard :579), v0.4.0 (pi runs :594-620; Distill→Agent tab :621; Muon default + AdamW/SGD per-request :641-661), v0.3.5 (in-place dataset upload / post-eval / adapter compare / notifications / corrections / pi terminal :665-706; adapter-swap `/health` + flywheel agreement); 0 added/altered entries; all 9 links resolve (6 release tags + releases page + `blob/main/CHANGELOG.md`) |
+| docs/public/CONFIGURATION.md | 26 | CONSISTENT — (F187-1 pointer-drift explicitly NOT re-opened per brief). Minimal TOML keys `server.host`/`server.port`/`model.path`/`model.adapter_dir` all canonical (`docs/contracts/CONFIGURATION.md:153-154/:1029/:1032`); `kiln config` validate-without-load = `cli.rs:687-700`; `accelerator.vulkan_device_index` auto/zero-based (:216) + single-GPU index-zero identity gate (root `QUICKSTART.md:119`, :1165-1170) + verify-in-`/health` (`api/health.rs:2139`); `server.serving_profile` (:151); `max_tokens`/thinking budgets/`[batching]` live; "effective value + source" = v0.5.0 source-aware map; `/v1/config` live (`api/config.rs`); kernel policy "immutable for the process lifetime" (:218/:221/:226); "portable ≠ every route off" = capability-negotiation narrative (:448-470); all 4 refs resolve (`docs/configuration-complete/`, `blob/main/contracts/kiln-config-v1.schema.json`, `../serving/SERVING_PROFILES.md`, `troubleshooting.html`) |
+| docs/public/OVERVIEW.md | 16 | CONSISTENT — "one Rust process" = root `ARCHITECTURE.md:3`; Qwen3.5-4B target; SFT/GRPO/OPD + hot-swap + local eval/judgments/replay + traceable artifacts all live; "not a vLLM replacement … see Benchmarks" boundary = `docs/public/BENCHMARKS.md:128`; dashboard `http://127.0.0.1:8420/ui/` = `/ui/` route (`api/ui.rs:131-132`); demo page states live vs seeded-fixture vs historical boundary (`docs/site/demo/index.html:547-560`); "effective config through `/health`, `/v1/config`, CLI, and dashboard" all live (dashboard `shell.js:2122` reads `/v1/config`); all 9 refs resolve |
+| docs/public/QUICKSTART.md | 17 | **1 STALE** (F188-1) — otherwise CONSISTENT: build command valid (`kiln-server` pkg, `vulkan` feature, `kiln` bin, `Cargo.lock` present; `--no-default-features` no-op since kiln-server declares no default feature); "do not combine accelerator feature sets" matches per-platform canonical builds (root `QUICKSTART.md:116/:125`); `/health` + `/v1/config.accelerator_runtime` live (`api/config.rs:471`); `/v1/chat/completions` shape valid; dashboard `/ui/` + playground live; "placeholder API key / no built-in auth" = root `QUICKSTART.md:215` + `README.md:421`; all 8 refs resolve (Releases/latest, quickstart.html, docs/openenv/, grpo.html, evals.html, CONFIGURATION.md, troubleshooting.html, api.html, BENCHMARKS.md) |
+
+### Findings
+
+Class vocabulary (round 159): STALE-CLAIM, BROKEN-REF, OWNER-DECISION, RISK,
+UNRESOLVED (claim about an external source not pinned in this repository).
+Severity: MED = live misleading claim; LOW = FYI/external.
+
+| ID | Title | Doc cite (verified at HEAD) | Canonical side (verified at HEAD) | Class | Sev | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| F188-1 | Public quickstart's `kiln serve` command uses three flags the `serve` subcommand does not define, so the printed command errors out | `docs/public/QUICKSTART.md:25-28` (verbatim: `./target/release/kiln serve \ --model-path /path/to/Qwen3.5-4B \ --host 127.0.0.1 \ --port 8420`) | `crates/kiln-server/src/cli.rs:534-546` — `Commands::Serve` declares **only** `--served-model-id` and `--eval-mode`; the `Cli` global args are only `--config`, `--verbose/-v`, `--quiet/-q` (`cli.rs:494-524`); no `--model-path`, `--host`, or `--port` anywhere on the serve path (`--model-path` exists solely on `trajectory inspect`, `cli.rs:1202`). Canonical quickstart instead runs `KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve` (root `QUICKSTART.md:158`) with host/port from TOML `server.host`/`server.port` (default `127.0.0.1:8420`) or `KILN_SERVER_HOST`/`KILN_SERVER_PORT` (`docs/contracts/CONFIGURATION.md:153-154`) | STALE-CLAIM | MED | no | Replace the command with `KILN_MODEL_PATH=/path/to/Qwen3.5-4B ./target/release/kiln serve` (defaults already bind `127.0.0.1:8420`), or show a `--config` TOML that sets `model.path` / `server.host` / `server.port` |
+
+**Totals.** 5/5 files audited; ~110 claims: **109 CONSISTENT,
+1 STALE (F188-1, MED)**. 0 DRIFTED, 0 BROKEN-REF (all 36 path-like links
+across the 5 files resolve; CHANGELOG confirmed an honest subset of the
+canonical release history with 0 added/altered entries and all 6
+version/dates exact-matching git tags). One finding; no gate/workflow edit
+required.
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | none |
+| no gate edit | F188-1 (single command block reword in owner-managed published prose) |
+
+### Standing gates (17/17 pass — literal CI commands, run before the
+ledger append and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119984537 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this append; post-commit re-run confirms) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (rc=0) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 188 reply
+(single-commit pattern, post-commit gate re-run).
