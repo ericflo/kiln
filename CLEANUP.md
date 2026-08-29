@@ -13701,3 +13701,247 @@ write — this ledger append — and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 180 reply (single-commit
 pattern; no hash backfill needed since this entry is the only change).
+
+
+## Cleanup Agent (round 181) — 2026-08-29
+
+**Scope.** Canonical re-anchor of the **entire** open owner-decision queue
+— 36 items carried out of the round 172 map (D-2..D-16, A-1..A-11,
+F-1..F-4, R165-1/R165-2, R166-1/R166-2, R167, R170; round 172's F-5/R169
+meta-item was RESOLVED-BY-R172) plus the 16 items added by rounds 173–180
+(R173-1, R173-2, R174a-1, R175-1, R176-1..R176-3, R177-F2..F5, R178-1,
+F179-1..F179-3, F180-1) — against HEAD `a47fca644` (round 180 commit,
+clean tree). Every `file:line` cite below was re-verified in this session
+against the live tree (grep/sed/awk/md5sum/python3 only; no cargo, no test
+suites beyond the standing gates). Round 177's F1 (server-ui-dashboard.png)
+remains RETRACTED per round 177c and is not in the count. Items are
+deduped/bundled into six decision bundles (B1–B6); each row records the
+bundle, the gate-edit requirement, and the one-line owner action.
+Append-only: no prior ledger text edited; the only file modified is
+CLEANUP.md.
+
+### Structural re-anchor proof
+
+- `git diff --name-only f039a199c..HEAD` → **CLEANUP.md only** (rounds 173–180
+  were ledger-only; the working tree is byte-identical to the round 172
+  anchor `f039a199c` outside CLEANUP.md).
+- Consequence: every round-172 "current cite" still holds at HEAD; the
+  work this round is (a) independent re-verification of all 52 rows at
+  `a47fca644`, (b) folding in the 16 post-R172 items, (c) recording
+  corrections found in this pass (below), and (d) forming the canonical
+  bundle map.
+
+### Canonical open-item table (52 items, verified at HEAD `a47fca644`)
+
+Class vocabulary (round 159): STALE-CLAIM, BROKEN-REF, OWNER-DECISION, RISK.
+"Gate-edit" = the fix requires editing a gate/workflow file (out of scope
+for report-only rounds). Severity: MED = live misleading claim or
+owner-facing risk; LOW = cleanup/FYI.
+
+| ID | Title | Cite(s) verified at HEAD | Class | Sev | Bundle | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| D-2 | `#[allow(type_complexity)]` on `max_seqlen_k` ×4 | `crates/kiln-model/src/forward/full_attention.rs:2165/:2224/:2661/:2666` (all 4 lines `max_seqlen_k`/`kernel_max_seqlen_k` exact) | OWNER-DECISION | MED | — | no | Simplify the field types or ratify each allow |
+| D-3 | 9 judgment-class lint keeps (R122 #1–#9: type_complexity, too_many_arguments, unnecessary_mut_passed, unused_assignments, private_in_public, await_holding_mutex, items_after_test_module) | `tokenizer.rs:449/:602/:785`; `cuda_graph.rs:1477`; `forward/tests/mod.rs:3159/:3192/:3885/:8530/:8547`; `grpo_step.rs:1003`; `forward_backward.rs:335-336`; `opd_tape_shim.rs:508`; `grpo_tape_shim.rs:1197`; `real_model_integration.rs:1463/:1999/:2029/:2059`; `cuda_storage.rs:2338` (all reproduced) | OWNER-DECISION | MED | — | no | Resolve or ratify each suppression site |
+| D-4 | `expected_identity` required by requirement fn, absent from example config | `crates/kiln-train/examples/cuda_opd_remote.rs:289-304` (zero `expected_identity`); `crates/kiln-train/src/remote_teacher.rs:149-153` (required at :150) | OWNER-DECISION | MED | — | no | Make the example and the requirement agree |
+| D-5 | Two byte-identical file pairs | `backend_matmul.rs` pair (12,115 B) + `workspace_pool.rs` pair (3,819 B); md5 byte-identical (b9c778… / 507087…) | OWNER-DECISION | LOW | — | no | Dedupe or declare the copies intentional |
+| D-6 | Three zero-dependent scaffold crates | kiln-mps, kiln-graph-cuda, kiln-vulkan-blas (0 dependent manifests each) | OWNER-DECISION | LOW | — | no | Ship, trim, or retire the scaffolds |
+| D-7 | 7 woff2 files collapse to 2 unique binaries | `docs/site/fonts/*.woff2`: Inter ×4 byte-identical 48,256 B (md5 `260c81a4…`) + JetBrainsMono ×3 byte-identical 31,432 B (md5 `b636a65d…`) | OWNER-DECISION | MED | B3 | no | Pick the font-set policy (keep/dedupe/alias) |
+| D-8 | kiln-blas README cites ARCHITECTURE.md probe story | `crates/kiln-blas/README.md:65/:71`; ARCHITECTURE.md has zero cublasLt/probe mentions | STALE-CLAIM | LOW | — | no | Reword the two README lines |
+| D-9 | Unused Python imports across 20 audit/bench scripts | 20 files all present (19 under `scripts/investigations/`); AST recount at HEAD = **29** unused top-level imports; `tempfile` at `bench-concurrent-batch.py:31` still unused | OWNER-DECISION | LOW | — | no | Remove the 29 unused imports (or pin the linter) |
+| D-10 | Seven duplicate-utility pairs across gate/oracle scripts | `check_production_file_budget.py:42/:75` ≡ `check_repository_artifacts.py:62/:95`; expected_metric_names (`check_backend_latency_fixtures.py:298` ↔ `lock_backend_latency_thresholds.py:123`); _canonical_json (`hf_trl_roundtrip.py:54` ↔ `vulkan_hf_model_oracle.py:68`); _parse_worker_marker (`rocm_hf_layer_attribution.py:295` ↔ `rocm_hf_path_attribution.py:224`); load_oracle_packages (`grpo_trl_oracle.py:118` ↔ `qwen35_sft_oracle.py:216`); package_version_base (`grpo_trl_oracle.py:114` ↔ `adamw_pytorch_oracle.py:91`) | OWNER-DECISION | LOW | — | no | Consolidate the 7 helper pairs or document the copies |
+| D-11 | server-release.yml step duplication + free-disk-space@main | `server-release.yml`: 5× "Install Rust stable" + 5× Package steps; `jlumbroso/free-disk-space@main` at `ci.yml:144/:250/:306`, `docker-server-release.yml:39/:45`, `runpod-image.yml:20/:25`, `server-release.yml:178/:184` | OWNER-DECISION | MED | — | **conditional** (workflow edits) | De-duplicate the release steps; pin or replace free-disk-space |
+| D-12 | Dead `KILN_CUDA_NATIVE_TRAINING` setter | `scripts/investigations/cuda_qwen_sft_smoke.sh:89-92` (setter at :92; 0 live refs in `crates/**.{rs,toml}`) | STALE-CLAIM | LOW | — | no | Delete the dead setter block |
+| D-13 | Duplicated `is_lower_sha256` identity check | `crates/kiln-train/src/teacher_identity.rs:502` (`pub(crate) fn is_lower_sha256` exact); kiln-server keeps its own `is_lower_sha256_identity` (imported at `hf_train_cli.rs:36`, `openenv_cli.rs:44`) | OWNER-DECISION | LOW | — | no | Share the helper or keep the fork deliberate |
+| D-14 | desktop-build.yml is `workflow_dispatch`-only | `.github/workflows/desktop-build.yml` `on:` block = `workflow_dispatch:` sole trigger | OWNER-DECISION | MED | B5 | **conditional** (workflow change) | Decide the desktop build trigger policy |
+| D-15 | desktop README lists retired Apple-secret vars | `desktop/README.md:136-141` (L139-141 list `APPLE_ID`/`APPLE_TEAM_ID`/`APPLE_PASSWORD`; workflow consumes `APPLE_API_KEY_BASE64` set at desktop-build.yml:83) | STALE-CLAIM | MED | — | no | Reword the secret list to the API-key set |
+| D-16 | `docs/desktop/about.png` has no live embed (README cells MOOT) | `docs/desktop/about.png` 77,591 B; `scripts/capture-desktop-screenshots.mjs:43` `out: "docs/desktop/about.png"`; zero live embeds; `check_docs_site_smoke.mjs:1819` lists `desktop-about.png` as a *retired* asset (gate asserts absence) | STALE-CLAIM | LOW | — | no | Regenerate-and-relink the asset or retire the generator |
+| A-1 | Retired `[batching]`/`effective_enabled`/`KILN_KV_CACHE_FP8`/`KILN_W4A16`/`KILN_CUDA_GRAPHS` claims (README cells MOOT — README is 479 lines) | QUICKSTART.md:1055/:1060-1063/:1088/:1096/:1110-1117 (exact); BENCHMARKS.md:217-226 (`[batching]`), :237 (`effective_enabled`), :245-258 (A/B paragraph), :733 (`KILN_KV_CACHE_FP8`), :423/:547-548/:606/:650-651/:775 (`KILN_W4A16`/`KILN_CUDA_GRAPHS`) | STALE-CLAIM | MED | — | no | Rewrite the surviving QUICKSTART/BENCHMARKS cells to current defaults |
+| A-2 | Phantom llama.cpp bench-result cites | `BENCHMARKS.md:467-468` (llama.cpp `9d34231` rows) + `:705-707` (raw-JSON notes); `find bench-results -name '*llama*'` → **0 files** | BROKEN-REF | MED | — | no | Point the rows at real artifacts or mark them removed |
+| A-3 | Pre-migration baselines section | `bench-results/README.md:50` (`## Pre-migration baselines`) + `:54` (2026-05-17 Llama-3.1-8B row) | STALE-CLAIM | LOW | — | no | Update or retire the pre-migration section |
+| A-4 | `candle` references in the parity test + 4 doc/error sites | `crates/kiln-model/tests/tape_forward_parity.rs` (**76** `candle` refs); `vram.rs:1717` ("ask candle") / `:1732` ("LoRA Vars"); `dtype.rs:49` / `:55`; flce `kt_api.rs:67`; opd-loss `kt_api.rs:109` | STALE-CLAIM | MED | — | no | Reword to the native path (or name the legacy path correctly) |
+| A-5 | tape/forward candle naming incl. misnomer doc | `tape_forward.rs:811/:826` (":826 = a misnomer —"); `forward.rs:710/:723/:741/:748` (`candle_cache`); fn body at `src/forward/training_primitives.rs:147`; `tests/tape_forward_parity.rs:74-80` (`kt_in`/`candle_out`) | STALE-CLAIM | MED | — | no | Rename the candle-era identifiers/docs to native terms |
+| A-6 | Font + foldhash license gaps | 0 OFL/SIL mentions in `docs/site/`; `THIRD_PARTY_LICENSES.md:6733` = foldhash **0.2.0** only; Cargo.lock carries 0.1.5 + 0.2.0 blocks | STALE-CLAIM | MED | — | no | Add OFL (Inter/JetBrains) + both foldhash versions to the license roll-up |
+| A-7 | desktop README bundle-id + tag-push claims | `desktop/README.md:186` (`com.kiln.desktop` ×3, all at L186) + `:164` (verbatim "On `desktop-v*` tag push it builds …") | STALE-CLAIM | LOW | B5 | no | Align the README claims with the chosen trigger policy (B5) |
+| A-8 | Dead `--warmup`/`--mode` flags in bench script | `scripts/investigations/bench-concurrent-batch.py:5830-5833` (`--warmup` alias) + `:5938-5942` (`--mode`); 0 consumers of `args.warmup`/`args.mode`; evidence `bench-results/findings/concurrent-batched-decode-2026-05-26.md:28-29` | OWNER-DECISION | LOW | — | no | Wire the flags up or drop them |
+| A-9 | Orphan TODO pointers | `BENCHMARKS.md:633` ("see TODO note in `cuda_graph.rs`"; 0 TODOs there); `model_dispatch.rs:3212` (`TODO(phase2`); `scripts/investigations/c29_logits_compare_v2.py:53` (`PR #XXX (H15b)`) | BROKEN-REF | LOW | — | no | Point each at the live work item or delete |
+| A-10 | `[openenv]` block lacks credentials example | `kiln.example.toml:366` `[openenv]` (body 367-373, no credentials example) vs `:309-311` (`# [teachers.credentials.primary-vllm]` / `origin` / `api_key_env`) | STALE-CLAIM | LOW | — | no | Add the credentials example or a pointer to the teachers block |
+| A-11 | Commented-out `# [agent]` header + §10.6/§8.7 refs | `kiln.example.toml:414` (`# [agent]`); `:411` (§10.6 flywheel, R166-1); `:431` (§8.7 promotion, R165-1) | STALE-CLAIM | LOW | B6 | no | Un-comment the [agent] block (with R165-1/R166-1) or delete the block |
+| F-1 | MTP plan follow-ups + unreferenced blog post (FYI tier) | `docs/archive/mtp-training/mtp-training-plan.md:98` (`## Follow-ups after PR-B`); `echo_blog_post.md` 27,663 B, 0 live md links | OWNER-DECISION | LOW | — | no | Give the follow-ups/blog post a home or mark archived |
+| F-2 | RADV/driver SIGSEGV across 7 kiln-vulkan-kernel binaries (FYI tier) | host environment — no repo cite; suite-run excluded by round brief | RISK | LOW | — | no | Track upstream RADV/driver; no repo action proposed |
+| F-3 | Frozen candle-removal archive links (FYI tier) | `docs/archive/candle-removal/*.md`: **21 exact** (11× `../../CONFIGURATION.md` + 10× `../../NATIVE_SFT_PROFILE.md`); targets now `docs/contracts/CONFIGURATION.md` + `docs/training/NATIVE_SFT_PROFILE.md` | BROKEN-REF | LOW | — | no | Archive-protocol call: re-point or freeze |
+| F-4 | 24 phase-4 TODOs in kiln-tensor (FYI tier) | `crates/kiln-tensor/src/ops/*.rs` (13 files: flip ×2, concat ×2, log_variants ×2, argmax ×1, repeat ×2, cross_entropy ×1, rope ×2, broadcast ×2, scatter_add ×2, layernorm ×1, trig ×1, hyperbolic ×2, chunk_split ×4); no metal/vulkan `paged_decode.rs` in tree | OWNER-DECISION | LOW | — | no | Schedule phase-4 work or mark the TODOs deprecated |
+| R165-1 | §8.7 promotion comment line | `kiln.example.toml:431` (`# # Add post_eval to gate every scheduled round behind §8.7 promotion:` exact) | STALE-CLAIM | LOW | B6 | no | Resolve with the B6 [agent] block decision |
+| R165-2 | Stale "v0.5.1 is the latest published release" | `docs/public/BENCHMARKS.md:25` (verbatim, dated July 30, 2026); `git tag` → `kiln-v0.5.2` exists | STALE-CLAIM | MED | — | no | Update the release pointer |
+| R166-1 | §10.6 self-improvement flywheel comment | `kiln.example.toml:411` (verbatim) | STALE-CLAIM | LOW | B6 | no | Resolve with the B6 [agent] block decision |
+| R166-2 | 19 §N.M dev comments in the built server UI | `crates/kiln-server/src/ui/index.html`: **19** §N.M refs across **12 lines** (1471-1481/:1741/:1940/:1956/:2052) | STALE-CLAIM | LOW | B6 family (standalone fix scope) | no | Strip the dev comments or keep them gated-off in builds |
+| R167 | SCRIPT.md claims README embed sets `data-theme="solarized-dark"` | `docs/site/demo/SCRIPT.md:233` (claim verbatim); `grep -c data-theme README.md` → **0** | STALE-CLAIM | MED | — | no | Reword SCRIPT.md to the current link-only README demo |
+| R170 | Quickstart heading vs README single-hyphen anchor | `QUICKSTART.md:96` (`## 1. Optional Source / CLI Branch: Build Kiln`); sluggers `check_docs_site_smoke.mjs:3176` + `docs-site/lib.mjs:91` (`.replace(/\s+/g, '-')`); `README.md:204` → `#1-optional-source-cli-branch-build-kiln` | OWNER-DECISION | MED | — | **conditional** (gate slugger change) | Pick the anchor convention and align heading, link, or slugger |
+| R173-1 | index.html "stable = inference-only" prose | `docs/site/index.html:295-297` ("stable profile serves traffic but rejects training and live adapter changes"); canonical `docs/serving/SERVING_PROFILES.md:42-51` + `docs/contracts/CONFIGURATION.md:179-187` say stable = full product | STALE-CLAIM | MED | B1 | no | Reword to the canonical stable semantics |
+| R173-2 | Route-count prose "twenty-five" where native_default keeps 24 | `docs/site/troubleshooting.html:503-504` (verbatim "twenty-five … declines all twenty-five"); canonical `docs/contracts/CONFIGURATION.md:218` (24-of-25; the 25-row table at :235-262) | STALE-CLAIM | MED | — | no | Reword to "twenty-four of the twenty-five" |
+| R174a-1 | Test comment reads compile-time constant as env var | `crates/kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs:290` (comment verbatim); actual constant `csrc/optimizer_step.cu:184` `#define KILN_MUON_PARALLEL_THRESHOLD 4096`, read at :716/:778 | STALE-CLAIM | LOW | — | no | Reword the comment to the `#define` |
+| R175-1 | Root `assets/` index over-claims logo referrers | `assets/README.md:7` (logo row "referenced by docs/site and desktop"); desktop grep → 0 hits (desktop uses `desktop/icons/`) | STALE-CLAIM | LOW | — | no | Correct the logo row to "docs/site" only |
+| R176-1 | CHANGELOG stale/dangling path refs (21 rows) | `CHANGELOG.md` P1–P15 STALE-REF + D1–D6 DANGLING-REF (all resolve to post-reorg locations or documented removals; e.g. P13 at :1696 → `docs/site/demo/SCRIPT.md`) | BROKEN-REF | LOW | B4 | no | Rewrite the 21 cites or freeze the narrative as historical |
+| R176-2 | CHANGELOG stale "latest" claim | `CHANGELOG.md:1708` ("the production line is now at kiln-v0.2.8"; tags run to `kiln-v0.5.2`) | STALE-CLAIM | LOW | B4 | no | Annotate as historical or update |
+| R176-3 | CHANGELOG version-census anomalies | `CHANGELOG.md:1220/:1269` (duplicate `kiln-v0.2.16` headers, one tag, 2026-05-15); tags `kiln-v0.2.18`/`kiln-v0.2.19` exist with no entry | STALE-CLAIM | LOW | B4 | no | Reconcile the two v0.2.16 entries; decide on the missing v0.2.18/19 entries |
+| R177-F2 | `Inter-500.woff2` has no live referrer | `docs/site/fonts/Inter-500.woff2` (48,256 B); `css/fonts.css:31/:40/:49` ship Inter 400/600/700 only; `scripts/docs-site/social-preview.html:24` consumes **JetBrainsMono-500**; 0 live refs to Inter-500 in docs/site + scripts | OWNER-DECISION | MED | B3 | no | Delete the orphan face (interacts with D-7 policy) |
+| R177-F3 | Vendored asciinema-player set is orphan from the site yet gate-pinned | `docs/site/demo/vendor/asciinema-player/` (css + min.js + LICENSE + NOTICE.md, ~223 KiB); no page loads it (current `demo/index.html` is a screenshot tour); `js/site.js:266` defensive only; `scripts/check_docs_site_smoke.mjs:2578-2624` pins sha256 `a2b6c49a…`/`704f17a2…` + LICENSE text | OWNER-DECISION | MED | B2 | **yes** (gate block must change) | Restore the player or retire the vendor set + gate block |
+| R177-F4 | demo/README stale player claims | `docs/site/demo/README.md:5` (multi-cast player claim), `:37` ("Standalone docs-site player for all six casts"), `:41` ("loaded from the jsDelivr CDN"); current `demo/index.html` loads neither (only `../js/site.js` + `../css/fonts.css`) | STALE-CLAIM | MED | B2 | no | Prose fix or player restoration (decide with R177-F3) |
+| R177-F5 | 404.html favicon hardcodes absolute origin URL | `docs/site/404.html:11` (`href="https://ericflo.github.io/kiln/assets/favicon.svg"`; no alternate-icon/apple-touch-icon pair, unlike the other 9 hand-written pages + `lib.mjs:958-960` generated pages) | STALE-CLAIM | LOW | — | no | Use a relative favicon + the standard icon pair |
+| R178-1 | Shared fixed-name temp files between two crates' test modules | `crates/kiln-blas/src/algo_cache.rs:551/:686/:694` ↔ `crates/kiln-rocblas/src/algo_cache.rs:551/:688/:696` (verbatim): shared `kiln-blas-test-algo-cache.json`, `kiln-corrupt-algocache.json`, `kiln-algocache-disk-roundtrip.json` in `std::env::temp_dir()` | RISK | LOW | — | no | PID- or crate-suffix the 3 names (or `tempfile::tempdir()`) |
+| F179-1 | kiln.example.toml stale "stable = inference only" comment | `kiln.example.toml:22-26` (verbatim "stable: inference only, no live physical mutation") | STALE-CLAIM | MED | B1 | no | Reword to the canonical stable semantics (one edit covers B1) |
+| F179-2 | kiln.example.toml "Stable mode … keep it unavailable" clause | `kiln.example.toml:285-288` (verbatim "Stable mode and backends without device-resident KV pressure keep it unavailable") | STALE-CLAIM | MED | B1 | no | Drop/reword the Stable-mode clause (part of B1) |
+| F179-3 | kiln.example.toml stale 16-token KV block comment | `kiln.example.toml:259-260` (verbatim "Each block holds 16 tokens of K+V"; current default is **64 tokens**, block_size=64) | STALE-CLAIM | LOW | — | no | Update the block-size comment to 64 tokens |
+| F180-1 | pages.yml push-trigger path filter misses one OpenEnv source | `.github/workflows/pages.yml:47-49` (push trigger lists `openenv_cli.rs`/`openenv_evaluation.rs`/`openenv_replay.rs` individually) vs `:17` (PR trigger glob `crates/kiln-server/src/openenv*.rs` covers all four); `openenv_credentials.rs` omitted from push | OWNER-DECISION | MED | — | **yes** (workflow edit) | Add the 4th file (or the glob) to the push trigger |
+
+**Totals.** 52 open items = 37 standalone + 15 across six bundles
+(B1: 3, B2: 2, B3: 2, B4: 3, B5: 2, B6: 3). Class counts: STALE-CLAIM 28,
+OWNER-DECISION 18 (incl. 2 FYI-tier: F-1, F-4), BROKEN-REF 4 (incl.
+1 FYI-tier: F-3), RISK 2 (incl. 1 FYI-tier: F-2). Gate-edit required by
+the fix itself: **2 items** — R177-F3 (smoke-gate vendor block), F180-1
+(pages.yml push trigger). Conditional (workflow edit only if the owner
+picks the workflow side): D-11, D-14 (B5), R170 (only if the slugger is
+the side that changes).
+
+### Decision bundles (6)
+
+**B1 — stale "stable = inference-only" semantics (3 items: R173-1, F179-1,
+F179-2; MED).** All three surfaces contradict the canonical contract
+(`docs/serving/SERVING_PROFILES.md:42-51`: stable *allows* training,
+adapter transitions, dynamic KV resize, live graph capture;
+`docs/contracts/CONFIGURATION.md:179-187` agrees). One consistent
+rewording across `docs/site/index.html:295-297`,
+`kiln.example.toml:22-26`, and `kiln.example.toml:285-288` closes all
+three. No gate pins these comments (gate-pin audit: `kiln.example.toml`
+is pinned only at the `port` line by `check_runtime_defaults.mjs:122` and
+at doc pointers; the profile comments, §8.7/§10.6 refs, and `[agent]`
+block are unpinned).
+
+**B2 — asciinema player: restore or retire (2 items: R177-F3, R177-F4;
+MED).** The vendored set is byte-pinned by the smoke gate
+(L2578-2624) yet no published page loads it, and `demo/README.md`
+(L5/:37/:41) still advertises a player. The owner chooses
+restore-the-player vs retire-the-vendor-set; the latter requires a gate
+edit, so B2 is the only bundle that is gate-locked.
+
+**B3 — docs-site font set (2 items: D-7, R177-F2; MED).** 7 woff2 files
+→ 2 unique binaries (Inter ×4, JetBrainsMono ×3, all byte-identical per
+md5) plus one fully orphaned face (Inter-500). One font-set policy
+(keep/dedupe/alias/delete) resolves both; Inter-500 deletion is a
+consequence of the policy, not a separate decision.
+
+**B4 — CHANGELOG.md historical narrative (3 items: R176-1, R176-2,
+R176-3; LOW).** 21 stale/dangling path cites, one stale "latest" claim
+(:1708), and version-census anomalies (duplicate v0.2.16 headers;
+missing v0.2.18/v0.2.19 entries). One decision domain: rewrite-as-
+history vs freeze-as-archive.
+
+**B5 — desktop build trigger policy (2 items: D-14, A-7; MED).**
+`desktop-build.yml` is dispatch-only while `desktop/README.md:164`
+claims tag-push behavior. Owner picks the trigger design; the README
+follows. D-15 (stale secret list) stays standalone — different decision
+domain (signing credentials vs trigger design) even though same README.
+
+**B6 — kiln.example.toml commented `[agent]` block (3 items: A-11,
+R165-1, R166-1; LOW).** The L411-414 header cluster (R166 §10.6 comment
+at :411, `# [agent]` at :414) plus the §8.7 promotion line at :431 form
+one commented-out feature block. R166's ledger explicitly bundles the
+decision: un-comment (with correct § refs) or delete. R166-2 (19 §N.M
+refs in the built UI) is the same family but different surface/fix
+scope, so it stays standalone with a cross-reference.
+
+### Corrections recorded this round (prior ledger text untouched)
+
+1. **R174a-1 cite**: earlier tables cited
+   `tests/kiln_train_muon_test.rs:746-747`; the actual live site is
+   `crates/kiln-rmsnorm-kernel/tests/muon_cuda_parity.rs:290` (comment
+   reads the compile-time `KILN_MUON_PARALLEL_THRESHOLD` as an env var;
+   the `#define` is at `csrc/optimizer_step.cu:184`, read at :716/:778).
+   Re-verified verbatim at HEAD this round.
+2. **F179-3 cite + value**: earlier tables said "L281 … 512 tokens";
+   the actual site is `kiln.example.toml:259-260` and the stale value is
+   **16 tokens** (pre-#1082); the current default is **64 tokens**
+   (block_size=64). Re-verified verbatim at HEAD this round.
+3. **R177-F4 line cites**: round 177's "L35/L37-39" are off by +2 at
+   HEAD; the player claims sit at `docs/site/demo/README.md:5/:37/:41`
+   (L39 is the `## Player embed notes` heading, L41 the jsDelivr
+   sentence). Re-verified at HEAD this round.
+4. **R167 cite**: canonical cite is `docs/site/demo/SCRIPT.md:233`
+   (not a site-root `SCRIPT.md`; the file lives under `docs/site/demo/`
+   in the current layout, with a build copy under `_site/demo/`).
+   Re-verified verbatim at HEAD this round.
+5. **R175-1 cite**: the drifted row is `assets/README.md:7` (root
+   `assets/` index; the file is 8 lines, not 13 as noted in round 175's
+   read note). Re-verified at HEAD this round.
+6. **R173-2 cite**: `docs/site/troubleshooting.html:503-504` (route
+   count "twenty-five" vs canonical 24-of-25), re-verified verbatim at
+   HEAD this round.
+7. **F180-1 cite**: canonical cite is `.github/workflows/pages.yml:47-49`
+   (push-trigger openenv file list) vs `:17` (PR-trigger glob),
+   re-verified at HEAD this round.
+8. **D-9 count**: 22 → **29** unused imports (round 172 AST recount
+   holds at HEAD; all 20 files present, 19 under
+   `scripts/investigations/`).
+9. **R166-2 count**: 14 → **19** §N.M refs across 12 lines (round 180
+   recount holds at HEAD).
+10. **F-3 count**: 21 exact stale links (11× CONFIGURATION + 10×
+    NATIVE_SFT_PROFILE); the earlier phase-c ×2 / vk-harmonization ×1
+    cites are now 0 matches — the 21-link figure is the live one.
+11. **F-4 location**: the 24 phase-4 TODOs sit in
+    `crates/kiln-tensor/src/ops/*.rs` (13 files); no
+    `metal_paged_decode.rs` / `vulkan_paged_decode.rs` in the tree.
+12. **A-4 path**: the parity test is
+    `crates/kiln-model/tests/tape_forward_parity.rs` (76 candle refs);
+    the src/-path variant does not exist. A-5 precision: the fn body is
+    at `src/forward/training_primitives.rs:147` (re-export module).
+13. **A-8 evidence path**: `bench-results/findings/
+    concurrent-batched-decode-2026-05-26.md:28-29` (moved under
+    `findings/`).
+14. **A-1/A-2/A-9 BENCHMARKS line cites**: re-anchored at HEAD (see
+    table); A-1's README cells are MOOT (README is 479 lines).
+15. **R176-1 line cites**: P13's `SCRIPT.md` now resolves to
+    `docs/site/demo/SCRIPT.md` (post-reorg location); the 21-row cite
+    set otherwise stands per round 176's tables.
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix **requires** a gate/workflow edit | R177-F3 (`check_docs_site_smoke.mjs:2578-2624`), F180-1 (`pages.yml` push trigger) |
+| fix **conditional** on owner choice (workflow side) | D-11 (release steps / free-disk-space pinning), D-14 (desktop trigger, B5), R170 (slugger vs heading vs link) |
+| no gate edit | all remaining 47 items |
+
+Gate-pin audit (this round): `kiln.example.toml` is pinned by
+`check_runtime_defaults.mjs:122` (port line) and doc-pointer checks only;
+the profile comments (B1), `[agent]` block (B6), §8.7/§10.6 refs, font
+files (B3), and CHANGELOG (B4) carry **no** gate pins. `check_config_schema.py`
+validates the SECTIONS tuple (includes `agent`) — schema, not comment,
+pinning.
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119862561 bytes; CSV <= 1048576, each file <= 10485760" (gate counts tracked-path bytes, so the figure moves with this append; the post-commit pass counts the committed entry) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, … continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 181 reply
+(single-commit pattern).
