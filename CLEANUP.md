@@ -14154,3 +14154,147 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 183 reply
 (single-commit pattern, post-commit gate re-run).
+
+
+## Cleanup Agent (round 184 — crates/ index claims audit) — 2026-08-29
+
+**Scope.** Read-only claims audit of the crates-prose surface at HEAD
+`c3e9b98a1` (round 183 commit, clean tree): **`crates/README.md`**
+(75 lines — the "map of the 33-crate Cargo workspace" with tier
+sections and a 33-row purpose table) **and `crates/kiln-blas/README.md`**
+(99 lines — D-8's file, included so this audit is one complete census
+of the crates-prose surface; D-8's queue row kept separate). Verified
+against the root `Cargo.toml` `[workspace] members`, `ls crates/`,
+each crate's `Cargo.toml` description field, `src/lib.rs` doc headers,
+and the kiln-blas live source (grep/sed/test only). Class vocabulary
+(round 159): STALE-CLAIM, DRIFTED, BROKEN-REF, OWNER-DECISION, RISK,
+UNRESOLVED. Findings are owner-queue evidence; the only file modified
+is CLEANUP.md.
+
+### Claim verdicts — `crates/README.md`
+
+| # | Claim (doc cite) | Canonical side (verified at HEAD) | Verdict |
+|---|---|---|---|
+| 1 | "Map of the 33-crate Cargo workspace" (:1-2) | Root `Cargo.toml` `members` = exactly 33 entries (`Cargo.toml:3-36`); `ls -d crates/*/` = 33 directories; the two name-sets are identical | CONSISTENT |
+| 2 | "every `crates/*/` directory is a workspace member" (:2-3) | Bidirectional set diff empty (33 members ↔ 33 dirs); zero path-deps outside `crates/` | CONSISTENT |
+| 3 | "`kiln-tensor-id` is the dependency-free leaf that shares `TensorId` between `kiln-tensor` and `kiln-vulkan-kernel`" (:4-6) | `crates/kiln-tensor-id/Cargo.toml` `[dependencies]` is empty (intentional-leaf comment :14-19); `kiln-tensor/Cargo.toml:27` and `kiln-vulkan-kernel/Cargo.toml:17` both depend on it (also `kiln-model`, `kiln-train`) | CONSISTENT |
+| 4 | "`kiln-tensor` is the in-house Tensor + Storage substrate" (:6-7) | `crates/kiln-tensor/Cargo.toml:3` description | CONSISTENT |
+| 5 | "the parameter/optimizer/autograd crates build on that substrate" (:7-8) | `kiln-param/Cargo.toml:18`, `kiln-optim/Cargo.toml:13`, `kiln-autograd/Cargo.toml:18` all depend on `kiln-tensor` | CONSISTENT |
+| 6 | Intro backend-tier composition (BLAS layers, vendored CUDA kernels, HIP bindings, captured-graph scaffolds) (:8-11) | All named crates exist; roles match their description fields | CONSISTENT |
+| 7 | Intro cross-engine-services + workload layering (:11-14) | Descriptive; `kiln-memory`/`kiln-scheduler`/`kiln-resource`/`kiln-nvtx` and `kiln-model`/`kiln-train`/`kiln-eval`/`kiln-openenv` all exist with matching descriptions | CONSISTENT |
+| 8 | "`kiln-server` exposes the OpenAI-compatible HTTP surface" (:14-15) | `crates/kiln-server/Cargo.toml:3` description | CONSISTENT |
+| 9 | Table: 33 crate rows, one per member (:17-74) | 33/33 row directories exist (by claim-2 set match); no orphan rows, no missing rows vs. `members` | CONSISTENT |
+| 10 | Table: each row's purpose text | 33/33 rows match the crate's `Cargo.toml` description field — either verbatim (23 rows) or as a faithful shortened summary that drops only phase/annotation clauses (10 rows: kiln-tensor, kiln-blas, kiln-hip, kiln-mps, kiln-rocblas, kiln-vulkan-blas, kiln-memory, kiln-flce-kernel, kiln-opd-loss-kernel, kiln-tensor-id). No row describes behavior the crate no longer has | CONSISTENT |
+| 11 | "no workspace-level `benches/` directory" (:77-78) | `ls benches` → No such file or directory | CONSISTENT |
+| 12 | "no per-crate `crates/*/benches`" (:78) | `ls -d crates/*/benches` → no matches | CONSISTENT |
+| 13 | "the bench harnesses are the `kiln-bench` binary (`crates/kiln-server/src/bench.rs`)" (:79-80) | `crates/kiln-server/Cargo.toml:17-19` `[[bin]] name = "kiln-bench" path = "src/bench.rs"`; file exists | CONSISTENT |
+| 14 | "benchmark scripts under `scripts/` (see `scripts/README.md`)" (:80-81) | `scripts/README.md` exists; `scripts/` holds the `bench-*.py` harnesses | CONSISTENT |
+| 15 | "Crate tests run in CI (`.github/workflows/ci.yml`)" (:82-83) | File exists; `ci.yml:91` `run: cargo test --locked` (+ metal variant :98) | CONSISTENT |
+
+Cross-refs (path-like references, `test -e` each): `crates/kiln-server/src/bench.rs` ✓,
+`scripts/README.md` ✓, `.github/workflows/ci.yml` ✓ — **3/3 exist, 0 broken**.
+
+**Totals.** 15/15 claim clusters CONSISTENT; 33/33 table rows verified
+(directory existence + purpose vs. description); 0 STALE-CLAIM, 0 DRIFTED,
+0 BROKEN-REF. The round-176 staleness class (count/membership drift after
+reorgs) does not currently affect this file.
+
+### Tier-placement oddities (noted, not adjudicated)
+
+- `kiln-tensor-id` sits in the **GPU backends & kernels** section although the
+  intro itself calls it the "dependency-free leaf" (arguably Core & runtime).
+- The intro names "cross-engine services (memory, scheduling, persistence,
+  NVTX)" but those four crates live under the **Core & runtime** section
+  title — no section is literally titled "cross-engine services".
+- Training-oriented vendored kernels (`kiln-flce-kernel`,
+  `kiln-opd-loss-kernel`) are grouped under **GPU backends & kernels**
+  alongside the inference-side backends.
+- `kiln-kt-bridge` is placed in **GPU backends & kernels** although it is a
+  shared helper consumed by every kernel crate adding a kt-typed surface.
+
+**Canonical-side observation (not a README error).** The README's purpose
+rows are faithful summaries, but several *description* fields carry phase
+annotations that look post-stale: `kiln-tensor` "Phase 0/1 scaffold; backends
+fill in over Phases 1-7" (while `src/cuda_matmul.rs:1/:41` already dispatches
+through the live kiln-blas production handle), `kiln-blas` "Phase 2.x adds
+the cublasLt MatmulHandle" (the handle exists now), `kiln-hip` "(Phase R.1)",
+`kiln-mps` "Phase 2.2", `kiln-vulkan-blas` "Phase 2.3". Owner may want a
+description-field pass; the README rows themselves remain accurate.
+
+### Claim verdicts — `crates/kiln-blas/README.md`
+
+| # | Claim (doc cite) | Canonical side (verified at HEAD) | Verdict |
+|---|---|---|---|
+| 1 | "Ships three layers" (:3-4) | `Cargo.toml:10-19` phase-2.1 comment; `lib.rs` cfg gates | CONSISTENT |
+| 2 | Backend-agnostic types: `AlgoCache` + `WorkspacePool` + `BackendMatmul` trait with `MatmulRequest` / `Epilogue` (:5-8) | `src/algo_cache.rs`, `src/workspace_pool.rs`, `src/backend_matmul.rs:60` (Epilogue) / `:106` (MatmulRequest) / `:189` (trait) | CONSISTENT |
+| 3 | "Compile on every host without any feature gate; no CUDA toolchain required" (:7-8) | `lib.rs:31-33` wires the three core modules ungated; `build.rs:8-11` early-returns when no CUDA feature (or `CARGO_PRIMARY_PACKAGE`) is set | CONSISTENT |
+| 4 | Probe FFI + cublasLt baseline "gated behind `--features probe`", "Pulls cudarc directly", numerics in `csrc/cublaslt_probe.cu` (:9-12) | `Cargo.toml` `probe = ["dep:cudarc"]`; `build.rs` `CARGO_FEATURE_PROBE` path; `csrc/cublaslt_probe.cu` exists | CONSISTENT |
+| 5 | `CublasLtMatmulHandle` "gated behind `--features cublaslt`" (:13-17) | `lib.rs:155-158` `#[cfg(feature = "cublaslt")] mod cublaslt_handle` | CONSISTENT |
+| 6 | "This is what `kiln-tensor/src/cuda_matmul.rs` dispatches through on the CUDA lane" (:16-17) | `crates/kiln-tensor/src/cuda_matmul.rs:1` ("dispatches through [`kiln_blas::CublasLtMatmulHandle`]"), `:41`, `:97` | CONSISTENT |
+| 7 | "#1082 removed this crate's former `candle-core` dependency" (:19-21) | No `candle` dependency in `Cargo.toml` (only in historical comments `:23-26`, `:36`) | CONSISTENT |
+| 8 | RunPod A6000 guidance + `deploy/runpod/kiln-setup.sh` (:25-32) | `deploy/runpod/kiln-setup.sh` exists | CONSISTENT |
+| 9 | Probe command flags `--out` / `--iters` (:37-40) | `examples/cublaslt_mlp_probe.rs:55` (`"--out"`), `:58` (`"--iters"`) | CONSISTENT |
+| 10 | Shape `[B*T, 2560] @ [2560, 18432]`, `B*T ∈ {1024, 2048, 4096, 8192}` (:48-49) | `examples/cublaslt_mlp_probe.rs:79-81` (`bts = [1024, 2048, 4096, 8192]`, `k = 2560`, `n = 18432`) | CONSISTENT |
+| 11 | Path 1: `cublasGemmEx` with `CUBLAS_GEMM_DEFAULT_TENSOR_OP` (:51-52) | `csrc/cublaslt_probe.cu:133-141` | CONSISTENT |
+| 12 | Path 2: `cublasLtMatmul` + `cublasLtMatmulAlgoGetHeuristic` + explicit workspace (:53-55) | `csrc/cublaslt_probe.cu:177`, `:222` | CONSISTENT |
+| 13 | Per-shape report: median ms ×2, speedup ratio, algo ID, workspace bytes (:57-62) | `ProbeResult` struct `lib.rs:54-64` (`ms_cublas_default`, `ms_cublaslt_heuristic`, `chosen_algo_id`, `chosen_workspace_bytes`) | CONSISTENT |
+| 14 | "The output (the JSON file under `bench-results/`) feeds into ARCHITECTURE.md's … decision" (:64-66) + "its outputs are recorded in ARCHITECTURE.md" (:70-72) | **No** `cublaslt_mlp_probe-*.json` anywhere under `bench-results/` (`find bench-results -iname '*cublas*'` → empty; dir holds opd baselines + audit CSVs); `ARCHITECTURE.md` has zero cublasLt probe-result mentions (only the crate-tree line `:85` + unrelated "memory probe" at `:127/:287`) | **STALE-CLAIM** — this is D-8 (already in owner queue at CLEANUP.md:10164); re-verified OPEN this round, row kept separate per brief |
+| 15 | "The probe binary is not on any production codepath — production goes through `CublasLtMatmulHandle`" (:74-76) | `probe_ffi` doc `lib.rs:52-53` ("The probe binary is the only consumer today"); production path = `cuda_matmul.rs` (claim 6) | CONSISTENT |
+| 16 | build.rs "compiles csrc/*.cu via nvcc + cc when a CUDA-needing feature (or CARGO_PRIMARY_PACKAGE) is on" (:88-90) | `build.rs:6-13` (feature/primary gating), `:78-84` (per-feature `.cu` selection) | CONSISTENT |
+| 17 | File layout: 12 named paths + annotations (:85-99) | 12/12 paths exist (Cargo.toml, build.rs, `csrc/` ×2, `src/` ×5, `examples/cublaslt_mlp_probe.rs`, `tests/cublaslt_handle_smoke.rs`) — but the `cublaslt_handle.rs` annotation mislocates `probe_ffi` | **1 DRIFTED** (F184-1), 11/12 accurate |
+
+**Totals.** 17/17 claim clusters audited: **15 CONSISTENT, 1
+STALE-CLAIM (claim 14 = D-8, pre-queued, re-verified), 1 DRIFTED
+(F184-1)**. 0 BROKEN-REF (all 12 file-layout paths + `deploy/runpod/kiln-setup.sh`
+resolve), 0 UNRESOLVED.
+
+### Findings
+
+Severity: MED = live misleading claim; LOW = FYI/cosmetic.
+
+| ID | Title | Doc cite (verified at HEAD) | Canonical side (verified at HEAD) | Class | Sev | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| F184-1 | File layout attributes `probe_ffi` to `cublaslt_handle.rs` — the module actually lives in `lib.rs` | `crates/kiln-blas/README.md:92-93` ("cublaslt_handle.rs # CublasLtMatmulHandle + inline probe_ffi module (FFI bindings to the C++ probe)") | `grep -rn 'mod probe_ffi' crates/kiln-blas/src/` → single hit `src/lib.rs:48` (`#[cfg(feature = "probe")] pub mod probe_ffi`, `lib.rs:47-109`); `cublaslt_handle.rs` is itself gated behind `--features cublaslt` (`lib.rs:156`) and contains no `probe_ffi` | DRIFTED | LOW | no | Move the `probe_ffi` annotation from the `cublaslt_handle.rs` line to the `lib.rs` line in the file layout (or reword to "FFI declared in `lib.rs` under `--features probe`") |
+
+### Owner-queue delta
+
+| row | status this round |
+|---|---|
+| **D-8** (kiln-blas README post-#1605 story, CLEANUP.md:10164) | **re-verified OPEN** — README:64-66 and :70-72 still cite ARCHITECTURE.md's probe narrative; still no `cublaslt_mlp_probe-*.json` baseline in the tree; row kept separate per brief, no queue change |
+| **F184-1** (new) | DRIFTED/LOW — kiln-blas README file-layout `probe_ffi` misattribution; **queue delta +1** |
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | none |
+| no gate edit | F184-1 (README annotation move) |
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119918511 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this append; post-commit re-run confirms) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 184 reply
+(single-commit pattern, post-commit gate re-run).
