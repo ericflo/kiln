@@ -10804,3 +10804,134 @@ unchanged (only QUICKSTART.md and this ledger entry are in the diff).
   pre-split): the v0.5.1 line above is queued for the owner with cited
   evidence (tag `kiln-v0.5.2`, CHANGELOG 2026-08-01 entry).
 - Not touched: all A-1..A-11, D-2..D-16, F-1..F-4 owner items (gated).
+
+## Cleanup Agent (round 166) — 2026-08-28
+
+**RESULT — no new fix candidates: the two staleness classes from rounds
+161–165 are clean across live docs. Systematic sweep executed in full; every
+hit verified against its target; full proof below. No files changed — this is
+a valid round per the "sweep finds nothing new" clause.**
+
+### Ground truth (verified this round)
+
+- `git tag --sort=-creatordate | head -3` → `kiln-v0.5.2`, `kiln-v0.5.1`,
+  `kiln-v0.5.0`; current release = **v0.5.2**.
+- `CHANGELOG.md` top entry: `## kiln-v0.5.2 — 2026-08-01 — first-class
+  OpenEnv RL and fast stable serving` (matches R165).
+- Canonical security phrasing: README.md:421 "Kiln has no built-in auth: the
+  default listen address is `127.0.0.1:8420`…" (heading `## Security model`
+  at README.md:419). R165's two QUICKSTART.md fixes re-verified still in tree
+  (`"auth is out of scope"` ×0, `"§10.6"` ×0 in QUICKSTART.md).
+
+### Sweep scope and patterns
+
+Live tracked set: `git ls-files -- '*.md' '*.toml' '*.html'` minus
+`docs/archive/`, `docs/audits/`, `.qualification/`, `capabilities/`,
+`docs/plans/`, `bench-results/`, `scripts/investigations/`, `node_modules`,
+`Qwen3.5-4B/`, `CHANGELOG.md`, `CLEANUP.md`, `CLEANUP_GOAL.md` = **160
+files** (68 docs/, 38 crates/, 16 dotless `qualification/` files
+(1 README + 15 server-config .toml), 9 desktop/, 6 .agents/skills/, plus
+root docs; the dotless `qualification/` dir is NOT the excluded `.qualification/`
+and WAS swept — 0 hits in either; the excluded `.qualification/` has zero
+tracked files, so that exclusion removed nothing). Patterns: (1) `§`, `section [0-9]`
+(case-insensitive, incl. "see/per/in section", "(§"), explicit `§8.7`/`§10.6`;
+(2) `v0\.1|v0\.5\.0|v0\.5\.1|v0\.1-era|for v0\.1|as of v0|latest published
+release|current release`, plus a second pass with bare `0\.5\.1|v0\.2\.9`
+and "released/published/shipped v0.x" phrasings. All matches re-checked
+against their target files (heading greps / content reads), not just file
+existence.
+
+### Class 1 — dangling section refs: 22 files, all resolved or queued (0 dangling)
+
+| File:line(s) | Ref | Disposition | Proof |
+|---|---|---|---|
+| QUICKSTART.md:39 | "section 1 … build from source" | history (correct) | `## 1. Optional Source / CLI Branch: Build Kiln` at L96 |
+| QUICKSTART.md:704 | ECHO "paper §3" | history | echo_paper.md:83 `## 3 Method` |
+| QUICKSTART.md:1029 | `[§10](#10-evaluate-your-adapter)` | history | `## 10. Evaluate your adapter` at L838 |
+| README.md:97 | EVAL_GUIDE.md#mine-your-own-request-log | history | `### Mine your own request log` at EVAL_GUIDE.md:519 |
+| README.md:157 | "verifier-free adaptation per paper §5.5" | history | echo_paper.md:282 `### 5.5 Verifier-Free Adaptation` |
+| README.md:269 | QUICKSTART.md#optional-point-pi-at-kiln | history | `### Optional: point pi at Kiln` at QUICKSTART.md:283 |
+| README.md:285 | QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts | history | `### 9.2 Troubleshooting: older-release long-prefill timeouts` at L618 |
+| kiln.example.toml:411 | "§10.6 self-improvement flywheel scheduler" | **report (owner, new)** | resolves to frozen grand-plan `### 10.6.` (+10.6.1–10.6.6); same family as known-open :431 (R165) |
+| kiln.example.toml:431 | "§8.7 promotion" | report (known-open R165, not re-reported) | grand-plan `### 8.7.` exists |
+| crates/kiln-server/src/ui/index.html:1471-1481, 1741, 1940, 1956, 2052 | §3, §10.6, §3.1, §3.3, §3.4, §3.5, §3.6, §3.7, §3.10, §3.12, §8.4, §8.5, §8.13, §10.3 (14 sites) | **report (owner, new)** | every section exists in frozen grand-plan (L3, 3.1–3.12, 8.4, 8.5, 8.13, 10.3, 10.6); dev comments in product UI code, targets unlinked |
+| crates/kiln-vulkan-kernel/BENCH_RESULTS_OPD.md:33 | "§9.7 grand-plan perf-gate targets ≥600 t/s cached / ≥250 t/s local Q4 teacher" | history (resolved + content match) | grand-plan L1139 `### 9.7. Per-engine performance targets`; Vulkan 1×7900 XTX row is verbatim "≥600 t/s cached / ≥250 t/s local Q4 teacher" |
+| docs/README.md:18 | "grand-plan §15 closing vignettes" | history | grand-plan `## 15.` |
+| docs/guides/VIGNETTES.md (30+ sites) | §3.1–3.10, §6, §8.11, §8.13, §10.3–10.14, §11, §13, §15 | history | all exist in grand-plan; the doc names the target file at its L3 |
+| docs/papers/echo/echo_paper.md:319, 397, 416 | §4, Section 3.2, §5.3 | history (paper-internal) | `## 4`, `### 3.2`, `### 5.3` in same file |
+| docs/papers/on-policy-distillation/deepseek_v4.md:629 | §5.2.3 | history (paper-internal) | `#### 5.2.3.` at L619 |
+| docs/papers/on-policy-distillation/2604.00626_survey…md:139-141 | (Section 4/5/6) | history (paper-internal) | `## 4/5/6` at L343/382/450 |
+| docs/site/demo/SCRIPT.md:20-21 | "QUICKSTART.md §1 / §2" (whole-file links) | history | QUICKSTART.md exists; `## 1.`/`## 2.` headings present |
+| scripts/README.md:79 | "§13 Phase 0 real-hardware validation" | history | grand-plan `## 13.` |
+| THIRD_PARTY_LICENSES.md (6 "Section N") | Apache-2.0 license text | out-of-scope | cargo-about generated (round 4); license boilerplate, not repo refs |
+| .agents/skills/capability-creator/SKILL.md + resources/ (5 files, 29 sites) | PIPELINE §4.1/§4.3/§11; METHODS §4.2/§4.3/§4.5; paper §3.3/§5.5; DAPO §2 (arXiv) | history | PIPELINE.md L239/309/561; METHODS.md L284/327/351; echo_paper `### 3.3` L123; DAPO is an external citation |
+
+### Class 2 — version-scoped claims: 15 files, 0 provably stale
+
+| File:line(s) | Claim | Disposition | Proof |
+|---|---|---|---|
+| README.md:429 | "Full v0.1 threat model … security-audit-v0.1.md" | history | named audit artifact exists; part of the canonical security section (R165-anchored) |
+| README.md:455 | "current release line follows the latest `kiln-v*`" | history (correct) | version-neutral; consistent with tag kiln-v0.5.2 |
+| SECURITY.md:35 | "Only the latest tagged release is supported" | history (correct) | version-neutral policy |
+| QUICKSTART.md:623, 632 | v0.2.9 workaround "replaced" / "Since kiln-v0.2.9 (PR #687)" | history | past-tense framing, consistent with §9.2 |
+| docs/public/QUICKSTART.md:9 | "Download the current release" | history (correct) | version-neutral |
+| docs/public/BENCHMARKS.md:21, 47, 55 | v0.5.1 benchmark narrative | history | dated July-30 benchmark rows |
+| docs/public/BENCHMARKS.md:25 | "As of July 30, 2026, v0.5.1 is the latest published release" | **report (owner, R165 queue — kept)** | contradicted by tag `kiln-v0.5.2` + CHANGELOG top entry 2026-08-01; owner-managed narrative → queued, not edited |
+| docs/public/CHANGELOG.md:27, 41, 43, 57 | v0.5.1 / v0.5.0 entries | history (correct) | file's top entry IS `## kiln-v0.5.2 — 2026-08-01` (L9) — up to date |
+| docs/site/demo/index.html:709 | "Captured May 4, 2026 · … pre-v0.5.0 behavior" | history | explicitly dated + past-tense |
+| docs/site/troubleshooting.html:953, 958, 966, 974 | v0.2.9 pinned-release workaround | history | L974: "This mitigation is also historical. … Current releases route…" |
+| desktop/CHANGELOG.md (13 v0.1.x sites) | desktop release history | out-of-scope (report-only) | changelog is history by definition |
+| desktop/docs/binary-update.md:325 | "nightly pulling from tags like `kiln-v0.5.0-nightly.<sha>`?" | report (owner) | "Open questions" design note, not a release claim |
+| desktop/ui/dashboard.html:438 | "Finding latest release…" | history (correct) | version-neutral UI string |
+| docs/policies/release-version-policy.md:19 | "publishes the repository's latest release" | history (correct) | version-neutral |
+| BENCHMARKS.md:469, 471, 498; THIRD_PARTY_LICENSES.md (3× 0.5.1) | vLLM v0.19.1 / SGLang 0.5.10 / crate 0.5.1 | out-of-scope | third-party version numbers, factual |
+
+### Fixes applied
+
+**None.** No hit is a provably-stale present-tense claim in a live doc, and no
+section reference dangles: every `§N`/anchor/section citation above resolves
+to an existing heading in the same file, the named file, the frozen grand-plan
+(target sections verified by heading grep, §9.7 additionally content-verified),
+or the ECHO/DeepSeek/survey paper bodies. Per protocol, the two
+grand-plan-unlinked sites in live surfaces (kiln.example.toml:411,
+ui/index.html § comments) are owner-queue, not precision-fixable.
+
+### Gate verdicts (pre = committed round-165 tree; post = final tree; no edits made)
+
+| Gate | Pre | Post |
+|---|---|---|
+| `python3 scripts/check_repository_artifacts.py` | PASS (4564 tracked paths, 119,614,771 bytes) | PASS (identical) |
+| `python3 scripts/check_production_file_budget.py` | PASS (646 files, 5000-line default, 14 exceptions) | PASS (identical) |
+| `node scripts/docs-site/build.mjs --validate-only` | PASS (59 documents) | PASS (59 documents) |
+| `node scripts/docs-site/test/build.test.mjs` | 11 pass / 0 fail | 11 pass / 0 fail |
+| `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (rc=0) | PASS (rc=0) |
+
+`git status --porcelain` before and after: empty (clean).
+
+### Owner-queue additions (canonical list updated)
+
+Standing (R159 consolidated, all re-verified by later rounds; untouched):
+**DECISION D-2..D-16 (15) · APPROVAL A-1..A-11 (11) · FYI F-1..F-4 (4) = 30
+open** (D-1 RESOLVED, rounds 162–164).
+
+R165 additions (2): kiln.example.toml:431 "§8.7 promotion" (known-open);
+docs/public/BENCHMARKS.md:25 v0.5.1-latest line.
+
+**R166 additions (2):**
+1. kiln.example.toml:411 "§10.6 self-improvement flywheel scheduler" —
+   unlinked frozen-grand-plan reference in a live config comment; resolves to
+   grand-plan §10.6 (verified). Same family as :431 (R165); owner decision:
+   inline the section name or drop the number (note: A-11 already covers the
+   adjacent commented `[agent]` header convention at L411-414 — bundle the
+   decision).
+2. crates/kiln-server/src/ui/index.html L1471-1481/1741/1940/1956/2052 — 14
+   §N.M dev comments in the Distill dashboard referencing grand-plan sections
+   (all verified present in the frozen plan); product-code territory — owner
+   decision: leave as internal shorthand, name the target doc, or drop numbers.
+
+**Total open owner items: 34.** Not touched: all A-1..A-11, D-2..D-16,
+F-1..F-4 (gated); both R165 queue items; D-1 remains RESOLVED.
+
+### Commit
+
+The commit this entry lands in (CLEANUP.md only; no push).
