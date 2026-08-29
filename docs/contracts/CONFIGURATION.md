@@ -7,6 +7,10 @@ validation, mechanically derived environment overrides, and runtime provenance.
 
 The machine-readable contract is
 [`contracts/kiln-config-v1.schema.json`](../../contracts/kiln-config-v1.schema.json).
+Runtime defaults (bind host, client host, port, and their environment
+spellings) are pinned in
+[`contracts/runtime-defaults-v1.json`](../../contracts/runtime-defaults-v1.json)
+and enforced by `scripts/check_runtime_defaults.mjs`.
 The documentation website renders its complete field reference directly from
 that schema. `python3 scripts/check_config_schema.py --self-test` verifies that
 the schema, these tables, and `kiln.example.toml` agree.
