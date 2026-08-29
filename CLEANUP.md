@@ -14298,3 +14298,161 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 184 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 185 — capability-creator skill + root capabilities/ docs audit) — 2026-08-29
+
+**Scope.** Read-only audit of the `capability-creator` skill and the eight
+root-level companion docs, at HEAD `4e0beb48a` (round 184 commit, clean
+tree): **`.agents/skills/capability-creator/SKILL.md`** (563 lines) and
+**`capabilities/{METHODS,PIPELINE,LAYOUT,NEXT_ROUND,DISTILLATION,
+KILN_IMPROVEMENT_ISSUES,CONSOLIDATED_REPORT,README}.md`**. Per brief:
+(1) every path/script/function reference extracted and `test -e`'d
+(concrete files against repo root, `capabilities/`, and the skill dir;
+`caps/<cap>/`-form refs expanded across all 28 caps; CLI command names
+checked against `crates/kiln-cli/src/cli.rs`; trainer names against
+`capabilities/KILN_IMPROVEMENT_ISSUES.md` implementation notes); (2) repo-state
+claims (round numbers, adapter/method names, issue numbers, "all complete"
+prose) verified against the canonical sides: `KILN_IMPROVEMENT_ISSUES.md`
+(40 issue headers + status lines), `rounds/{1,2,3}/README.md`, cap-local
+`pipeline.md`/`capability.jsonl`, `CONSOLIDATED_REPORT.md`, git history
+(`git cat-file -e`). grep/sed/python3/test only — no cargo, no test suites,
+no training. Class vocabulary (round 159): STALE-CLAIM, DRIFTED, BROKEN-REF,
+OWNER-DECISION, RISK, UNRESOLVED. Findings are owner-queue evidence, not
+fixes; the only file modified is CLEANUP.md.
+
+**Adjacent evidence (out of scope, not flagged).**
+
+- `.claude/skills/sft-capability-creator` is a dangling symlink →
+  `../../.agents/skills/sft-capability-creator` (no longer present). The
+  NEXT_ROUND.md:12 claim "4 per-paradigm skills removed" holds for
+  `.agents/skills/` (only `capability-creator/` remains); the symlink is a
+  consolidation leftover.
+- `capabilities/integration/README.md` cites `../PIPELINE.md §4.5` — no §4.5
+  exists in PIPELINE.md (§4.1–§4.4 only); cross-stage validation is
+  METHODS.md §4.6.
+- Cap-local `pipeline.md` files (out-of-brief) — e.g. the only shipped cap
+  `pi-faithful-completion` claims `reproducer: ./run_pipeline.sh`, and no
+  such file exists in that cap (corroborating F185-6).
+- `adapters/` holds only hidden system dirs (`.eval/`, `.openenv/`,
+  `.requests/`, `.training-inputs/`), no trained adapters — consistent with
+  README.md "adapters are never stored in git" (they live on the GPU pod).
+- SKILL.md:438 `runpod_api.py` and SKILL.md:446
+  `/data/knowledge/skills/kiln/SKILL.md` are external pod-host references —
+  unresolvable by design.
+
+### Path census (distinct path/script references, `test -e` each)
+
+| doc | distinct refs extracted | resolved OK | broken / misplaced (finding) |
+|---|---|---|---|
+| SKILL.md | 40 | 39 | `templates/hypothesis.md.tmpl` (:318 — F185-1) |
+| METHODS.md | 14 | 14 | 0 (lib/ 3, resources/ 4, notes, `caps/pi-faithful-completion/sft_chain_findings.md` all exist) |
+| PIPELINE.md | 10 | 10 | 0 (`lib/stage_manifest.py`, `lib/method_router.py`, `templates/run_stage_<method>.sh`, `integration/cross-cap-coherence/capability.oracle.sh` all exist) |
+| LAYOUT.md | 30 | 28 | `templates/capability.oracle.sh` (:459 — F185-1); `integration/{pi-tool-call-efficiency,pi-source-mod-workflow}/` (:174-175 — F185-7) |
+| NEXT_ROUND.md | 40 | 38 | `caps/pi-compaction/run_stage.sh` (:305 — F185-6); `integration/pi-tool-call-efficiency/` (:506 — F185-7). `rounds/round-3/sibling_matrix.json` is forward-looking (round-3 README "at round close" defers it) — not flagged |
+| DISTILLATION.md | 12 | 11 | `rounds/round-1..3/{cluster_manifest,sibling_matrix}.json` (§5 tree — F185-8). `kiln adapter merge` / `cuda_opd_remote_multi_teacher` correctly documented as *not yet existing* — CONSISTENT |
+| KILN_IMPROVEMENT_ISSUES.md | 21 | 21 | 0 (round-1/2 historical paths such as `capabilities/agentic-grpo/iter-…`, `adapters/issue33-eval-adapter` are narrative-of-the-time, consistent with the round-1/2 READMEs; `PROFILING.md` (:31) and `debug_model_state.rs` (:2125/:2134) resolve) |
+| CONSOLIDATED_REPORT.md | 7 | 7 | 0 (git SHA `3c22d175` present in history; round-1-era `capabilities/agentic-grpo/…` paths consistent with that report's date) |
+| README.md | 20 | 18 | `integration/{pi-tool-call-efficiency,pi-source-mod-workflow}/` (:57-59 — F185-7); caps/ tree omits `pi-context-aware-edits-postbreach/` (F185-9) |
+
+`caps/<cap>/`-form refs (expanded across all 28 caps): canonical items
+`capability.md`, `capability.config.json`, `capability.oracle.sh`, `rubric.py`,
+`rubric_sanity.py`, `datasets/` present in **28/28 caps**; `lib/` 8/8;
+`resources/` 5/5; `templates/` 10/10 present but 2 referenced files missing
+(F185-1); `rounds/round-{1,2,3}/` 3/3; `crates/kiln-server/src/config.rs`,
+`crates/kiln-train/examples/{cuda_grpo_ablation,long_context_grpo_bench}.rs`,
+`crates/kiln-vulkan-kernel`, `docs/training/{LONG_CONTEXT_GRPO_BENCH,
+TRAIN_RECEIPT_SCHEMA}.md` all exist.
+
+### CLI command census (checked against `crates/kiln-cli/src/cli.rs`)
+
+| doc citation | actual CLI | verdict |
+|---|---|---|
+| `kiln serve --eval-mode` (SKILL.md :404, issue #15) | `Serve` + `--eval-mode` | CONSISTENT |
+| `kiln adapter verify / restore` (SKILL.md :405-406, issues #4/#36) | `Adapters` variant, `#[command(alias = "adapter")]`, `verify`/`restore` subcommands | CONSISTENT |
+| `kiln trajectory inspect` (SKILL.md :407, issue #10) | `Trajectory` + `inspect` | CONSISTENT |
+| `kiln eval-adapter --seeds N` (SKILL.md :408, issue #33) | `EvalAdapter` | CONSISTENT |
+| `kiln openenv {start,artifact,inspect,tasks,rollout,train}` (SKILL.md :409-412, METHODS.md §2) | `OpenEnv` + 6 subcommands | CONSISTENT |
+| `kiln rollout --adapter … --tasks …` (SKILL.md :410; LAYOUT.md :506; both "issue #34") | **`rollout-generate`** (`cli.rs:626` `name = "rollout-generate"`; issue #34's own implementation notes: "Added `kiln rollout-generate`"; example `cli.rs:339`) | **DRIFTED (F185-2)** |
+| `kiln adapter merge` — "no first-class CLI today" (DISTILLATION.md §6.4) | absent from `cli.rs` | CONSISTENT (correctly flagged as missing) |
+| `cuda_opd_remote_multi_teacher` — "does not yet exist" (DISTILLATION.md §3.2) | absent | CONSISTENT (correctly flagged as missing) |
+| `cuda_grpo_ablation`, `cuda_sft_file`, `cuda_opd_remote`, `cuda_*_ablation --install-*` (SKILL.md :413-415; NEXT_ROUND.md; issue file) | trainer names consistent with issues #5/#9/#22/#37 implementation notes | CONSISTENT |
+| `python3 lib/{method_router,stage_manifest,headroom,cluster_summary}.py` (all docs) | 4/4 exist in `capabilities/lib/` | CONSISTENT |
+
+### Repo-state claim verdicts
+
+| # | Claim (doc cite) | canonical side (verified at HEAD) | verdict |
+|---|---|---|---|
+| 1 | "40 kiln improvement issues … all complete" (SKILL.md :536; README.md; NEXT_ROUND.md:5) | 40 `### N.` headers; status lines: 24 `Completed` + 9 `Implemented` + 1 `Passed` + 7 `Complete` — all terminal-complete | CONSISTENT |
+| 2 | 24 issue-number citations (#1-#38) across NEXT_ROUND/README/LAYOUT/PIPELINE/DISTILLATION/METHODS | every cited number matches its issue title at the cited line | CONSISTENT |
+| 3 | CONSOLIDATED_REPORT scoreboard (pi-faithful +0.0828, pi-code-comprehension +0.1293, pi-doctest +0.042, pi-code-search +0.024) | `rounds/round-1/README.md` :18-22 identical rows | CONSISTENT |
+| 4 | "Round-1 lessons (CONSOLIDATED_REPORT)" (LAYOUT.md :13; README.md :9) | CONSOLIDATED_REPORT is explicitly the round-1 report | CONSISTENT |
+| 5 | "The four round-1 winners" (LAYOUT.md :62-69; NEXT_ROUND.md:31-37) | round-1 README "What shipped" + CONSOLIDATED_REPORT :53-56 | CONSISTENT |
+| 6 | Tier 2 "code-symbol-extraction round-1 EOS-skip bug" (NEXT_ROUND.md :47) | CONSOLIDATED_REPORT :195-200 | CONSISTENT |
+| 7 | Tier 2 "pi-compaction eval byte-identical after training" (NEXT_ROUND.md :48) | CONSOLIDATED_REPORT :56 | CONSISTENT |
+| 8 | Tier 3 "pi-code-comprehension round-1 SFT chain 0.9573→0.9614 (+0.0041, below 2σ bar)" (NEXT_ROUND.md :58) | CONSOLIDATED_REPORT :54 | CONSISTENT |
+| 9 | Tier 5/6 "pi-tool-call-efficiency transfer-eval-only" / "pi-source-mod-workflow integration test" (NEXT_ROUND.md :62-63) | round-2 README :20-21 (repurposed; live under `caps/` — see F185-7 for the path half) | CONSISTENT (claim), DRIFTED (path) |
+| 10 | "4 per-paradigm skills removed" (NEXT_ROUND.md :12) | `.agents/skills/` = {capability-creator/} only | CONSISTENT (dangling `.claude/skills` symlink = adjacent FYI) |
+| 11 | Phase G gate "≥5 multi-stage caps shipped" (SKILL.md :294; NEXT_ROUND.md :523) | 1 cap shipped (`pi-faithful-completion`); condition correctly unmet | CONSISTENT |
+| 12 | "Round 3 collapses per-paradigm buckets into flat caps/" (round-2 README :72-74; LAYOUT.md :518-526) | `caps/` 28 caps; no `capabilities/{agentic-grpo,opd,sft}/` | CONSISTENT |
+| 13 | pi-faithful-completion round-3 plan = "SFT → OPD → agentic-GRPO" (NEXT_ROUND.md :471; README.md :106; LAYOUT.md :545) | cap `pipeline.md` (status: shipped, last_validated 2026-05-22): stage 1 = prompting, stage 2 = 6-stage SFT oscillation → `pi-faithful-iter23-osc-strict`, +0.1698/5.0σ — no OPD, no agentic-GRPO; round-3/README.md (out of scope): "SHIPPED … prompting recipe" | **STALE-CLAIM (F185-4)** |
+| 14 | METHODS.md Example 1: "(round-2 winner, +8.3pp single stage)", "Round-2 inputs (from CONSOLIDATED_REPORT)" (METHODS.md :525/:527) | same CONSOLIDATED_REPORT is the round-1 report (rows 3-4); round-2 README :16 "the four round-1 winners"; NEXT_ROUND.md Tier 1 "round-1 winner"; cap pipeline.md "round-1 (2026-05-19/20) … +0.083 over a round-1 baseline of 0.7237" | **STALE-CLAIM (F185-5)** |
+| 15 | "`run_stage.sh` replaces the old method-baked `run_iter.sh`" (NEXT_ROUND.md :22-23; LAYOUT.md :526; README.md :203) + SKILL.md :231 live instruction | 0/28 caps have `run_stage.sh`; 4 caps still ship `run_iter.sh` (python-algo, pi-doctest, pi-tool-call-efficiency, pi-context-aware-edits-postbreach); only pi-code-comprehension has `run_pipeline.sh`; round-3/README.md "Status: in-flight" (mitigating context); skill `templates/run_stage_*.sh` exist as reference implementations | **STALE-CLAIM (F185-6)** |
+
+### Findings
+
+Severity: MED = live misleading claim / broken owner-facing instruction; LOW =
+FYI/cosmetic. Gate-edit column: none of these require a gate/workflow edit.
+
+| ID | title | doc cite (verified at HEAD) | canonical side (verified at HEAD) | class | sev | gate-edit | one-line owner action |
+|---|---|---|---|---|---|---|---|
+| F185-1 | Two referenced skill templates do not exist | SKILL.md :318 ("template in `templates/hypothesis.md.tmpl`"); LAYOUT.md :459 ("Reference implementation lives in `.agents/skills/capability-creator/templates/capability.oracle.sh`") | `ls .agents/skills/capability-creator/templates/` = 10 files (headroom.py, pi_smoke.sh, promote_iter_to_stage.sh, rubric_sanity.py, run_pipeline.sh, run_stage_{sft,opd,grpo,agentic_grpo}.sh, scaffold.sh) — neither referenced file present; `find . -name 'hypothesis*.tmpl'` → 0 hits in-repo; `capability.oracle.sh` exists per-cap (28/28) and in `integration/cross-cap-coherence/`, just not in `templates/` | BROKEN-REF | MED | no | Create the two template files (or reword :318 to inline the 3-line hypothesis shape, and :459 to point at `integration/cross-cap-coherence/capability.oracle.sh` / per-cap copy) |
+| F185-2 | `kiln rollout` documented as an existing command; real subcommand is `kiln rollout-generate` | SKILL.md :410 (`kiln rollout --adapter … --tasks …`, "issue 34"); LAYOUT.md :506 (same, "issue 34") | `crates/kiln-cli/src/cli.rs:626` `name = "rollout-generate"` (no `rollout` subcommand); KILN_IMPROVEMENT_ISSUES.md #34 implementation notes: "Added `kiln rollout-generate`"; `cli.rs:339` example uses `rollout-generate` | DRIFTED | MED | no | Rename the two table rows to `kiln rollout-generate` (command fails as documented: unknown subcommand) |
+| F185-3 | Phase 3 closeout cites "PIPELINE.md §11 reproducibility checklist" | SKILL.md :269-270 | PIPELINE.md :561 `## §11. Pipelines vs hypotheses` (no checklist); the actual checklist is NEXT_ROUND.md :413 `## Reproducibility checklist` (10 items mirroring SKILL.md's 8) | DRIFTED | LOW | no | Point SKILL.md :269-270 at `NEXT_ROUND.md` "Reproducibility checklist" (or move the checklist into PIPELINE.md and keep the §11 cite) |
+| F185-4 | Round-3 pilot recipe documented as "SFT → OPD → agentic-GRPO" (planned); the shipped cap used prompting + a 6-stage SFT oscillation chain — no OPD, no agentic-GRPO | NEXT_ROUND.md :471 (Tier 1); README.md :106 ("Round 3 plan" table); LAYOUT.md :545 ("first round-3 multi-stage pilot") | `caps/pi-faithful-completion/pipeline.md` (status: shipped, last_validated 2026-05-22): stages = [prompting (no adapter), 6-stage SFT oscillation], adapter `pi-faithful-iter23-osc-strict`, +0.1698 (5.0σ); round-3/README.md (out of scope): "SHIPPED with +0.169 (prompting recipe)" | STALE-CLAIM | MED | no | Update the three plan cells to the shipped recipe (prompting + SFT chain), or mark the OPD/GRPO stages as explicitly unshipped/deferred |
+| F185-5 | METHODS.md Example 1 misattributes the pi-faithful-completion +8.3pp win as "round-2 winner / Round-2 inputs" | METHODS.md :525 + :527 | CONSOLIDATED_REPORT (round-1 report per rows 3-4) scoreboard: `0.8065 vs 0.7237 baseline; +0.0828`; round-1/README.md :18 same; round-2/README.md :16 "the four round-1 winners"; NEXT_ROUND.md Tier 1 "round-1 winner +8.3pp"; cap pipeline.md "round-1 (2026-05-19/20): 50-iter agentic-GRPO … +0.083 over a round-1 baseline of 0.7237" | STALE-CLAIM | LOW | no | Change "round-2 winner" → "round-1 winner" and "Round-2 inputs" → "Round-1 inputs" (METHODS.md :525/:527) |
+| F185-6 | `run_stage.sh` documented as the current per-cap runner ("replaces run_iter.sh"; required "S" item; live instruction), but no cap has it | NEXT_ROUND.md :22-23 (item 5); LAYOUT.md :526 (round-2→3 table) + :118 (canonical tree, required) + :460-469 (contract section); README.md :149/:162 (quickstart) + :203 (committed table); SKILL.md :231 (Phase 2 instruction) + :334 (diagnostics ladder); PIPELINE.md §5/:237 (contract + reference impls) + :583 (quick reference) | `find capabilities/caps -name run_stage.sh` → none (0/28); `run_iter.sh` still present in 4 caps (python-algo, pi-doctest, pi-tool-call-efficiency, pi-context-aware-edits-postbreach); only pi-code-comprehension has `run_pipeline.sh`; the shipped cap has `run_iter.sh` and its out-of-scope `pipeline.md` claims a nonexistent `./run_pipeline.sh` reproducer; mitigating context: round-3/README.md "Status: in-flight"; `templates/run_stage_*.sh` exist as reference implementations | STALE-CLAIM | MED | no | Either migrate caps to `run_stage.sh` (per the round-3 contract) or reword the docs to "per-cap `run_stage.sh` created from `templates/run_stage_<method>.sh`" so the SKILL.md :231 instruction doesn't point at an absent script |
+| F185-7 | `pi-tool-call-efficiency/` + `pi-source-mod-workflow/` mapped under `integration/`; they live under `caps/` | README.md :57-59 (integration/ tree; both absent from the caps/ tree list); LAYOUT.md :174-175 (top-level tree); NEXT_ROUND.md :506 (Tier 6 item 14 `integration/pi-tool-call-efficiency/`) | `ls capabilities/integration/` = {README.md, cross-cap-coherence/}; both caps live in `caps/` (pi-tool-call-efficiency/README.md: "EVAL-ONLY cap (round-2 reshape)"); round-2/README.md :20-21 describes the repurpose without relocating | DRIFTED | LOW | no | Move the two caps into the caps/ trees (README.md, LAYOUT.md) and fix the Tier 6 item-14 path |
+| F185-8 | DISTILLATION.md §5 rounds/ tree lists `cluster_manifest.json` + `sibling_matrix.json` as round-1/ round-2 files; neither exists as files | DISTILLATION.md §5 (rounds/ tree, ~:138-147) | `rounds/round-1/` = {base_sha256, README.md, capability_summary.jsonl}; `rounds/round-2/` = {base_sha256, README.md}; `rounds/round-3/` = {base_sha256, README.md}; round-2/README.md "Cluster manifest: `null` — no distillation occurred" / "Sibling matrix: Started but incomplete" (recorded in README, not as files) | STALE-CLAIM | LOW | no | Reword the §5 tree to "recorded in the round README (null/incomplete when not produced)" or list only files that exist |
+| F185-9 | `pi-context-aware-edits-postbreach` (full canonical scaffold + iter log) absent from all eight root docs | README.md :59-85 caps/ tree lists 25 of 28 caps; `grep -rn postbreach capabilities/*.md` → 0 hits; NEXT_ROUND.md tier lists also omit it | `caps/pi-context-aware-edits-postbreach/` exists with the full canonical layout (capability.md, capability.config.json, capability.oracle.sh, rubric.py, rubric_sanity.py, datasets/, hypotheses/, run_iter.sh, SFT prep scripts) | DRIFTED | LOW | no | Add the cap to the README.md caps/ tree and, if it has a round-2 iter log, to the relevant NEXT_ROUND.md tier (or note it as scaffold-only) |
+
+**Owner-queue delta: +9 (F185-1 MED, F185-2 MED, F185-3 LOW, F185-4 MED,
+F185-5 LOW, F185-6 MED, F185-7 LOW, F185-8 LOW, F185-9 LOW).** Canonical queue
+anchor remains a47fca644 (52 items, B1–B6); cumulative 61 items. No
+pre-queued item was re-verified (this round's surface is disjoint from
+D-1…D-8 / F182-1…F184-1).
+
+### Gate-edit flag summary
+
+| flag | items |
+|---|---|
+| fix requires a gate/workflow edit | none |
+| no gate edit | F185-1…F185-9 (all doc-only; F185-6 alternatively resolved by a cap migration, still owner-discretionary, no gate change) |
+
+### Standing gates (17/17 pass — literal CI commands, run after the only
+write (this ledger append) and re-run after commit)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119933603 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with the gate-table fill-in below; post-amend re-run confirms PASS) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "pass 11, fail 0" |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+CLEANUP.md append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 185 reply
+(single-commit pattern, post-commit gate re-run).
