@@ -14901,3 +14901,120 @@ ledger append and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 188 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 189 — desktop/ docs cluster claims audit) — 2026-08-29
+
+**Scope.** Read-only full-claims audit of the 3 owner-managed desktop
+doc files at HEAD `b9177ec6e` (round 188 commit, clean tree):
+`desktop/README.md` (186 L), `desktop/CHANGELOG.md` (222 L),
+`docs/desktop/signing.md` (112 L). Every command, path, version, config
+key, CI ref, secret/env name, and procedure claim plus every cross-reference
+was cross-checked against canonical sources: live
+`.github/workflows/desktop-build.yml`, `desktop/tauri.conf.json`,
+`desktop/Cargo.toml`, `contracts/runtime-defaults-v1.json`,
+`git log -- desktop/` + all `desktop-v*` tags (honest-history), `test -e`
+for every path-like link, and the actual code for behavior claims
+(`desktop/src/{installer,supervisor,settings,tray,poller,main,hf_download}.rs`,
+`desktop/ui/{dashboard,settings,logs}.html`, and server-side
+`crates/kiln-server/src/{config,cli,main}.rs` for the speculative-decoding
+contract). Light tools only — no cargo in `desktop/` (separate Tauri
+workspace; `cargo metadata --no-deps` sanity check only), no test suites
+beyond the standing gates. Findings are owner-queue evidence, not fixes;
+the only file modified is CLEANUP.md. ~115 discrete claims audited
+(per-file tallies below).
+
+Already-queued rows explicitly **NOT re-opened** (re-verified OPEN today):
+
+- **D-14** — `desktop/README.md:164` "On `desktop-v*` tag push it builds …"
+  vs `desktop-build.yml:7-8` still `workflow_dispatch:` only; publish job
+  `desktop-build.yml:219` still tag-dispatch gated. OPEN.
+- **D-15** — `desktop/README.md:139-141` still lists `APPLE_ID` /
+  `APPLE_TEAM_ID` / `APPLE_PASSWORD`; the workflow still consumes the
+  App Store Connect key set (`desktop-build.yml:83`
+  `APPLE_API_KEY_BASE64`, `:116-120` `APPLE_CERTIFICATE` /
+  `APPLE_CERTIFICATE_PASSWORD` / `APPLE_SIGNING_IDENTITY` /
+  `APPLE_API_ISSUER` / `APPLE_API_KEY`) — the stale-list side is
+  unchanged; the `docs/desktop/signing.md` secret table remains the
+  correct side. OPEN.
+- **A-7** — `desktop/README.md:186` `com.kiln.desktop` ×3 vs
+  `tauri.conf.json:10` `"identifier": "com.eflorenzano.kiln.desktop"`
+  (plus the D-14-overlapping tag-push claim at :164). OPEN.
+
+### Per-file verdict table
+
+| File | Claims audited | Verdict |
+|---|---|---|
+| desktop/README.md | ~62 | **1 DRIFTED** (F189-2) + 1 UNRESOLVED (asset sizes, external) — otherwise CONSISTENT. Releases :13-21: `desktop-v0.2.16` tag exists; installer names/versions gate-enforced (`check_release_versions.py` gate 14 PASS: "desktop pins match desktop-v0.2.16"); the 5 byte sizes (8.5/4.5/6.8/8.8/85.7 MB) are UNRESOLVED (GitHub release assets, not repo-verifiable). :23 wrapper-only + auto-download "from the latest `kiln-v*` GitHub release" + 4 target slugs + SHA-256 ↔ `installer.rs:65-69` (slugs), `:521-561` ("Fetch the newest `kiln-v*` release", `starts_with("kiln-v")`), `:557` (`.sha256` asset), `:385` (`verify_sha256`). :27/:29 HF downloader ↔ `settings.html:556` (placeholder `Qwen/Qwen3.5-4B`), `hf_download.rs:8` (`app_data_dir()/models/<sanitized_repo>/`), `settings.html:1207-1222` (auto-fill on `hf-download-done`), "click Save to apply" (`:802`). :31-32 signed+notarized DMG ↔ `desktop-build.yml:101-121` (codesign env), `:164-195` (notarytool + staple + `gh release upload --clobber`). :33 `127.0.0.1:8420` + shared contract ↔ `contracts/runtime-defaults-v1.json:4/:6`, `runtime_defaults.rs:1-2`, `settings.rs:152`; saved port = user override (load path fills only missing fields). :35-46 What-ships bullets all live: supervisor ring buffer + backoff (`supervisor.rs` VecDeque, `:332` "Exponential backoff capped at 30s"), 5 tray states (`tray.rs:33-37`), right-click menu (`:57-73`, superset of cited items), dashboard toolbar pills + `/ui/` iframe (`dashboard.html:87-119`), all 11 settings fields present by id, log viewer clear + auto-scroll (`logs.html:225`/`:406`), polling endpoints (`poller.rs:14/:49/:75`), auto-start default on (`settings.rs:163`), launch-at-login LaunchAgent (`main.rs:20` `MacosLauncher`), PNG/ICO/ICNS (`icons/` + `tauri.conf.json` bundle.icon), CI matrix (`desktop-build.yml:20-28` — cited set is a true subset). :50-62 screenshots: 3 PNGs exist. :66-70 speculative contract ↔ `settings.rs:132/:773` (legacy value → off), `:928-930` (child TOML forces `speculative.method = "off"`), server `config.rs:5486-5491` (`validate_for_serving` bails on any method ≠ Off), `cli.rs:1976` (called at serve start), `main.rs:894` (`load_mtp: false`). :94-96 durability ↔ `settings.rs:737` (`.bak`), `:741` (`.invalid`), `:104` (newer-schema message), `:300` (auto-start suppressed). :98-134 build section ↔ `tauri.conf.json` bundle.targets + `minimumSystemVersion: 11.0` + aarch64 target; standard Tauri/Xcode procedures. :136-141 code-signing env list → **D-15 queued** (not re-raised). :145-149 menu-bar/NSStatusItem = valid `tray-icon` crate behavior. :150-159 layout: every cited path `test -e` OK. :162-164 CI → **D-14 queued** (not re-raised); publish job + aarch64 claims OK. :166-184 troubleshooting: :170 → **F189-2**; :171 model-path flow ✓; :174 CUDA driver gate (`main.rs:612` `cuda_driver_too_old`); :176 port 8420 ✓; :178 recovery semantics ✓; :180 crash loop + Ctrl/Cmd+L (`dashboard.html:819-825`) ✓; :182-184 uninstall incl. `sudo dpkg -r kiln-desktop` ✓ (tauri-bundler deb package = kebab-case product name). :186 app-data dir → **A-7 queued** (not re-raised) |
+| desktop/CHANGELOG.md | 15 entries + dates | CONSISTENT (honest history). 15 entries ↔ all 15 `desktop-v*` tags (no unexplained tag, no entry without a tag). Per-entry claim check against `git log` evidence at each tag: v0.2.16 (`a9a277838`), v0.2.15 (`955928a23`), v0.2.14 (`bab2cfc2d`), v0.2.2 (`d58184c30`), v0.2.1 (`7906c318b`), v0.2.0 (`fd194746d`), v0.1.15 (`e7294f802`), v0.1.14 (`0b55889e7`), v0.1.13 (`1a774b525`), v0.1.12 (`93c2e18c8`), v0.1.11 (`8b8d1d0e7`), v0.1.10 (`0497252a9`), v0.1.9 (`d8b6c2499`), v0.1.8 (`340e0a8d8`), v0.1.7 (`a6a9554a0`). v0.2.2's "prefix-cache, Metal/CUDA fusion, MTP audit, dependency, and governance work" = root `CHANGELOG.md:1848+` kiln-v0.2.2 section ("radix prefix cache reuse path, more Metal/CUDA decode fusions, governance docs, and dependency hygiene"). **v0.2.0 date (initially flagged, REJECTED)**: `desktop/CHANGELOG.md:97` "2026-04-24" is NOT stale — `desktop-v0.2.0` and `kiln-v0.2.0` are two lightweight tags on the **same commit** `fd194746d` (committed 2026-04-23) and the canonical server entry `CHANGELOG.md:1973` ("## kiln-v0.2.0 — 2026-04-24") uses the identical coordinated-release date; entry date = release date convention. v0.2.14 date 2026-05-10 = annotated-tag creation 2026-05-10 04:54Z (commit 2026-05-09) — same convention. All other 13 entry dates exact-match tag/commit dates |
+| docs/desktop/signing.md | ~20 | **1 DRIFTED** (F189-1) + 1 UNRESOLVED (secret state, external) — otherwise CONSISTENT. :10-14 auto sign/notarize/staple on `desktop-v*` tag dispatch ↔ `desktop-build.yml:101-121` + `:164-195`. :36 "already completed for this repo" → UNRESOLVED (repo secret state not observable in-repo; consumer side `:83/:116-120`). :40-47 secret table ↔ `APPLE_API_KEY_BASE64` (`:83`) + 5 secrets (`:116-120`) — the correct side of the D-15 contradiction (queued, not re-raised). :79 "valid for five years" ↔ Apple official support page ("Developer ID certificates are valid for 5 years from the date of creation", developer.apple.com/support/developer-id) — web-verified. :80-89 notarize/staple mechanics ↔ `:171-195` (`notarytool submit --key/--key-id/--issuer`, `xcrun stapler staple`, `gh release upload --clobber`); "damaged" / "Unnotarized Developer ID" ↔ `:95-99` workflow comment. :92-95 guard wording → **F189-1**. :96 non-tag dispatch has no release ↔ `:219` (publish job tag-gated) + non-tag artifact upload path ✓. :107-109 verification recipe (`xattr` spoof + `spctl -a -vv -t open`) = standard Apple workflow, consistent |
+
+### Findings
+
+Class vocabulary (round 159): STALE-CLAIM, BROKEN-REF, OWNER-DECISION, RISK,
+DRIFTED, UNRESOLVED (claim about an external source not pinned in this
+repository). Severity: MED = live misleading claim; LOW = FYI/minor
+precision.
+
+| ID | Title | Doc cite (verified at HEAD) | Canonical side (verified at HEAD) | Class | Sev | Gate-edit | One-line owner action |
+|---|---|---|---|---|---|---|---|
+| F189-1 | signing.md says both macOS signing steps are guarded on `runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')`, but the codesign build step is guarded on the tag prefix only | `docs/desktop/signing.md:92-95` (verbatim: "Both macOS signing steps are guarded on `runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')` so they only run when building for release (i.e. on a `desktop-v*` tag).") | `desktop-build.yml:101-102` — "Build (tauri-action, tagged release with codesign)" is guarded **only** on `if: startsWith(github.ref, 'refs/tags/desktop-v')`; `APPLE_*` env vars are passed to all platforms and the workflow comment `:104-106` says "macOS only — other platforms ignore these"; only the API-key write step (`:80-81`) and the notarize+staple step (`:171`) carry the combined `runner.os` guard. Effective signing behavior is still macOS-tag-only (so this is a guard-expression precision drift, not a behavior bug); the split into two mutually-exclusive Build steps is documented in the workflow comment `:89-100` and postdates the doc sentence | DRIFTED | LOW | no | Reword to "guarded on `desktop-v*` tag; the API-key write and notarize+staple steps are additionally gated on `runner.os == 'macOS'`" (or align the build step's `if:` with the other two — behavior-neutral) |
+| F189-2 | README troubleshooting quotes Settings UI labels that don't exist verbatim | `desktop/README.md:170` (verbatim: "then retry from Settings → "Check for updates / Re-download". As a manual fallback, grab the binary from … and point Settings → "Kiln binary path" at the unpacked file.") | `desktop/ui/settings.html:421` — the section label is **"Kiln binary"** (not "Kiln binary path"); the buttons are **"Check for Updates"** (`:430`) and **"Download Update"** (`:432`), with **"Retry Download"** appearing only as the dynamic failure state (`:1577`); no "Re-download" label exists anywhere in the UI | DRIFTED | LOW | no | Update the quoted labels to the actual UI strings ("Check for Updates" / "Download Update"; "Kiln binary") |
+
+**UNRESOLVED (external state — no in-repo fix possible; not queued).**
+
+| File:line | Claim | Why UNRESOLVED |
+|---|---|---|
+| desktop/README.md:17-21 | release asset byte sizes (8.5/4.5/6.8/8.8/85.7 MB) | GitHub release assets are external objects; asset *names/versions* are gate-enforced (gate 14 PASS) but byte sizes can't be verified from the repo |
+| docs/desktop/signing.md:36 | "Per Apple Developer Program seat — already completed for this repo" | repo secret state isn't observable from the repository (the workflow-side consumer list is verified at `desktop-build.yml:83/:116-120`) |
+
+**Totals.** 3/3 files audited; ~115 claims: **111 CONSISTENT,
+2 DRIFTED (F189-1, F189-2 — both LOW)**, 0 STALE-CLAIM, 0 BROKEN-REF
+(all path-like links resolve: `../QUICKSTART.md`,
+`../docs/desktop/signing.md`, the 3 screenshot PNGs,
+`../contracts/runtime-defaults-v1.json`, `tauri.conf.json`,
+`.github/workflows/desktop-build.yml` — `test -e` OK), 2 UNRESOLVED
+(external). The one candidate STALE-CLAIM (v0.2.0 date) was rejected on
+cross-check against the canonical coordinated-release history (same commit
+`fd194746d`, same 2026-04-24 date in root `CHANGELOG.md:1973`). Three
+already-queued rows re-verified still OPEN (D-14, D-15, A-7). 2 findings;
+no gate/workflow edit required.
+
+**Owner-queue delta: +2 (F189-1 LOW, F189-2 LOW).** Cumulative owner-
+queue items: 68 (after round 188) + 2 = **70 cumulative owner-queue
+items**.
+
+### Gate-edit flag summary
+
+| bucket | findings |
+|---|---|
+| fix requires a gate/workflow edit | none (F189-1 *could* instead be fixed workflow-side by adding `runner.os == 'macOS'` to the tagged Build step's `if:`, but that is a workflow edit — report-only, left to the owner) |
+| no gate edit | F189-1 (guard-sentence reword in owner-managed prose), F189-2 (quoted UI labels reword in owner-managed prose) |
+
+### Standing gates (17/17 pass — literal CI commands, run before the
+ledger append)
+
+| # | gate (literal command) | verdict |
+|---|---|---|
+| 1 | `python3 scripts/check_repository_artifacts.py` | PASS — "repository artifact policy passed: 4564 tracked paths, 119995766 bytes; CSV <= 1048576, each file <= 10485760" (byte figure moves with this append; post-commit re-run confirms) |
+| 2 | `python3 scripts/check_production_file_budget.py` | PASS — "production file budget passed: 646 files, 5000-line default, 14 reviewed exceptions" |
+| 3 | `python3 scripts/check_runtime_env_contract.py --check` | PASS — "runtime environment contract matches (448 reads, 19 process mutations; 0 runtime migration reads)" |
+| 4 | `python3 scripts/check_source_parsing_tests.py` | PASS — "source-parsing inventory matches (0 tests, 0 reads, 0 text assertions)" |
+| 5 | `python3 scripts/check_config_schema.py --self-test` | PASS — "configuration schema contract passed: 117 canonical fields, 3 dynamic templates, 112 canonical environment overrides, 0 compatibility aliases, 1 profile gates, 0 executable retired environment references" |
+| 6 | `python3 scripts/check_openenv_contract.py --self-test` | PASS — "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match" |
+| 7 | `python3 scripts/check_http_api_contract.py --self-test` | PASS — "HTTP API contract passed: 111 paths, 125 operations ({'DELETE': 13, 'GET': 59, 'POST': 52, 'PUT': 1}), 144 payload components (144 complete, 0 migration pending), 55 inference definitions, 172 observability definitions, 84 artifact definitions, 90 eval definitions, 164 control-plane definitions" |
+| 8 | `python3 scripts/generate_observability_schema.py --check` | PASS — "observability schema generation passed: 172 closed definitions" |
+| 9 | `python3 scripts/generate_artifact_schema.py --check` | PASS — "Artifact schema is current: 84 reachable definitions, 22 entrypoints" |
+| 10 | `python3 scripts/generate_eval_schema.py --check` | PASS — "Eval schema is current: 90 reachable definitions, 33 entrypoints" |
+| 11 | `python3 scripts/generate_control_plane_schema.py --check` | PASS — "Control-plane schema is current: 164 reachable definitions, 61 entrypoints" |
+| 12 | `node scripts/check_thinking_budget_contract.mjs` | PASS — "thinking-budget schema and documentation contract passed" |
+| 13 | `node scripts/check_runtime_defaults.mjs` | PASS — "runtime defaults v1 passed (127.0.0.1:8420; 21 server CLI URL fields)" |
+| 14 | `python3 scripts/check_release_versions.py` | PASS — "release version drift check passed: server examples avoid pinned 0.5.2; desktop pins match desktop-v0.2.16; CLI examples match cli.rs; docs/site local and manifest-generated links resolve" |
+| 15 | `node scripts/docs-site/build.mjs --validate-only` | PASS — "Documentation validated: 59 documents, 0 copied assets" |
+| 16 | `node scripts/docs-site/test/build.test.mjs` | PASS — "tests 11, pass 11, fail 0" (rc=0) |
+| 17 | `KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` | PASS (silent, rc=0) |
+
+### Commit
+
+`CLEANUP.md` append only (no other file touched); committed to local
+`main`, no push. Commit hash reported in the round 189 reply
+(single-commit pattern, post-commit gate re-run).
