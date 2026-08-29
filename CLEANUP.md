@@ -14456,3 +14456,23 @@ write (this ledger append) and re-run after commit)
 CLEANUP.md append only (no other file touched); committed to local
 `main`, no push. Commit hash reported in the round 185 reply
 (single-commit pattern, post-commit gate re-run).
+
+## Cleanup Agent (round 185c — orchestrator correction) — 2026-08-29
+
+**Correction to round 185, row F185-2 — canonical cite path (verdict
+unchanged).** R185's F185-2 cites `crates/kiln-cli/src/cli.rs:626`
+(+ `:339`). There is no `crates/kiln-cli/` crate. The live CLI source
+is `crates/kiln-server/src/cli.rs`:
+
+- `crates/kiln-server/src/cli.rs:626` — `name = "rollout-generate"`
+  (verified at HEAD `d4d449e19`).
+- `crates/kiln-server/src/cli.rs:339` (and :342/:345/:348) — the
+  `kiln rollout-generate …` doc examples.
+- No top-level `rollout` subcommand: `grep -rn '"rollout"'
+  --include=*.rs crates/` → only `openenv rollout` (sub-subcommand,
+  `openenv_cli/tests/mod.rs`).
+
+The F185-2 verdict holds (SKILL.md :410 / LAYOUT.md :506 document
+`kiln rollout`, which fails as an unknown subcommand; the command is
+`kiln rollout-generate`), with the canonical cite corrected to
+`crates/kiln-server/src/cli.rs:626/:339`.
