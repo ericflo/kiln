@@ -139,7 +139,7 @@ minijinja = { version = "2", features = ["json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 
 # Model loading
-safetensors = "0.7"
+safetensors = "0.8"
 memmap2 = "0.9"
 
 # Adapter packaging (tar.gz export)
