@@ -128,7 +128,7 @@ scripts/cargo-bounded.sh test --locked
 Run dependency policy when `Cargo.toml` or `Cargo.lock` changes:
 
 ```bash
-cargo deny check --all-features
+cargo deny --all-features check
 ```
 
 Install the pinned-compatible `cargo-deny` tool if it is not already available.
